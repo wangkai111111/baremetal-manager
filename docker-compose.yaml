@@ -158,7 +158,7 @@ services:
   minio:
     <<: *service-defaults
     # 可通过 MINIO_IMAGE 指向私有的 MinIO 兼容镜像仓库。
-    image: ${MINIO_IMAGE:-quay.io/minio/minio:latest}
+    image: ${MINIO_IMAGE:-minio/minio:latest}
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bmm-minio}
@@ -188,7 +188,7 @@ services:
 
   minio-init:
     <<: *service-defaults
-    image: ${MINIO_MC_IMAGE:-quay.io/minio/mc:latest}
+    image: ${MINIO_MC_IMAGE:-minio/mc:latest}
     restart: "no"
     depends_on:
       minio:
