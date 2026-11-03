@@ -1,0 +1,1499 @@
+openapi: 3.0.3
+info:
+  title: Baremetal Manager API
+  version: 1.0.0
+servers:
+  - url: /api/v1
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT 令牌认证
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API 密钥认证
+  schemas:
+    # ==================== 认证相关 ====================
+    Login:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string, description: 用户名}
+        password: {type: string, description: 密码}
+    LoginResponse:
+      type: object
+      properties:
+        token: {type: string}
+        token_type: {type: string, example: Bearer}
+        expires_at: {type: string, format: date-time}
+        user:
+          type: object
+          properties:
+            id: {type: integer}
+            username: {type: string}
+            role: {type: string}
+            project_ids: {type: array, items: {type: integer}}
+    # ==================== 通用响应 ====================
+    ErrorResponse:
+      type: object
+      properties:
+        error: {type: string, description: 错误信息}
+        code: {type: integer, description: 错误代码}
+    SuccessResponse:
+      type: object
+      properties:
+        message: {type: string, description: 操作结果消息}
+    # ==================== 资产相关 ====================
+    Asset:
+      type: object
+      properties:
+        id: {type: integer}
+        project_id: {type: integer}
+        name: {type: string}
+        hostname: {type: string}
+        serial_number: {type: string}
+        ip_address: {type: string}
+        mac_address: {type: string}
+        bmc_ip: {type: string}
+        bmc_user: {type: string}
+        status: {type: string, enum: [online, offline, error, provisioning, decommissioned]}
+        rack_id: {type: integer}
+        rack_position: {type: integer}
+        rack_height: {type: integer}
+        datacenter_id: {type: integer}
+        tags: {type: array, items: {type: string}}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AssetImport:
+      type: object
+      properties:
+        format: {type: string, enum: [csv, json], description: 导入格式}
+        data: {type: string, description: 导入数据内容}
+    ScanRange:
+      type: object
+      required: [start_ip, end_ip]
+      properties:
+        start_ip: {type: string, description: 扫描起始 IP}
+        end_ip: {type: string, description: 扫描结束 IP}
+        project_id: {type: integer}
+    MigrateRequest:
+      type: object
+      required: [target_project_id]
+      properties:
+        target_project_id: {type: integer, description: 目标项目 ID}
+    # ==================== 机房管理 ====================
+    Datacenter:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        location: {type: string}
+        contact: {type: string}
+        description: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    # ==================== 机柜管理 ====================
+    Rack:
+      type: object
+      properties:
+        id: {type: integer}
+        datacenter_id: {type: integer}
+        name: {type: string}
+        location: {type: string}
+        total_u: {type: integer, description: 总 U 数}
+        used_u: {type: integer, description: 已用 U 数}
+        power_capacity: {type: string, description: 电力容量}
+        status: {type: string, enum: [active, maintenance, decommissioned]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    # ==================== 标签管理 ====================
+    Tag:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        color: {type: string, description: 标签颜色}
+        project_id: {type: integer}
+    TagAssetsRequest:
+      type: object
+      required: [tag_ids]
+      properties:
+        tag_ids: {type: array, items: {type: integer}, description: 标签 ID 列表}
+    # ==================== 系统设置 ====================
+    Setting:
+      type: object
+      properties:
+        key: {type: string}
+        value: {type: string}
+        category: {type: string}
+        description: {type: string}
+        updated_at: {type: string, format: date-time}
+    SettingUpdate:
+      type: object
+      properties:
+        value: {type: string, description: 设置值}
+        description: {type: string, description: 设置描述}
+    # ==================== 用户管理 ====================
+    User:
+      type: object
+      properties:
+        id: {type: integer}
+        username: {type: string}
+        role: {type: string}
+        project_ids: {type: array, items: {type: integer}}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    UserUpdate:
+      type: object
+      properties:
+        role: {type: string, description: 用户角色}
+        project_ids: {type: array, items: {type: integer}, description: 所属项目 ID 列表}
+    # ==================== 角色管理 ====================
+    Role:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        description: {type: string}
+        permissions: {type: array, items: {type: string}}
+    # ==================== 项目成员 ====================
+    Member:
+      type: object
+      properties:
+        user_id: {type: integer}
+        username: {type: string}
+        role: {type: string}
+        joined_at: {type: string, format: date-time}
+    MemberAdd:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: {type: integer, description: 用户 ID}
+        role: {type: string, description: 成员角色}
+    # ==================== 装机模块 ====================
+    KickstartTemplate:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        os_type: {type: string, description: 操作系统类型}
+        content: {type: string, description: 模板内容}
+        project_id: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    InstallPlan:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        asset_ids: {type: array, items: {type: integer}}
+        image_id: {type: integer}
+        kickstart_template_id: {type: integer}
+        status: {type: string, enum: [pending, running, completed, failed]}
+        project_id: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    InstallPlanCreate:
+      type: object
+      required: [name, asset_ids, image_id]
+      properties:
+        name: {type: string, description: 装机计划名称}
+        asset_ids: {type: array, items: {type: integer}, description: 资产 ID 列表}
+        image_id: {type: integer, description: 镜像 ID}
+        kickstart_template_id: {type: integer, description: Kickstart 模板 ID}
+    # ==================== 网络增强 ====================
+    IPPool:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        network_id: {type: integer}
+        start_ip: {type: string}
+        end_ip: {type: string}
+        gateway: {type: string}
+        netmask: {type: string}
+        vlan_id: {type: integer}
+        project_id: {type: integer}
+    IPPoolCreate:
+      type: object
+      required: [name, start_ip, end_ip, network_id]
+      properties:
+        name: {type: string, description: IP 池名称}
+        start_ip: {type: string, description: 起始 IP}
+        end_ip: {type: string, description: 结束 IP}
+        gateway: {type: string, description: 网关}
+        netmask: {type: string, description: 子网掩码}
+        vlan_id: {type: integer, description: VLAN ID}
+        network_id: {type: integer, description: 关联网络 ID}
+    AutoAssignRequest:
+      type: object
+      properties:
+        count: {type: integer, description: 自动分配数量}
+        purpose: {type: string, description: 用途说明}
+    IPAllocationRelease:
+      type: object
+      properties:
+        reason: {type: string, description: 释放原因}
+    PXEConfig:
+      type: object
+      properties:
+        id: {type: integer}
+        project_id: {type: integer}
+        dhcp_enabled: {type: boolean}
+        tftp_enabled: {type: boolean}
+        pxe_subnet: {type: string}
+        next_server: {type: string}
+        filename: {type: string}
+        updated_at: {type: string, format: date-time}
+    PXEConfigUpdate:
+      type: object
+      properties:
+        dhcp_enabled: {type: boolean, description: 是否启用 DHCP}
+        tftp_enabled: {type: boolean, description: 是否启用 TFTP}
+        pxe_subnet: {type: string, description: PXE 子网}
+        next_server: {type: string, description: 下一跳服务器地址}
+        filename: {type: string, description: 启动文件名}
+    # ==================== 告警增强 ====================
+    AlertRule:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        metric: {type: string, description: 监控指标}
+        condition: {type: string, description: 触发条件}
+        threshold: {type: number, description: 阈值}
+        severity: {type: string, enum: [info, warning, critical]}
+        enabled: {type: boolean}
+        channel_ids: {type: array, items: {type: integer}}
+        project_id: {type: integer}
+        created_at: {type: string, format: date-time}
+    AlertRuleCreate:
+      type: object
+      required: [name, metric, condition, threshold]
+      properties:
+        name: {type: string, description: 规则名称}
+        metric: {type: string, description: 监控指标}
+        condition: {type: string, enum: [gt, lt, eq, gte, lte], description: 条件运算符}
+        threshold: {type: number, description: 阈值}
+        severity: {type: string, enum: [info, warning, critical], description: 严重程度}
+        enabled: {type: boolean, description: 是否启用}
+        channel_ids: {type: array, items: {type: integer}, description: 通知渠道 ID 列表}
+    AlertChannel:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        type: {type: string, enum: [wechat, dingtalk, webhook, email]}
+        config: {type: object, description: 渠道配置}
+        enabled: {type: boolean}
+        project_id: {type: integer}
+        created_at: {type: string, format: date-time}
+    AlertChannelCreate:
+      type: object
+      required: [name, type, config]
+      properties:
+        name: {type: string, description: 渠道名称}
+        type: {type: string, enum: [wechat, dingtalk, webhook, email], description: 渠道类型}
+        config: {type: object, description: 渠道配置详情}
+        enabled: {type: boolean, description: 是否启用}
+    AlertAcknowledge:
+      type: object
+      properties:
+        note: {type: string, description: 确认备注}
+    # ==================== 固件管理 ====================
+    Firmware:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        version: {type: string}
+        vendor: {type: string}
+        model: {type: string}
+        file_size: {type: integer}
+        checksum: {type: string}
+        project_id: {type: integer}
+        created_at: {type: string, format: date-time}
+    FirmwareUpgrade:
+      type: object
+      required: [firmware_id, asset_ids]
+      properties:
+        firmware_id: {type: integer, description: 固件 ID}
+        asset_ids: {type: array, items: {type: integer}, description: 目标资产 ID 列表}
+    FirmwareProgress:
+      type: object
+      properties:
+        task_id: {type: integer}
+        status: {type: string, enum: [pending, running, completed, failed]}
+        progress: {type: integer, description: 进度百分比}
+        message: {type: string}
+        updated_at: {type: string, format: date-time}
+    # ==================== 传感器 ====================
+    SensorData:
+      type: object
+      properties:
+        id: {type: integer}
+        asset_id: {type: integer}
+        sensor_type: {type: string, description: 传感器类型}
+        value: {type: number, description: 传感器值}
+        unit: {type: string, description: 单位}
+        status: {type: string}
+        collected_at: {type: string, format: date-time}
+    # ==================== 镜像增强 ====================
+    Image:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        os_type: {type: string}
+        file_size: {type: integer}
+        checksum: {type: string}
+        project_id: {type: integer}
+        created_at: {type: string, format: date-time}
+
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+paths:
+  /auth/login:
+    post:
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Login'}
+      responses:
+        '200':
+          description: JWT and user details
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginResponse'}
+  /auth/me:
+    get:
+      responses: {'200': {description: Current user}}
+  /projects:
+    get:
+      responses: {'200': {description: Accessible projects}}
+    post:
+      responses: {'201': {description: Created project}}
+  /projects/{projectId}/assets:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Assets}}
+    post:
+      responses: {'201': {description: Created asset}}
+  /projects/{projectId}/assets/{assetId}:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}, {name: assetId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Asset}}
+    put:
+      responses: {'200': {description: Updated asset}}
+    delete:
+      responses: {'204': {description: Deleted}}
+  /projects/{projectId}/assets/{assetId}/actions:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}, {name: assetId, in: path, required: true, schema: {type: integer}}]
+    post:
+      description: 'Submit power, inspect, reinstall or firmware task; POST JSON {kind,action,image_id}'
+      responses: {'202': {description: Queued task}}
+  /projects/{projectId}/assets/{assetId}/monitor:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}, {name: assetId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Redfish or IPMI system status}}
+  /projects/{projectId}/assets/{assetId}/sol:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}, {name: assetId, in: path, required: true, schema: {type: integer}}]
+    get:
+      description: 'WebSocket; Sec-WebSocket-Protocol: bearer, JWT; configured SOL_ALLOWED_ORIGIN required.'
+      responses: {'101': {description: WebSocket upgraded}}
+  /projects/{projectId}/tasks:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Tasks}}
+  /projects/{projectId}/tasks/{id}:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}, {name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Task}}
+  /projects/{projectId}/images:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Images}}
+    post:
+      description: Multipart upload with field file
+      responses: {'201': {description: Image}}
+  /projects/{projectId}/images/{id}/download:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}, {name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Image stream}}
+  /projects/{projectId}/alerts:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Alerts}}
+  /projects/{projectId}/alerts/{id}/resolve:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}, {name: id, in: path, required: true, schema: {type: integer}}]
+    post:
+      responses: {'204': {description: Resolved}}
+  /projects/{projectId}/audit:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Audit records}}
+  /projects/{projectId}/networks:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Networks}}
+    post:
+      responses: {'201': {description: Network}}
+  /projects/{projectId}/ip-allocations:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Allocations}}
+    post:
+      responses: {'201': {description: Allocation}}
+  /projects/{projectId}/members:
+    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
+    get:
+      responses: {'200': {description: Memberships}}
+    post:
+      responses: {'200': {description: Membership upsert}}
+
+  # ==================== 机房管理 ====================
+  /projects/{projectId}/datacenters:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取机房列表
+      tags: [机房管理]
+      responses:
+        '200':
+          description: 机房列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Datacenter'}
+    post:
+      summary: 创建机房
+      tags: [机房管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Datacenter'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Datacenter'}
+
+  /projects/{projectId}/datacenters/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取机房详情
+      tags: [机房管理]
+      responses:
+        '200':
+          description: 机房详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Datacenter'}
+    put:
+      summary: 更新机房
+      tags: [机房管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Datacenter'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Datacenter'}
+    delete:
+      summary: 删除机房
+      tags: [机房管理]
+      responses:
+        '204':
+          description: 删除成功
+
+  # ==================== 机柜管理 ====================
+  /projects/{projectId}/racks:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取机柜列表
+      tags: [机柜管理]
+      responses:
+        '200':
+          description: 机柜列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Rack'}
+    post:
+      summary: 创建机柜
+      tags: [机柜管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Rack'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Rack'}
+
+  /projects/{projectId}/racks/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取机柜详情
+      tags: [机柜管理]
+      responses:
+        '200':
+          description: 机柜详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Rack'}
+    put:
+      summary: 更新机柜
+      tags: [机柜管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Rack'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Rack'}
+    delete:
+      summary: 删除机柜
+      tags: [机柜管理]
+      responses:
+        '204':
+          description: 删除成功
+
+  # ==================== 标签管理 ====================
+  /projects/{projectId}/tags:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取标签列表
+      tags: [标签管理]
+      responses:
+        '200':
+          description: 标签列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Tag'}
+    post:
+      summary: 创建标签
+      tags: [标签管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Tag'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tag'}
+
+  /projects/{projectId}/tags/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    put:
+      summary: 更新标签
+      tags: [标签管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Tag'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tag'}
+    delete:
+      summary: 删除标签
+      tags: [标签管理]
+      responses:
+        '204':
+          description: 删除成功
+
+  /projects/{projectId}/assets/{assetId}/tags:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: assetId, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 为资产添加标签
+      tags: [标签管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TagAssetsRequest'}
+      responses:
+        '200':
+          description: 添加成功
+    delete:
+      summary: 移除资产标签
+      tags: [标签管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TagAssetsRequest'}
+      responses:
+        '204':
+          description: 移除成功
+
+  # ==================== 系统设置 ====================
+  /settings:
+    get:
+      summary: 获取所有系统设置
+      tags: [系统设置]
+      responses:
+        '200':
+          description: 设置列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Setting'}
+
+  /settings/category/{category}:
+    parameters:
+      - {name: category, in: path, required: true, schema: {type: string}}
+    get:
+      summary: 按分类获取设置
+      tags: [系统设置]
+      responses:
+        '200':
+          description: 该分类下的设置列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Setting'}
+
+  /settings/{key}:
+    parameters:
+      - {name: key, in: path, required: true, schema: {type: string}}
+    put:
+      summary: 更新设置项
+      tags: [系统设置]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SettingUpdate'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Setting'}
+
+  # ==================== 用户管理 ====================
+  /users:
+    get:
+      summary: 获取用户列表
+      tags: [用户管理]
+      responses:
+        '200':
+          description: 用户列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/User'}
+
+  /users/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    put:
+      summary: 更新用户信息
+      tags: [用户管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserUpdate'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+    delete:
+      summary: 删除用户
+      tags: [用户管理]
+      responses:
+        '204':
+          description: 删除成功
+
+  # ==================== 角色管理 ====================
+  /roles:
+    get:
+      summary: 获取角色列表
+      tags: [角色管理]
+      responses:
+        '200':
+          description: 角色列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Role'}
+
+  /roles/permissions:
+    get:
+      summary: 获取所有权限列表
+      tags: [角色管理]
+      responses:
+        '200':
+          description: 权限列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {type: string}
+
+  # ==================== 项目成员管理 ====================
+  /projects/{projectId}/members/list:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取项目成员列表
+      tags: [项目成员]
+      responses:
+        '200':
+          description: 成员列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Member'}
+
+  /projects/{projectId}/members/add:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 添加项目成员
+      tags: [项目成员]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MemberAdd'}
+      responses:
+        '201':
+          description: 添加成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Member'}
+
+  /projects/{projectId}/members/{userId}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: userId, in: path, required: true, schema: {type: integer}}
+    delete:
+      summary: 移除项目成员
+      tags: [项目成员]
+      responses:
+        '204':
+          description: 移除成功
+
+  # ==================== 装机模块 ====================
+  /projects/{projectId}/kickstart-templates:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取 Kickstart 模板列表
+      tags: [装机模块]
+      responses:
+        '200':
+          description: 模板列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/KickstartTemplate'}
+    post:
+      summary: 创建 Kickstart 模板
+      tags: [装机模块]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/KickstartTemplate'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KickstartTemplate'}
+
+  /projects/{projectId}/kickstart-templates/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取 Kickstart 模板详情
+      tags: [装机模块]
+      responses:
+        '200':
+          description: 模板详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KickstartTemplate'}
+    put:
+      summary: 更新 Kickstart 模板
+      tags: [装机模块]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/KickstartTemplate'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KickstartTemplate'}
+    delete:
+      summary: 删除 Kickstart 模板
+      tags: [装机模块]
+      responses:
+        '204':
+          description: 删除成功
+
+  /projects/{projectId}/install-plans:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取装机计划列表
+      tags: [装机模块]
+      responses:
+        '200':
+          description: 装机计划列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/InstallPlan'}
+    post:
+      summary: 创建装机计划
+      tags: [装机模块]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InstallPlanCreate'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstallPlan'}
+
+  /projects/{projectId}/install-plans/{id}/retry:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    put:
+      summary: 重试装机计划
+      tags: [装机模块]
+      responses:
+        '200':
+          description: 重试成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstallPlan'}
+
+  # ==================== 网络增强 ====================
+  /projects/{projectId}/ip-pools:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取 IP 池列表
+      tags: [网络增强]
+      responses:
+        '200':
+          description: IP 池列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/IPPool'}
+    post:
+      summary: 创建 IP 池
+      tags: [网络增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/IPPoolCreate'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IPPool'}
+
+  /projects/{projectId}/ip-pools/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    put:
+      summary: 更新 IP 池
+      tags: [网络增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/IPPoolCreate'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IPPool'}
+    delete:
+      summary: 删除 IP 池
+      tags: [网络增强]
+      responses:
+        '204':
+          description: 删除成功
+
+  /projects/{projectId}/networks/{networkId}/auto-assign:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: networkId, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 自动分配 IP 地址
+      tags: [网络增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AutoAssignRequest'}
+      responses:
+        '200':
+          description: 分配成功
+
+  /projects/{projectId}/ip-allocations/{id}/release:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 释放 IP 分配
+      tags: [网络增强]
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/IPAllocationRelease'}
+      responses:
+        '204':
+          description: 释放成功
+
+  /projects/{projectId}/pxe-config:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取 PXE 配置
+      tags: [网络增强]
+      responses:
+        '200':
+          description: PXE 配置
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PXEConfig'}
+    put:
+      summary: 更新 PXE 配置
+      tags: [网络增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PXEConfigUpdate'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PXEConfig'}
+
+  # ==================== 告警增强 ====================
+  /projects/{projectId}/alert-rules:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取告警规则列表
+      tags: [告警增强]
+      responses:
+        '200':
+          description: 告警规则列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/AlertRule'}
+    post:
+      summary: 创建告警规则
+      tags: [告警增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertRuleCreate'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertRule'}
+
+  /projects/{projectId}/alert-rules/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取告警规则详情
+      tags: [告警增强]
+      responses:
+        '200':
+          description: 告警规则详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertRule'}
+    put:
+      summary: 更新告警规则
+      tags: [告警增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertRuleCreate'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertRule'}
+    delete:
+      summary: 删除告警规则
+      tags: [告警增强]
+      responses:
+        '204':
+          description: 删除成功
+
+  /projects/{projectId}/alert-channels:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取告警渠道列表
+      tags: [告警增强]
+      responses:
+        '200':
+          description: 告警渠道列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/AlertChannel'}
+    post:
+      summary: 创建告警渠道
+      tags: [告警增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertChannelCreate'}
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertChannel'}
+
+  /projects/{projectId}/alert-channels/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    put:
+      summary: 更新告警渠道
+      tags: [告警增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertChannelCreate'}
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AlertChannel'}
+    delete:
+      summary: 删除告警渠道
+      tags: [告警增强]
+      responses:
+        '204':
+          description: 删除成功
+
+  /projects/{projectId}/alert-channels/{id}/test:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 测试告警渠道
+      tags: [告警增强]
+      responses:
+        '200':
+          description: 测试成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SuccessResponse'}
+
+  /projects/{projectId}/alerts/{id}/acknowledge:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 确认告警
+      tags: [告警增强]
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AlertAcknowledge'}
+      responses:
+        '200':
+          description: 确认成功
+
+  # ==================== 固件管理 ====================
+  /projects/{projectId}/firmware:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取固件列表
+      tags: [固件管理]
+      responses:
+        '200':
+          description: 固件列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Firmware'}
+
+  /projects/{projectId}/firmware/upload:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 上传固件文件
+      tags: [固件管理]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: {type: string, format: binary, description: 固件文件}
+                name: {type: string, description: 固件名称}
+                version: {type: string, description: 固件版本}
+                vendor: {type: string, description: 厂商}
+                model: {type: string, description: 型号}
+      responses:
+        '201':
+          description: 上传成功
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Firmware'}
+
+  /projects/{projectId}/firmware/upgrade:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 执行固件升级
+      tags: [固件管理]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/FirmwareUpgrade'}
+      responses:
+        '202':
+          description: 升级任务已提交
+
+  /projects/{projectId}/firmware/{id}/progress:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 查询固件升级进度
+      tags: [固件管理]
+      responses:
+        '200':
+          description: 升级进度
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FirmwareProgress'}
+
+  # ==================== 资产增强 ====================
+  /projects/{projectId}/assets/import:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 批量导入资产
+      tags: [资产增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AssetImport'}
+      responses:
+        '200':
+          description: 导入结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported: {type: integer, description: 成功导入数量}
+                  failed: {type: integer, description: 失败数量}
+                  errors: {type: array, items: {type: string}}
+
+  /projects/{projectId}/assets/scan-range:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 扫描 IP 范围内的资产
+      tags: [资产增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScanRange'}
+      responses:
+        '202':
+          description: 扫描任务已提交
+
+  /projects/{projectId}/assets/{id}/qrcode:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取资产二维码
+      tags: [资产增强]
+      responses:
+        '200':
+          description: 二维码图片
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+
+  /projects/{projectId}/assets/{id}/migrate:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 迁移资产到其他项目
+      tags: [资产增强]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MigrateRequest'}
+      responses:
+        '200':
+          description: 迁移成功
+
+  /projects/{projectId}/assets/enhanced:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取增强资产列表（含关联信息）
+      tags: [资产增强]
+      parameters:
+        - {name: page, in: query, schema: {type: integer, default: 1}}
+        - {name: per_page, in: query, schema: {type: integer, default: 20}}
+        - {name: search, in: query, schema: {type: string}, description: 搜索关键字}
+        - {name: status, in: query, schema: {type: string}, description: 状态筛选}
+        - {name: datacenter_id, in: query, schema: {type: integer}, description: 机房筛选}
+        - {name: rack_id, in: query, schema: {type: integer}, description: 机柜筛选}
+        - {name: tag, in: query, schema: {type: string}, description: 标签筛选}
+      responses:
+        '200':
+          description: 增强资产列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: {type: integer}
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Asset'}
+
+  # ==================== 传感器 ====================
+  /projects/{projectId}/assets/{assetId}/sensors:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: assetId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取资产传感器列表
+      tags: [传感器]
+      responses:
+        '200':
+          description: 传感器列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/SensorData'}
+
+  /projects/{projectId}/assets/{assetId}/sensors/latest:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: assetId, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 获取资产最新传感器数据
+      tags: [传感器]
+      responses:
+        '200':
+          description: 最新传感器数据
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/SensorData'}
+
+  # ==================== 开放 API ====================
+  /open/assets:
+    get:
+      summary: 开放接口 - 获取资产列表
+      tags: [开放API]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - {name: page, in: query, schema: {type: integer, default: 1}}
+        - {name: per_page, in: query, schema: {type: integer, default: 20}}
+      responses:
+        '200':
+          description: 资产列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: {type: integer}
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Asset'}
+
+  /open/assets/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    get:
+      summary: 开放接口 - 获取资产详情
+      tags: [开放API]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: 资产详情
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Asset'}
+
+  /open/assets/{id}/power:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 开放接口 - 电源控制
+      tags: [开放API]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: {type: string, enum: [on, off, cycle, reset], description: 电源操作}
+      responses:
+        '202':
+          description: 操作已提交
+
+  /open/alerts:
+    get:
+      summary: 开放接口 - 获取告警列表
+      tags: [开放API]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - {name: page, in: query, schema: {type: integer, default: 1}}
+        - {name: per_page, in: query, schema: {type: integer, default: 20}}
+        - {name: severity, in: query, schema: {type: string}, description: 严重程度筛选}
+      responses:
+        '200':
+          description: 告警列表
+
+  /open/assets/{id}/reinstall:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    post:
+      summary: 开放接口 - 触发重装系统
+      tags: [开放API]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [image_id]
+              properties:
+                image_id: {type: integer, description: 镜像 ID}
+                kickstart_template_id: {type: integer, description: Kickstart 模板 ID}
+      responses:
+        '202':
+          description: 重装任务已提交
+
+  # ==================== 镜像增强 ====================
+  /projects/{projectId}/images/{id}:
+    parameters:
+      - {name: projectId, in: path, required: true, schema: {type: integer}}
+      - {name: id, in: path, required: true, schema: {type: integer}}
+    delete:
+      summary: 删除镜像
+      tags: [镜像管理]
+      responses:
+        '204':
+          description: 删除成功

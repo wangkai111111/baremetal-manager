@@ -1,0 +1,308 @@
+name: baremetal-manager
+
+# 通用安全与资源限制；生产环境应结合节点容量调整。
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  init: true
+  networks:
+    - app-net
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-backend-common: &backend-common
+  <<: *service-defaults
+  # 本地构建镜像，也可通过 BACKEND_IMAGE 指向预构建镜像。
+  build:
+    context: ./backend
+  image: ${BACKEND_IMAGE:-baremetal-manager/backend:latest}
+  environment:
+    DATABASE_URL: ${DATABASE_URL:-postgresql://bmm:change-me@postgres:5432/bmm}
+    REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to at least 32 random characters}
+    BMC_ENCRYPTION_KEY: ${BMC_ENCRYPTION_KEY:?Set BMC_ENCRYPTION_KEY to a 32-byte key}
+    SOL_ALLOWED_ORIGIN: ${SOL_ALLOWED_ORIGIN:-http://localhost:8080}
+    BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
+    BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD}
+    MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-bmm-minio}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change-me-minio}
+    MINIO_BUCKET: ${MINIO_BUCKET:-baremetal-images}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+
+    # 种子数据控制
+    SEED_DATA: "${SEED_DATA:-true}"
+
+    # 告警推送配置
+    ALERT_WECHAT_WEBHOOK: ${ALERT_WECHAT_WEBHOOK:-}
+    ALERT_DINGTALK_WEBHOOK: ${ALERT_DINGTALK_WEBHOOK:-}
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-}
+    ALERT_SMTP_PORT: "${ALERT_SMTP_PORT:-587}"
+    ALERT_SMTP_USER: ${ALERT_SMTP_USER:-}
+    ALERT_SMTP_PASS: ${ALERT_SMTP_PASS:-}
+
+    # 传感器采集配置
+    SENSOR_INTERVAL: "${SENSOR_INTERVAL:-300}"
+
+    # BMC 并发限流
+    BMC_MAX_CONCURRENT: "${BMC_MAX_CONCURRENT:-10}"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+  expose:
+    - "8000"
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  healthcheck:
+    # Alpine 运行镜像自带 BusyBox wget，可直接检查健康端点。
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 30s
+  deploy:
+    resources:
+      limits:
+        cpus: "1.00"
+        memory: 1G
+      reservations:
+        memory: 256M
+
+x-frontend-common: &frontend-common
+  <<: *service-defaults
+  build:
+    context: ./frontend
+  image: ${FRONTEND_IMAGE:-baremetal-manager/frontend:latest}
+  expose:
+    - "8080"
+  read_only: true
+  tmpfs:
+    - /tmp:size=32m,mode=1777
+    - /var/cache/nginx:size=64m,mode=0755
+    - /var/run:size=8m,mode=0755
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 15s
+  deploy:
+    resources:
+      limits:
+        cpus: "0.50"
+        memory: 256M
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bmm}
+      POSTGRES_USER: ${POSTGRES_USER:-bmm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./deploy/postgres/healthcheck.sh:/usr/local/bin/bmm-pg-healthcheck:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bmm-pg-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  redis:
+    <<: *service-defaults
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
+
+  minio:
+    <<: *service-defaults
+    # 可通过 MINIO_IMAGE 指向私有的 MinIO 兼容镜像仓库。
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:latest}
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bmm-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio}
+    volumes:
+      - minio-data:/data
+    expose:
+      - "9000"
+      - "9001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 2G
+        reservations:
+          memory: 256M
+
+  minio-init:
+    <<: *service-defaults
+    image: ${MINIO_MC_IMAGE:-quay.io/minio/mc:latest}
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bmm-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio}
+      MINIO_BUCKET: ${MINIO_BUCKET:-baremetal-images}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+    volumes:
+      - ./deploy/minio/init-bucket.sh:/usr/local/bin/init-bucket:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/init-bucket"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+  backend-1:
+    <<: *backend-common
+
+  backend-2:
+    <<: *backend-common
+
+  worker:
+    <<: *backend-common
+    # 后端镜像入口统一使用 /app/server，worker 作为命令参数。
+    command: ${WORKER_COMMAND:-worker}
+    expose: []
+    healthcheck:
+      disable: true
+
+  scheduler:
+    <<: *backend-common
+    command: ${SCHEDULER_COMMAND:-scheduler}
+    expose: []
+    healthcheck:
+      disable: true
+
+  frontend-1:
+    <<: *frontend-common
+    depends_on:
+      backend-1:
+        condition: service_healthy
+      backend-2:
+        condition: service_healthy
+
+  frontend-2:
+    <<: *frontend-common
+    depends_on:
+      backend-1:
+        condition: service_healthy
+      backend-2:
+        condition: service_healthy
+
+  lb:
+    <<: *service-defaults
+    image: ${HAPROXY_IMAGE:-haproxy:3.0-alpine}
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${HAPROXY_STATS_PORT:-8404}:8404"
+    volumes:
+      - ./deploy/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      backend-1:
+        condition: service_healthy
+      backend-2:
+        condition: service_healthy
+      frontend-1:
+        condition: service_healthy
+      frontend-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /var/lib/haproxy:size=16m,mode=0755
+      - /tmp:size=16m,mode=1777
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 256M
+
+  # 可选 DHCP/TFTP 单机实验配置：docker compose --profile provisioning up -d。
+  # 多机生产场景通常应使用 host 网络或独立物理 DHCP 中继，并限制监听网卡。
+  dhcp-tftp:
+    image: ${DNSMASQ_IMAGE:-alpine:3.20}
+    profiles: ["provisioning"]
+    restart: unless-stopped
+    network_mode: host
+    command: ["sh", "-c", "apk add --no-cache dnsmasq && exec dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq.d/bmm.conf"]
+    volumes:
+      - ./deploy/dnsmasq/dnsmasq.conf:/etc/dnsmasq.d/bmm.conf:ro
+      - tftp-data:/var/lib/tftpboot
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  app-net:
+    driver: bridge
+    internal: false
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  tftp-data:

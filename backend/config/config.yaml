@@ -1,0 +1,47 @@
+# Baremetal Manager 开发环境配置
+# 所有配置项均可通过同名环境变量覆盖（环境变量优先级更高）
+
+server:
+  port: 8000
+  mode: debug  # debug / release
+
+database:
+  url: "postgres://bmm:bmm@postgres:5432/bmm?sslmode=disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+
+redis:
+  url: "redis://redis:6379/0"
+
+minio:
+  endpoint: "minio:9000"
+  access_key: "minioadmin"
+  secret_key: "minioadmin"
+  bucket: "baremetal-images"
+  use_ssl: false
+
+jwt:
+  secret: "dev-only-jwt-secret-must-be-at-least-32-chars"
+  expiry_hour: 12
+
+bmc:
+  timeout: 12          # Redfish 请求超时（秒）
+  max_concurrent: 10   # BMC 并发限流
+  tls_skip_verify: true
+
+sol:
+  allowed_origin: "http://localhost:8080"
+  session_timeout: 15   # 会话超时（分钟）
+  log_enabled: true
+
+alert:
+  deduplicate_window: 300  # 去重窗口（秒）
+  default_threshold:
+    cpu_temp: 85.0
+    fan_speed: 1000.0
+    disk_health: 90.0
+
+pxe:
+  dhcp_range: "10.0.0.100-10.0.0.200"
+  tftp_root: "/var/lib/tftpboot"
+  http_base: "http://localhost:8080"
