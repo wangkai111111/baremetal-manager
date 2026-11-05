@@ -77,12 +77,8 @@ api.interceptors.request.use(config => {
   if (
     projectId &&
     config.url &&
-    /^\/(assets|tasks|images|alerts|audit-logs|subnets|ip-addresses|members)(\/|$)/.test(config.url)
+    /^\/(assets|tasks|images|alerts|audit|networks|ip-allocations|members|datacenters|racks|tags|alert-rules|alert-channels|kickstart-templates|ip-pools|firmware|install-plans|sol-sessions|pxe-config)(\/|$)/.test(config.url)
   ) {
-    config.url = config.url
-      .replace(/^\/audit-logs(?=\/|$)/, '/audit')
-      .replace(/^\/subnets(?=\/|$)/, '/networks')
-      .replace(/^\/ip-addresses(?=\/|$)/, '/ip-allocations')
     config.url = `/projects/${encodeURIComponent(projectId)}${config.url}`
   }
   return config

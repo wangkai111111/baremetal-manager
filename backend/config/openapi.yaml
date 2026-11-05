@@ -1497,3 +1497,28 @@ paths:
       responses:
         '204':
           description: 删除成功
+
+  # ==================== 平台信息 ====================
+  /brand:
+    get:
+      summary: 获取平台品牌与主题配置
+      description: 公开接口，登录页与侧边栏读取平台名称、Logo、导航栏配色与应用设置。
+      security: []
+      tags: [平台信息]
+      responses:
+        '200':
+          description: 品牌与主题配置
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  platform_name: {type: string}
+                  platform_tagline: {type: string}
+                  logo_url: {type: string}
+                  nav_bg_color: {type: string}
+                  nav_text_color: {type: string}
+                  footer_text: {type: string}
+                  footer_visible: {type: boolean}
+                  login_notice: {type: string}
+

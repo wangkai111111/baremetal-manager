@@ -1,14 +1,12 @@
 <script setup lang="ts">
-// 固件升级任务页面 — 管理固件版本与批量升级
+// 固件升级任务页面 — 上传固件与查看升级任务记录
 import { computed, ref, watch } from 'vue'
 import {
   NButton,
   NDataTable,
-  NModal,
   NTag,
   NProgress,
   NUpload,
-  NSelect,
   useMessage
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -26,16 +24,8 @@ const loading = ref(false)
 const page = ref(1)
 const pageSize = 20
 
-// === 批量升级弹窗状态 ===
-const showBatch = ref(false)
+// === 上传弹窗状态 ===
 const showUpload = ref(false)
-const saving = ref(false)
-const selectedAssets = ref<(string | number)[]>([])
-const selectedFirmware = ref<string | number | null>(null)
-
-// === 资产和固件选项 ===
-const assetOptions = ref<{ label: string; value: string | number }[]>([])
-const firmwareOptions = ref<{ label: string; value: string | number }[]>([])
 
 // === 权限控制 ===
 const canWrite = computed(() => auth.can('firmware:write'))
@@ -103,61 +93,17 @@ watch(
   { immediate: true }
 )
 
-// === 打开批量升级弹窗 ===
-async function openBatchUpgrade() {
-  selectedAssets.value = []
-  selectedFirmware.value = null
-  try {
-    const [assets, firmwares] = await Promise.allSettled([
-      resource.list('/assets', { page: 1, page_size: 200 }),
-      resource.list('/firmware', { page: 1, page_size: 200 })
-    ])
-    if (assets.status === 'fulfilled') {
-      const d = rows(assets.value)
-      assetOptions.value = d.items.map(i => ({ label: String(i.name || i.id), value: i.id as string | number }))
-    }
-    if (firmwares.status === 'fulfilled') {
-      const d = rows(firmwares.value)
-      firmwareOptions.value = d.items.map(i => ({ label: `${String(i.name || '')} v${String(i.version || '')}`, value: i.id as string | number }))
-    }
-  } catch {
-    // 加载选项失败，忽略
-  }
-  showBatch.value = true
-}
-
 // === 上传固件文件 ===
 async function uploadFirmware(file: File) {
   const data = new FormData()
   data.append('file', file)
   try {
-    await api.post('/firmware', data)
+    await api.post('/firmware/upload', data)
     message.success('固件上传成功')
     showUpload.value = false
-  } catch (e) {
-    message.error(errorText(e))
-  }
-}
-
-// === 执行批量升级 ===
-async function batchUpgrade() {
-  if (!selectedAssets.value.length || !selectedFirmware.value) {
-    message.warning('请选择资产和固件文件')
-    return
-  }
-  saving.value = true
-  try {
-    await api.post('/firmware/batch-upgrade', {
-      asset_ids: selectedAssets.value,
-      firmware_id: selectedFirmware.value
-    })
-    message.success('批量升级任务已提交')
-    showBatch.value = false
     load()
   } catch (e) {
     message.error(errorText(e))
-  } finally {
-    saving.value = false
   }
 }
 </script>
@@ -168,7 +114,7 @@ async function batchUpgrade() {
       <div>
         <div class="eyebrow dark">OPERATIONS / FIRMWARE UPGRADE</div>
         <h1>固件升级</h1>
-        <p>管理固件版本与批量升级任务</p>
+        <p>上传固件文件并查看升级任务记录；批量升级执行通道尚未配置</p>
       </div>
       <div class="head-actions">
         <n-upload
@@ -178,7 +124,7 @@ async function batchUpgrade() {
         >
           <n-button>上传固件</n-button>
         </n-upload>
-        <n-button v-if="canWrite" type="primary" @click="openBatchUpgrade()">批量升级</n-button>
+        <n-button v-if="canWrite" type="primary" disabled>批量升级（暂不可用）</n-button>
       </div>
     </div>
     <div class="panel">
@@ -210,36 +156,5 @@ async function batchUpgrade() {
         当前没有固件升级任务记录。
       </div>
     </div>
-    <!-- 批量升级弹窗 -->
-    <n-modal
-      v-model:show="showBatch"
-      preset="card"
-      title="批量固件升级"
-      style="width: min(520px, 94vw)"
-    >
-      <n-form label-placement="top">
-        <n-form-item label="选择目标资产">
-          <n-select
-            v-model:value="selectedAssets"
-            multiple
-            filterable
-            :options="assetOptions"
-            placeholder="请选择要升级的资产"
-          />
-        </n-form-item>
-        <n-form-item label="选择固件版本">
-          <n-select
-            v-model:value="selectedFirmware"
-            filterable
-            :options="firmwareOptions"
-            placeholder="请选择目标固件版本"
-          />
-        </n-form-item>
-        <div class="modal-actions">
-          <n-button @click="showBatch = false">取消</n-button>
-          <n-button type="primary" :loading="saving" @click="batchUpgrade">开始升级</n-button>
-        </div>
-      </n-form>
-    </n-modal>
   </div>
 </template>

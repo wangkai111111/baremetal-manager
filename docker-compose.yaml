@@ -89,6 +89,12 @@ x-frontend-common: &frontend-common
     - /tmp:size=32m,mode=1777
     - /var/cache/nginx:size=64m,mode=0755
     - /var/run:size=8m,mode=0755
+  # nginx 需要权限处理临时目录和用户切换
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - SETGID
+    - SETUID
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
     interval: 15s
@@ -114,6 +120,8 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
       - ./deploy/postgres/healthcheck.sh:/usr/local/bin/bmm-pg-healthcheck:ro
+    ports:
+      - "15432:5432"
     healthcheck:
       test: ["CMD", "/usr/local/bin/bmm-pg-healthcheck"]
       interval: 10s
@@ -137,6 +145,8 @@ services:
   redis:
     <<: *service-defaults
     image: ${REDIS_IMAGE:-redis:7-alpine}
+    # 以 root 用户运行，避免数据目录权限问题
+    user: "0"
     command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
     volumes:
       - redis-data:/data
@@ -149,6 +159,7 @@ services:
       - CHOWN
       - SETGID
       - SETUID
+      - DAC_OVERRIDE
     deploy:
       resources:
         limits:
@@ -201,9 +212,10 @@ services:
     volumes:
       - ./deploy/minio/init-bucket.sh:/usr/local/bin/init-bucket:ro
     entrypoint: ["/bin/sh", "/usr/local/bin/init-bucket"]
-    read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
+      # mc 工具需要写入配置目录
+      - /root/.mc:size=16m,mode=0755
 
   backend-1:
     <<: *backend-common
@@ -247,7 +259,7 @@ services:
     image: ${HAPROXY_IMAGE:-haproxy:3.0-alpine}
     ports:
       - "${HTTP_PORT:-8080}:8080"
-      - "127.0.0.1:${HAPROXY_STATS_PORT:-8404}:8404"
+      - "0.0.0.0:${HAPROXY_STATS_PORT:-8404}:8404"
     volumes:
       - ./deploy/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:

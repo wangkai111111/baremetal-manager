@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // API Key 管理页面 — 管理开放 API 访问密钥
 import { computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   NButton,
   NInput,
@@ -21,6 +22,7 @@ import { useAuth } from '../stores/auth'
 
 const message = useMessage()
 const auth = useAuth()
+const router = useRouter()
 
 // === 权限选项（多选）===
 const permissionOptions = [
@@ -50,7 +52,12 @@ const pageSize = 20
 // === 弹窗与表单状态 ===
 const creating = ref(false)
 const saving = ref(false)
-const newKey = ref<RecordData>({})
+interface NewKeyForm {
+  name: string
+  permissions: string[]
+  expires_at: string | null
+}
+const newKey = ref<NewKeyForm>({ name: '', permissions: [], expires_at: null })
 
 // === 创建成功后显示的密钥值（仅显示一次）===
 const showCreatedKey = ref(false)
@@ -141,7 +148,7 @@ watch(
 
 // === 打开创建弹窗 ===
 function openCreate() {
-  newKey.value = { permissions: [], expires_at: null }
+  newKey.value = { name: '', permissions: [], expires_at: null }
   creating.value = true
 }
 
@@ -158,7 +165,8 @@ async function createKey() {
       permissions: newKey.value.permissions || []
     }
     if (newKey.value.expires_at) {
-      payload.expires_at = new Date(newKey.value.expires_at as number).toISOString()
+      const parsed = new Date(String(newKey.value.expires_at).replace(' ', 'T'))
+      if (!Number.isNaN(parsed.getTime())) payload.expires_at = parsed.toISOString()
     }
     const result = unwrap<{ key?: string }>(await resource.create('/api-keys', payload))
     message.success('API Key 创建成功')
@@ -179,7 +187,7 @@ async function createKey() {
 // === 吊销 API Key ===
 async function revoke(row: RecordData) {
   try {
-    await resource.update('/api-keys', row.id!, { status: 'revoked' })
+    await resource.remove('/api-keys', row.id!)
     message.success('API Key 已吊销')
     load()
   } catch (e) {
@@ -207,6 +215,7 @@ async function copyKey() {
         <p>管理开放 API 访问密钥与权限范围</p>
       </div>
       <div class="head-actions">
+        <n-button quaternary @click="router.push('/api-docs')">API 文档</n-button>
         <n-button v-if="canWrite" type="primary" @click="openCreate()">+ 创建密钥</n-button>
       </div>
     </div>
@@ -248,11 +257,11 @@ async function copyKey() {
     >
       <n-form label-placement="top">
         <n-form-item label="密钥名称" required>
-          <n-input v-model:value="(newKey.name as string)" placeholder="请输入密钥名称" />
+          <n-input v-model:value="newKey.name" placeholder="请输入密钥名称" />
         </n-form-item>
         <n-form-item label="权限范围">
           <n-select
-            v-model:value="(newKey.permissions as string[])"
+            v-model:value="newKey.permissions"
             :options="permissionOptions"
             multiple
             placeholder="请选择权限（可多选）"
@@ -260,7 +269,7 @@ async function copyKey() {
         </n-form-item>
         <n-form-item label="过期时间">
           <n-date-picker
-            v-model:formatted-value="(newKey.expires_at as string)"
+            v-model:formatted-value="newKey.expires_at"
             type="datetime"
             value-format="yyyy-MM-dd HH:mm:ss"
             style="width: 100%"

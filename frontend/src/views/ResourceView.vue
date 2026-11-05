@@ -73,7 +73,7 @@ const canWrite = computed(() =>
   (props.section.api === '/projects'
     ? auth.user?.role === 'admin'
     : auth.can(props.section.permission.replace(':read', ':write'))) &&
-  ['/projects', '/assets', '/subnets', '/ip-addresses'].includes(props.section.api)
+  ['/projects', '/assets', '/networks', '/ip-allocations', '/tags', '/ip-pools'].includes(props.section.api)
 )
 
 // === 列定义（含排序） ===
@@ -498,19 +498,19 @@ async function handleBatchPower(action: string) {
       </div>
     </div>
     <div class="panel">
-      <div class="panel-toolbar">
-        <div>
+      <div class="panel-toolbar resource-toolbar">
+        <div class="toolbar-heading">
           <div class="panel-title">
             资源列表 <span class="count">{{ total }}</span>
           </div>
           <p class="panel-caption">筛选、查看当前资源与操作记录</p>
         </div>
-        <div class="toolbar-actions">
+        <div class="toolbar-actions resource-actions">
           <n-input
             v-model:value="search"
+            class="filter-search"
             placeholder="搜索资源..."
             clearable
-            style="width: 220px"
             @keyup.enter="page = 1; load()"
             @clear="page = 1; load()"
           />
@@ -521,7 +521,6 @@ async function handleBatchPower(action: string) {
               placeholder="状态筛选"
               :options="statusOptions"
               clearable
-              style="width: 130px"
             />
             <n-select
               v-if="section.api === '/assets'"
@@ -530,7 +529,6 @@ async function handleBatchPower(action: string) {
               :options="tagOptions"
               multiple
               clearable
-              style="min-width: 160px"
             />
             <n-select
               v-if="section.api === '/assets'"
@@ -538,11 +536,12 @@ async function handleBatchPower(action: string) {
               placeholder="机房筛选"
               :options="datacenterOptions"
               clearable
-              style="width: 140px"
             />
           </div>
-          <n-button @click="page = 1; load()">查询</n-button>
-          <n-button quaternary @click="load">刷新</n-button>
+          <div class="filter-buttons">
+            <n-button @click="page = 1; load()">查询</n-button>
+            <n-button quaternary @click="load">刷新</n-button>
+          </div>
         </div>
       </div>
 

@@ -287,11 +287,185 @@ const columns = computed(() => {
     title: labels[key] || key,
     key,
     minWidth: 130,
-    render: (row: RecordData) =>
-      typeof row[key] === 'object'
-        ? JSON.stringify(row[key])
-        : String(row[key] ?? '—')
+    render: (row: RecordData) => formatField(key, row[key])
   }))
+})
+
+// === 监控数据展示（结构化卡片，避免直接展示 JSON）===
+const monitorTabs = ['hardware', 'network', 'storage', 'bmc', 'power', 'firmware']
+const isMonitorTab = computed(() => monitorTabs.includes(tab.value))
+
+const monitorLabels: Record<string, string> = {
+  system: '系统信息',
+  cpu: 'CPU',
+  memory: '内存',
+  network: '网卡',
+  storage: '存储',
+  bmc: 'BMC 控制器',
+  power: '电源',
+  firmware: '固件',
+  manufacturer: '制造商',
+  model: '型号',
+  serial_number: '序列号',
+  part_number: '部件号',
+  sku: 'SKU',
+  uuid: 'UUID',
+  status: '状态',
+  state: '状态',
+  health: '健康状态',
+  count: '数量',
+  cores: '核心数',
+  threads: '逻辑处理器',
+  max_speed_mhz: '最大频率',
+  total_capacity_mib: '内存容量',
+  interfaces: '网卡列表',
+  drives: '硬盘列表',
+  mac: 'MAC 地址',
+  speed_mbps: '速率',
+  link: '连接状态',
+  capacity_bytes: '容量',
+  media_type: '介质类型',
+  protocol: '接口类型',
+  manager_type: '管理器类型',
+  firmware_version: '固件版本',
+  bios_version: 'BIOS 版本',
+  bmc_firmware: 'BMC 固件版本',
+  version: '版本',
+  date: '发布日期',
+  bios: 'BIOS'
+}
+
+// Redfish 枚举值转中文
+const valueLabels: Record<string, string> = {
+  On: '已开机',
+  Off: '已关机',
+  OK: '正常',
+  Warning: '警告',
+  Critical: '严重',
+  Enabled: '启用',
+  Disabled: '禁用',
+  LinkUp: '已连接',
+  LinkDown: '未连接',
+  Unknown: '未知',
+  Absent: '未安装',
+  Present: '在位',
+  PoweringOn: '开机中',
+  PoweringOff: '关机中'
+}
+
+interface MonitorField {
+  key: string
+  label: string
+  value: string
+}
+
+interface MonitorTable {
+  key: string
+  rows: RecordData[]
+  columns: { title: string; key: string; minWidth: number; render: (row: RecordData, index: number) => string }[]
+}
+
+interface MonitorCard {
+  key: string
+  title: string
+  fields: MonitorField[]
+  tables: MonitorTable[]
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function labelOf(key: string) {
+  return monitorLabels[key] || labels[key] || key
+}
+
+function humanBytes(value: unknown) {
+  const size = Number(value)
+  if (!Number.isFinite(size) || size <= 0) return '—'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let index = 0
+  let rest = size
+  while (rest >= 1024 && index < units.length - 1) {
+    rest /= 1024
+    index += 1
+  }
+  return `${rest >= 100 ? rest.toFixed(0) : rest.toFixed(1)} ${units[index]}`
+}
+
+// formatField 将任意字段值格式化为可读文本，对象转为 "字段: 值" 拼接。
+function formatField(key: string, value: unknown): string {
+  if (value == null || value === '') return '—'
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (typeof value === 'number') {
+    if (key.includes('capacity_mib')) return `${value} GB`
+    if (key.includes('capacity') || key.includes('bytes')) return humanBytes(value)
+    if (key.includes('mhz')) return `${value} MHz`
+    if (key.includes('mbps')) {
+      return value >= 1000 ? `${Number((value / 1000).toFixed(1))} Gbps` : `${value} Mbps`
+    }
+    return String(value)
+  }
+  if (typeof value === 'string') return valueLabels[value] || value
+  if (Array.isArray(value)) return `${value.length} 项`
+  if (isPlainObject(value)) {
+    const parts = Object.entries(value)
+      .filter(([, item]) => item != null && item !== '' && typeof item !== 'object')
+      .map(([itemKey, item]) => `${labelOf(itemKey)}: ${formatField(itemKey, item)}`)
+    return parts.length ? parts.join(' · ') : '—'
+  }
+  return String(value)
+}
+
+// 该字段只包含空值或空对象时不展示
+function isEmptyValue(value: unknown): boolean {
+  if (value == null || value === '') return true
+  if (Array.isArray(value)) return value.length === 0
+  if (isPlainObject(value)) {
+    return Object.values(value).every(item => item == null || item === '' || isEmptyValue(item))
+  }
+  if (typeof value === 'number') return false
+  return false
+}
+
+const monitorCards = computed<MonitorCard[]>(() => {
+  const source = detail.value[0]
+  if (!source) return []
+  // 这些字段是原始 Redfish 引用或动作描述，不适合直接展示
+  const hidden = new Set(['actions', 'detail', 'manager_ref'])
+  const cards: MonitorCard[] = []
+  for (const [sectionKey, section] of Object.entries(source)) {
+    if (!isPlainObject(section)) continue
+    const fields: MonitorField[] = []
+    const tables: MonitorTable[] = []
+    for (const [key, value] of Object.entries(section)) {
+      if (hidden.has(key) || isEmptyValue(value)) continue
+      if (Array.isArray(value)) {
+        const items = value.filter(isPlainObject) as RecordData[]
+        if (!items.length) continue
+        const itemKeys = [...new Set(items.flatMap(item => Object.keys(item)))].filter(
+          itemKey => !itemKey.toLowerCase().includes('password')
+        )
+        tables.push({
+          key,
+          rows: items,
+          columns: itemKeys.map(itemKey => ({
+            title: labelOf(itemKey),
+            key: itemKey,
+            minWidth: 110,
+            render: (row: RecordData) => formatField(itemKey, row[itemKey])
+          }))
+        })
+        continue
+      }
+      const text = formatField(key, value)
+      if (text && text !== '—') fields.push({ key, label: labelOf(key), value: text })
+    }
+    if (fields.length || tables.length) {
+      cards.push({ key: sectionKey, title: labelOf(sectionKey), fields, tables })
+    }
+  }
+  return cards
 })
 
 function operate(action: string, label: string) {
@@ -524,7 +698,7 @@ onUnmounted(() => {
               >
                 {{
                   typeof value === 'object'
-                    ? JSON.stringify(value)
+                    ? formatField(String(key), value)
                     : String(value ?? '—')
                 }}
               </n-descriptions-item>
@@ -554,9 +728,9 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 硬件信息 Tab - 传感器仪表盘 -->
-          <div v-else-if="tab === 'hardware'">
-            <div v-if="sensorData" class="sensor-gauges">
+          <!-- 硬件/网络/存储/BMC/电源/固件 Tab - 结构化展示 -->
+          <div v-else-if="isMonitorTab">
+            <div v-if="tab === 'hardware' && sensorData" class="sensor-gauges">
               <div class="sensor-gauge-card">
                 <div class="gauge-title">CPU 温度</div>
                 <div ref="cpuTempGaugeEl" class="gauge-chart"></div>
@@ -570,13 +744,36 @@ onUnmounted(() => {
                 <div ref="powerBarChartEl" class="gauge-chart"></div>
               </div>
             </div>
-            <n-data-table
-              :columns="columns"
-              :data="detail"
-              :loading="loading"
-              :scroll-x="Math.max(columns.length * 130, 600)"
-            />
-            <div v-if="!loading && !detail.length && !sensorData" class="empty-hint">
+            <div v-if="monitorCards.length" class="monitor-cards">
+              <div v-for="card in monitorCards" :key="card.key" class="monitor-card">
+                <div class="monitor-card-title">{{ card.title }}</div>
+                <n-descriptions
+                  v-if="card.fields.length"
+                  :column="2"
+                  label-placement="left"
+                  size="small"
+                  bordered
+                >
+                  <n-descriptions-item
+                    v-for="field in card.fields"
+                    :key="field.key"
+                    :label="field.label"
+                  >
+                    {{ field.value }}
+                  </n-descriptions-item>
+                </n-descriptions>
+                <n-data-table
+                  v-for="table in card.tables"
+                  :key="table.key"
+                  :columns="table.columns"
+                  :data="table.rows"
+                  :bordered="false"
+                  size="small"
+                  :style="card.fields.length ? 'margin-top: 12px' : ''"
+                />
+              </div>
+            </div>
+            <div v-if="!loading && !monitorCards.length && !sensorData" class="empty-hint">
               暂无{{ item.label }}数据
             </div>
           </div>

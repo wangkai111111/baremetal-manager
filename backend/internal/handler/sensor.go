@@ -11,8 +11,9 @@ import (
 
 // RegisterSensorRoutes 注册传感器数据路由。
 func RegisterSensorRoutes(rg *gin.RouterGroup, store *repository.Store) {
-	rg.GET("/assets/:assetId/sensors", sensorListHandler(store))
-	rg.GET("/assets/:assetId/sensors/latest", sensorLatestHandler(store))
+	// 使用 :id 与其他路由保持一致，避免 Gin 通配符冲突
+	rg.GET("/assets/:id/sensors", sensorListHandler(store))
+	rg.GET("/assets/:id/sensors/latest", sensorLatestHandler(store))
 }
 
 // sensorListHandler 传感器历史数据查询。
@@ -20,7 +21,7 @@ func RegisterSensorRoutes(rg *gin.RouterGroup, store *repository.Store) {
 func sensorListHandler(store *repository.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 解析资产 ID
-		assetID, err := strconv.ParseUint(c.Param("assetId"), 10, 64)
+		assetID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 		if err != nil {
 			fail(c, 400, "invalid asset id")
 			return
@@ -83,7 +84,7 @@ func sensorListHandler(store *repository.Store) gin.HandlerFunc {
 func sensorLatestHandler(store *repository.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 解析资产 ID
-		assetID, err := strconv.ParseUint(c.Param("assetId"), 10, 64)
+		assetID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 		if err != nil {
 			fail(c, 400, "invalid asset id")
 			return

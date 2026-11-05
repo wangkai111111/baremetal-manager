@@ -13,7 +13,11 @@ const dedicatedRoutePaths = [
   '/racks',
   '/tags',
   '/installations',
-  '/firmware'
+  '/firmware',
+  '/users',
+  '/roles',
+  '/settings',
+  '/pxe'
 ]
 
 // 过滤出仍使用通用 ResourceView 的资源
@@ -39,10 +43,11 @@ const router = createRouter({ history: createWebHistory(), routes: [
     { path: 'installations', component: () => import('./views/InstallPlanView.vue'), meta: { title: '装机方案', permission: 'tasks:read' } },
     { path: 'kickstart-templates', component: () => import('./views/KickstartTemplateView.vue'), meta: { title: '装机模板', permission: 'images:write' } },
     { path: 'firmware', component: () => import('./views/FirmwareUpgradeView.vue'), meta: { title: '固件升级', permission: 'firmware:read' } },
-    { path: 'api-keys', component: () => import('./views/ApiKeysView.vue'), meta: { title: 'API 密钥', permission: 'iam:write' } },
+    { path: 'api-keys', component: () => import('./views/ApiKeysView.vue'), meta: { title: 'API 密钥', permission: 'iam:read' } },
+    { path: 'api-docs', component: () => import('./views/ApiDocsView.vue'), meta: { title: 'API 文档' } },
     { path: 'project-members', component: () => import('./views/ProjectMembersView.vue'), meta: { title: '项目成员', permission: 'projects:write' } },
     { path: 'pxe-config', component: () => import('./views/PXEConfigView.vue'), meta: { title: 'PXE 配置', permission: 'network:write' } },
-    { path: 'system-settings', component: () => import('./views/SystemSettingsView.vue'), meta: { title: '系统设置', permission: 'settings:write' } },
+    { path: 'system-settings', component: () => import('./views/SystemSettingsView.vue'), meta: { title: '系统设置', permission: 'settings:read' } },
     { path: 'user-management', component: () => import('./views/UserManageView.vue'), meta: { title: '用户管理', permission: 'iam:write' } },
     { path: 'role-management', component: () => import('./views/RoleManageView.vue'), meta: { title: '角色权限', permission: 'iam:read' } },
     // === 资产详情与 SOL 控制台 ===

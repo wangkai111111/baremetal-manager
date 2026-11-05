@@ -1,7 +1,23 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NIcon, NDropdown, NBadge, NDrawer, NDrawerContent, NModal, NForm, NFormItem, NInput, useMessage } from 'naive-ui'
+import {
+  NButton,
+  NIcon,
+  NDropdown,
+  NBadge,
+  NDrawer,
+  NDrawerContent,
+  NModal,
+  NForm,
+  NFormItem,
+  NInput,
+  NTag,
+  NDescriptions,
+  NDescriptionsItem,
+  NSelect,
+  useMessage
+} from 'naive-ui'
 import {
   GridOutline,
   ServerOutline,
@@ -24,6 +40,7 @@ import {
   ChevronForwardOutline
 } from '@vicons/ionicons5'
 import { useAuth } from '../stores/auth'
+import { footerText, footerVisible, loadBrand, navBackground, navTextColor, platformLogo, platformName, platformTagline } from '../stores/brand'
 import { resource, rows, api, errorText, type RecordData } from '../api'
 
 const route = useRoute()
@@ -41,6 +58,12 @@ const notifLoading = ref(false)
 
 // === 侧边栏折叠 ===
 const sidebarCollapsed = ref(false)
+
+// === 导航栏主题配色（由系统设置下发） ===
+const navStyle = computed<Record<string, string>>(() => ({
+  '--nav-bg': navBackground.value,
+  '--nav-text': navTextColor.value
+}))
 
 // === 修改密码弹窗 ===
 const passwordModal = ref(false)
@@ -73,6 +96,8 @@ onMounted(async () => {
   }
   // 加载通知
   loadNotifications()
+  // 加载平台品牌信息
+  loadBrand()
   // 启动定时刷新通知
   notifTimer = setInterval(loadNotifications, 60000)
 })
@@ -120,14 +145,14 @@ async function changePassword() {
     message.warning('两次输入的密码不一致')
     return
   }
-  if (passwordForm.value.newPassword.length < 6) {
-    message.warning('新密码长度不能少于 6 位')
+  if (passwordForm.value.newPassword.length < 12) {
+    message.warning('新密码长度不能少于 12 位')
     return
   }
   passwordSaving.value = true
   try {
-    await api.post('/auth/change-password', {
-      old_password: passwordForm.value.oldPassword,
+    await api.put('/auth/password', {
+      current_password: passwordForm.value.oldPassword,
       new_password: passwordForm.value.newPassword
     })
     message.success('密码修改成功')
@@ -150,23 +175,28 @@ const groups = [
       { label: '项目管理', path: '/projects', icon: LayersOutline },
       { label: '机房管理', path: '/datacenters', icon: BusinessOutline },
       { label: '机柜管理', path: '/racks', icon: CubeOutline },
-      { label: '裸机资产', path: '/assets', icon: ServerOutline }
+      { label: '裸机资产', path: '/assets', icon: ServerOutline },
+      { label: '标签管理', path: '/tags', icon: LayersOutline }
     ]
   },
   {
     label: '交付与网络',
     items: [
       { label: '系统镜像', path: '/images', icon: DiscOutline },
+      { label: '装机模板', path: '/kickstart-templates', icon: DiscOutline },
       { label: '装机任务', path: '/installations', icon: FlashOutline },
       { label: 'IPAM · 子网', path: '/subnets', icon: GitNetworkOutline },
       { label: 'IP 地址', path: '/ip-addresses', icon: GitNetworkOutline },
-      { label: 'PXE 配置', path: '/pxe', icon: GitNetworkOutline }
+      { label: 'IP 地址池', path: '/ip-pools', icon: GitNetworkOutline },
+      { label: 'PXE 配置', path: '/pxe-config', icon: GitNetworkOutline }
     ]
   },
   {
     label: '运维治理',
     items: [
       { label: '监控告警', path: '/alerts', icon: WarningOutline },
+      { label: '告警规则', path: '/alert-rules', icon: WarningOutline },
+      { label: '推送渠道', path: '/alert-channels', icon: WarningOutline },
       { label: '固件管理', path: '/firmware', icon: HardwareChipOutline },
       { label: '任务中心', path: '/tasks', icon: ListOutline },
       { label: '审计日志', path: '/audit-logs', icon: ReceiptOutline }
@@ -175,9 +205,10 @@ const groups = [
   {
     label: '平台设置',
     items: [
-      { label: '用户管理', path: '/users', icon: PeopleOutline },
-      { label: '角色权限', path: '/roles', icon: PeopleOutline },
-      { label: '系统设置', path: '/settings', icon: SettingsOutline }
+      { label: '用户管理', path: '/user-management', icon: PeopleOutline },
+      { label: '角色权限', path: '/role-management', icon: PeopleOutline },
+      { label: 'API 密钥', path: '/api-keys', icon: SettingsOutline },
+      { label: '系统设置', path: '/system-settings', icon: SettingsOutline }
     ]
   }
 ]
@@ -199,18 +230,24 @@ function permission(path: string) {
     datacenters: 'datacenters:read',
     racks: 'racks:read',
     assets: 'assets:read',
+    tags: 'assets:write',
     images: 'images:read',
-    installations: 'installations:read',
+    'kickstart-templates': 'images:write',
+    installations: 'tasks:read',
     subnets: 'network:read',
     'ip-addresses': 'network:read',
-    pxe: 'network:read',
+    'ip-pools': 'network:write',
+    'pxe-config': 'network:read',
     alerts: 'alerts:read',
+    'alert-rules': 'alerts:manage',
+    'alert-channels': 'alerts:manage',
     firmware: 'firmware:read',
     tasks: 'tasks:read',
     'audit-logs': 'audit:read',
-    users: 'iam:read',
-    roles: 'iam:read',
-    settings: 'settings:read'
+    'user-management': 'iam:read',
+    'role-management': 'iam:read',
+    'api-keys': 'iam:read',
+    'system-settings': 'settings:read'
   } as Record<string, string>)[path.slice(1)]
 }
 
@@ -223,6 +260,38 @@ function logout() {
 function goProjectMembers() {
   router.push('/project-members')
 }
+
+// === 切换项目后刷新页面数据 ===
+function onProjectChange(event: Event) {
+  const target = event.target as HTMLSelectElement
+  auth.selectProject(target.value)
+  router.go(0)
+}
+
+// === 个人设置展示数据 ===
+const projectOptions = computed(() =>
+  projects.value.map(project => ({
+    label: String(project.name ?? project.id),
+    value: String(project.id)
+  }))
+)
+
+const tokenExpiryText = computed(() =>
+  auth.tokenExpiry > 0 ? new Date(auth.tokenExpiry).toLocaleString('zh-CN') : '未知'
+)
+
+// === 从个人设置切换到其他项目 ===
+function onSettingsProjectChange(value: string) {
+  auth.selectProject(value)
+  router.go(0)
+}
+
+// === 从个人设置打开修改密码弹窗 ===
+function openPasswordModal() {
+  settingsModal.value = false
+  passwordForm.value = { oldPassword: '', newPassword: '', confirmPassword: '' }
+  passwordModal.value = true
+}
 </script>
 
 <template>
@@ -232,12 +301,13 @@ function goProjectMembers() {
       class="sidebar-backdrop"
       @click="mobileOpen = false"
     ></div>
-    <aside class="sidebar" :class="{ open: mobileOpen, collapsed: sidebarCollapsed }">
+    <aside class="sidebar" :class="{ open: mobileOpen, collapsed: sidebarCollapsed }" :style="navStyle">
       <router-link to="/" class="brand" @click="mobileOpen = false">
-        <span class="brand-mark">M<span>·</span></span>
+        <img v-if="platformLogo" class="brand-logo" :src="platformLogo" alt="平台 Logo" />
+        <span v-else class="brand-mark">M<span>·</span></span>
         <span v-if="!sidebarCollapsed">
-          <strong>METAL<span>OPS</span></strong>
-          <small>BAREMETAL CONTROL PLANE</small>
+          <strong>{{ platformName }}</strong>
+          <small>{{ platformTagline }}</small>
         </span>
       </router-link>
 
@@ -258,7 +328,7 @@ function goProjectMembers() {
         class="project-picker"
         aria-label="选择项目"
         :value="auth.projectId"
-        @change="(e: Event) => { auth.selectProject((e.target as HTMLSelectElement).value); router.go(0) }"
+        @change="onProjectChange"
       >
         <option
           v-for="project in projects"
@@ -302,8 +372,8 @@ function goProjectMembers() {
           </router-link>
         </div>
       </nav>
-      <div v-if="!sidebarCollapsed" class="sidebar-footer">
-        <span class="status-dot"></span> 控制平面在线
+      <div v-if="!sidebarCollapsed && footerVisible" class="sidebar-footer">
+        <span class="status-dot"></span> {{ footerText }}
         <span class="version">v0.1</span>
       </div>
     </aside>
@@ -344,6 +414,7 @@ function goProjectMembers() {
           <!-- 用户下拉菜单（增强） -->
           <n-dropdown
             :options="userMenuOptions"
+            trigger="click"
             @select="handleUserMenuSelect"
           >
             <button class="user-trigger">
@@ -429,15 +500,60 @@ function goProjectMembers() {
       </n-form>
     </n-modal>
 
-    <!-- 个人设置弹窗（占位） -->
+    <!-- 个人设置弹窗 -->
     <n-modal
       v-model:show="settingsModal"
       preset="card"
       title="个人设置"
-      style="width: min(460px, 94vw)"
+      style="width: min(520px, 94vw)"
     >
-      <div style="padding: 20px 0; color: #82929d; font-size: 13px; text-align: center;">
-        个人设置功能开发中...
+      <n-descriptions :column="1" label-placement="left" size="small" class="settings-list">
+        <n-descriptions-item label="登录账号">
+          {{ auth.user?.username || '—' }}
+        </n-descriptions-item>
+        <n-descriptions-item label="平台角色">
+          {{ auth.user?.role || '—' }}
+        </n-descriptions-item>
+        <n-descriptions-item label="用户 ID">
+          {{ auth.user?.id ?? '—' }}
+        </n-descriptions-item>
+        <n-descriptions-item label="Token 到期">
+          {{ tokenExpiryText }}
+        </n-descriptions-item>
+        <n-descriptions-item label="当前项目">
+          <n-select
+            v-if="projectOptions.length"
+            :value="auth.projectId"
+            :options="projectOptions"
+            size="small"
+            style="max-width: 240px"
+            @update:value="onSettingsProjectChange"
+          />
+          <span v-else>未分配项目</span>
+        </n-descriptions-item>
+        <n-descriptions-item label="权限数">
+          {{ auth.currentPermissions.length }}
+        </n-descriptions-item>
+      </n-descriptions>
+      <div class="settings-permissions" v-if="auth.currentPermissions.length">
+        <n-tag
+          v-for="permissionCode in auth.currentPermissions"
+          :key="permissionCode"
+          size="small"
+          :bordered="false"
+          type="info"
+        >
+          {{ permissionCode }}
+        </n-tag>
+      </div>
+      <div class="modal-actions">
+        <n-button @click="settingsModal = false">关闭</n-button>
+        <n-button
+          type="primary"
+          @click="openPasswordModal"
+        >
+          修改密码
+        </n-button>
       </div>
     </n-modal>
   </div>

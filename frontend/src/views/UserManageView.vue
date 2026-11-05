@@ -15,18 +15,16 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { h } from 'vue'
-import { errorText, resource, rows, type RecordData } from '../api'
+import { api, errorText, resource, rows, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
 
 const message = useMessage()
 const auth = useAuth()
 
-// === 角色选项 ===
+// === 平台角色选项（后端仅支持 admin / user）===
 const roleOptions = [
   { label: '管理员', value: 'admin' },
-  { label: '经理', value: 'manager' },
-  { label: '运维', value: 'operator' },
-  { label: '只读', value: 'viewer' }
+  { label: '普通用户', value: 'user' }
 ]
 
 // === 列表数据状态 ===
@@ -39,9 +37,15 @@ const pageSize = 20
 
 // === 弹窗与表单状态 ===
 const editing = ref(false)
+const creating = ref(false)
 const saving = ref(false)
 const currentId = ref<string | number | null>(null)
 const form = ref<RecordData>({})
+const newUser = ref<{ username: string; password: string; role: string }>({
+  username: '',
+  password: '',
+  role: 'user'
+})
 
 // === 权限控制 ===
 const canWrite = computed(() => auth.can('iam:write'))
@@ -133,11 +137,45 @@ watch(
   { immediate: true }
 )
 
-// === 打开编辑弹窗（仅支持编辑，不支持新建用户）===
+// === 打开编辑弹窗 ===
 function openEdit(row: RecordData) {
   currentId.value = row.id ?? null
   form.value = { ...row }
   editing.value = true
+}
+
+// === 打开新增用户弹窗 ===
+function openCreate() {
+  newUser.value = { username: '', password: '', role: 'user' }
+  creating.value = true
+}
+
+// === 创建新用户 ===
+async function saveNewUser() {
+  if (!newUser.value.username.trim()) {
+    message.warning('请输入用户名')
+    return
+  }
+  if (newUser.value.password.length < 12) {
+    message.warning('密码长度不能少于 12 位')
+    return
+  }
+  saving.value = true
+  try {
+    await api.post('/auth/users', {
+      username: newUser.value.username.trim(),
+      password: newUser.value.password,
+      role: newUser.value.role
+    })
+    message.success('用户已创建')
+    creating.value = false
+    page.value = 1
+    load()
+  } catch (e) {
+    message.error(errorText(e))
+  } finally {
+    saving.value = false
+  }
 }
 
 // === 保存用户信息 ===
@@ -151,7 +189,7 @@ async function save() {
     const payload = {
       name: form.value.name || '',
       email: form.value.email || '',
-      role: form.value.role || 'viewer'
+      role: form.value.role || 'user'
     }
     await resource.update('/users', currentId.value!, payload)
     message.success('保存成功')
@@ -183,6 +221,9 @@ async function remove(row: RecordData) {
         <div class="eyebrow dark">ACCESS CONTROL / USERS</div>
         <h1>用户管理</h1>
         <p>管理用户账户与角色分配</p>
+      </div>
+      <div class="head-actions">
+        <n-button v-if="canWrite" type="primary" @click="openCreate">+ 新增用户</n-button>
       </div>
     </div>
     <div class="panel">
@@ -246,6 +287,34 @@ async function remove(row: RecordData) {
         <div class="modal-actions">
           <n-button @click="editing = false">取消</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>
+        </div>
+      </n-form>
+    </n-modal>
+    <!-- 新增用户弹窗 -->
+    <n-modal
+      v-model:show="creating"
+      preset="card"
+      title="新增用户"
+      style="width: min(460px, 94vw)"
+    >
+      <n-form label-placement="top">
+        <n-form-item label="用户名" required>
+          <n-input v-model:value="newUser.username" placeholder="请输入登录用户名" />
+        </n-form-item>
+        <n-form-item label="初始密码" required>
+          <n-input
+            v-model:value="newUser.password"
+            type="password"
+            show-password-on="click"
+            placeholder="至少 12 位字符"
+          />
+        </n-form-item>
+        <n-form-item label="平台角色">
+          <n-select v-model:value="newUser.role" :options="roleOptions" />
+        </n-form-item>
+        <div class="modal-actions">
+          <n-button @click="creating = false">取消</n-button>
+          <n-button type="primary" :loading="saving" @click="saveNewUser">创建</n-button>
         </div>
       </n-form>
     </n-modal>

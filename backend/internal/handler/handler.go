@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -32,16 +34,16 @@ import (
 
 // Response 统一成功返回结构
 type Response struct {
-	Code    int         `json:"code"`              // 状态码
-	Data    interface{} `json:"data,omitempty"`     // 数据
-	Message string      `json:"message"`            // 消息
+	Code    int         `json:"code"`           // 状态码
+	Data    interface{} `json:"data,omitempty"` // 数据
+	Message string      `json:"message"`        // 消息
 }
 
 // ErrorResponse 统一错误返回结构
 type ErrorResponse struct {
-	Code    int    `json:"code"`     // 错误码
-	Error   string `json:"error"`    // 错误类型
-	Message string `json:"message"`  // 错误描述
+	Code    int    `json:"code"`    // 错误码
+	Error   string `json:"error"`   // 错误类型
+	Message string `json:"message"` // 错误描述
 }
 
 // OK 返回 200 成功响应
@@ -100,6 +102,10 @@ func (h *Handler) Router() *gin.Engine {
 	r.GET("/health", func(c *gin.Context) { c.String(200, "ok") })
 	v := r.Group("/api/v1")
 	v.POST("/auth/login", h.Login)
+
+	// === 公开品牌信息，供登录页与侧边栏读取 ===
+	RegisterBrandRoutes(v, h.S.Store)
+	RegisterDocsRoutes(v)
 	authorized := v.Group("")
 	authorized.Use(h.Auth.Guard())
 	authorized.GET("/auth/me", h.Me)
@@ -134,6 +140,8 @@ func (h *Handler) Router() *gin.Engine {
 	w.POST("/networks", h.CreateNetwork)
 	w.POST("/ip-allocations", h.CreateIP)
 	w.POST("/members", h.AddMember)
+	w.PUT("/members/:userId", updateMember(h.S.Store))
+	w.DELETE("/members/:userId", removeMember(h.S.Store))
 	w.POST("/assets/batch-actions", h.BatchAction)
 	w.POST("/assets/scan", h.Scan)
 	w.DELETE("/sol-sessions/:id", h.EndSOLSession)
@@ -179,8 +187,8 @@ func (h *Handler) Router() *gin.Engine {
 	// === 角色管理路由 ===
 	RegisterRoleRoutes(authorized, h.S.Store)
 
-	// === 项目成员管理路由 ===
-	RegisterMemberRoutes(authorized, h.S.Store)
+	// === 开放 API 密钥管理路由 ===
+	RegisterAPIKeyRoutes(authorized, h.S.Store)
 
 	// === 开放 API 路由 ===
 	apiKeyAuth := middleware.APIKeyAuth(h.S.Store)
@@ -672,7 +680,17 @@ func (h *Handler) SOL(c *gin.Context) {
 		return
 	}
 	conn, err := (&websocket.Upgrader{Subprotocols: []string{"bearer"}, CheckOrigin: func(r *http.Request) bool {
-		return r.Header.Get("Origin") == os.Getenv("SOL_ALLOWED_ORIGIN") && os.Getenv("SOL_ALLOWED_ORIGIN") != ""
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return false
+		}
+		// 显式配置的来源优先放行
+		if allowed := os.Getenv("SOL_ALLOWED_ORIGIN"); allowed != "" && origin == allowed {
+			return true
+		}
+		// 通过 IP、127.0.0.1 或自定义域名访问时，Origin 与请求 Host 同源即放行
+		parsed, err := url.Parse(origin)
+		return err == nil && parsed.Host == r.Host
 	}}).Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
@@ -683,8 +701,19 @@ func (h *Handler) SOL(c *gin.Context) {
 		return
 	}
 	defer func() { now := time.Now(); h.S.Store.DB.Model(&session).Updates(map[string]any{"ended_at": &now}) }()
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
+	// 先清理 BMC 端残留的 SOL 会话，避免 "already active on another session" 错误。
+	deactivateCtx, deactivateCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer deactivateCancel()
+	deactivateCmd := exec.CommandContext(deactivateCtx, "ipmitool", "-I", "lanplus", "-H", a.BMCAddress, "-U", a.BMCUser, "-E", "sol", "deactivate")
+	deactivateCmd.Env = append(os.Environ(), "IPMI_PASSWORD="+a.BMCSecret)
+	dErr := deactivateCmd.Run()
+	if dErr != nil {
+		log.Printf("[SOL][asset=%d] deactivate: %v", a.ID, dErr)
+	}
+	// 给 BMC 一点时间完成状态切换，避免紧随其后的 activate 失败
+	time.Sleep(300 * time.Millisecond)
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -707,16 +736,31 @@ func (h *Handler) SOL(c *gin.Context) {
 	cmd.Env = append(cmd.Environ(), "IPMI_PASSWORD="+a.BMCSecret)
 	stdin, e := cmd.StdinPipe()
 	if e != nil {
+		log.Printf("[SOL][asset=%d] stdin pipe: %v", a.ID, e)
 		return
 	}
 	stdout, e := cmd.StdoutPipe()
 	if e != nil {
+		log.Printf("[SOL][asset=%d] stdout pipe: %v", a.ID, e)
 		return
 	}
-	if cmd.Start() != nil {
+	stderr, _ := cmd.StderrPipe()
+	if se := cmd.Start(); se != nil {
+		log.Printf("[SOL][asset=%d] ipmitool start: %v", a.ID, se)
 		return
 	}
-	defer cmd.Wait()
+	// 丢弃 stderr（BMC 连接过程中的提示信息，不影响 SOL 数据流）
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			stderr.Read(buf)
+		}
+	}()
+	go func() {
+		if err := cmd.Wait(); err != nil && ctx.Err() == nil {
+			log.Printf("[SOL][asset=%d] ipmitool: %v", a.ID, err)
+		}
+	}()
 	go func() {
 		buf := make([]byte, 4096)
 		for {

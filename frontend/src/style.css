@@ -48,8 +48,8 @@ a {
 .sidebar {
   width: 246px;
   flex: none;
-  background: #101e2b;
-  color: #a8b8c3;
+  background: var(--nav-bg, #101e2b);
+  color: var(--nav-text, #a8b8c3);
   display: flex;
   flex-direction: column;
   min-height: 100vh;
@@ -86,6 +86,25 @@ a {
 
 .brand-mark span {
   color: #e8f8f6
+}
+
+/* 自定义平台 Logo，尺寸与默认标记一致 */
+.brand-logo {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+  flex: 0 0 36px
+}
+
+/* 平台名称过长时省略，避免挤压侧边栏 */
+.brand strong {
+  display: block;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap
 }
 
 .brand strong,
@@ -164,7 +183,7 @@ a {
   height: 37px;
   border-radius: 5px;
   padding: 0 13px;
-  color: #a9bbc7;
+  color: var(--nav-text, #a9bbc7);
   font-size: 13px;
   margin: 2px 0;
   transition: background .15s, color .15s
@@ -1278,6 +1297,22 @@ a {
 .advanced-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .advanced-filters .n-select { min-width: 140px; }
 
+/* === 资源列表筛选栏（标题在上，筛选条件单行等宽排列）=== */
+.resource-toolbar { flex-direction: column; align-items: stretch; gap: 14px; }
+.resource-toolbar .toolbar-heading { display: flex; flex-direction: column; gap: 2px; }
+.resource-actions { width: 100%; justify-content: flex-start; flex-wrap: nowrap; gap: 10px; }
+.resource-actions .filter-search { flex: 1 1 220px; min-width: 160px; width: auto !important; }
+.resource-actions .advanced-filters { flex: 2 1 420px; flex-wrap: nowrap; }
+.resource-actions .advanced-filters .n-select { flex: 1 1 0; min-width: 120px; width: auto !important; }
+.resource-actions .filter-buttons { display: flex; gap: 8px; flex: 0 0 auto; }
+
+@media (max-width: 900px) {
+  .resource-actions { flex-wrap: wrap; }
+  .resource-actions .filter-search { flex: 1 1 100%; }
+  .resource-actions .advanced-filters { flex: 1 1 100%; flex-wrap: wrap; }
+  .resource-actions .filter-buttons { margin-left: auto; }
+}
+
 /* === 资产编辑/删除按钮 === */
 .asset-actions { display: flex; gap: 8px; }
 
@@ -1286,6 +1321,11 @@ a {
 .sensor-gauge-card { background: #fafbfb; border: 1px solid #e9eded; border-radius: 8px; padding: 16px; text-align: center; }
 .sensor-gauge-card .gauge-title { font-size: 12px; color: #687e89; margin-bottom: 8px; }
 .sensor-gauge-card .gauge-chart { height: 180px; }
+
+/* === 资产监控信息卡片 === */
+.monitor-cards { display: flex; flex-direction: column; gap: 14px; padding: 4px 0 16px; }
+.monitor-card { background: #fafbfb; border: 1px solid #e9eded; border-radius: 8px; padding: 14px 16px; }
+.monitor-card-title { font-size: 13px; font-weight: 600; color: #29404d; margin-bottom: 10px; }
 
 /* === 标签管理 === */
 .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -1327,6 +1367,229 @@ a {
 /* === 项目成员链接 === */
 .member-link { font-size: 11px; color: #79c3bf; cursor: pointer; text-decoration: underline; margin-left: 8px; }
 .member-link:hover { color: #53bab7; }
+
+/* === 个人设置弹窗 === */
+.settings-list { margin-bottom: 12px; }
+.settings-list .n-descriptions-table-content { word-break: break-all; }
+.settings-permissions { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 0; border-top: 1px solid #edf0f0; }
+
+/* === 设置分类导航 === */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 12px 24px 0;
+  border-bottom: 1px solid #edf0f0
+}
+
+.settings-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 4px 4px 0 0;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #687e89;
+  cursor: pointer;
+  transition: background .15s, color .15s
+}
+
+.settings-tab:hover {
+  background: #f7fafa;
+  color: #29404d
+}
+
+.settings-tab.active {
+  color: var(--color-primary);
+  font-weight: 600;
+  border-bottom-color: var(--color-primary)
+}
+
+/* === 设置分区 === */
+.settings-section {
+  padding: 0 24px
+}
+
+.settings-section-head {
+  padding: 18px 0 10px;
+  border-bottom: 1px solid #f2f5f5;
+  margin-bottom: 4px
+}
+
+.settings-section-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #233946
+}
+
+.settings-section-head p {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #95a3ab
+}
+
+/* === 品牌设置面板 === */
+.brand-settings {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 24px;
+  padding: 18px 0
+}
+
+.brand-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid #e9eded;
+  border-radius: 8px;
+  background: #fafbfb
+}
+
+.brand-preview-img {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #fff
+}
+
+.brand-preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 96px;
+  height: 96px;
+  border: 1px dashed #cfdadc;
+  border-radius: 6px;
+  color: #95a3ab;
+  font-size: 12px;
+  background: #fff
+}
+
+.brand-preview small {
+  color: #95a3ab;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center
+}
+
+.brand-form {
+  min-width: 0;
+  max-width: 560px
+}
+
+.logo-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px
+}
+
+.logo-hint {
+  color: #95a3ab;
+  font-size: 11px
+}
+
+.hidden-file {
+  display: none
+}
+
+/* === 主题/应用设置面板 === */
+.theme-settings {
+  padding-bottom: 24px
+}
+
+.theme-form,
+.app-form {
+  max-width: 560px;
+  padding: 18px 24px 0
+}
+
+.settings-actions {
+  justify-content: flex-end;
+  margin: 0 24px;
+  padding-top: 16px
+}
+
+/* 登录页公告 */
+.login-notice {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border-left: 3px solid var(--color-primary);
+  border-radius: 4px;
+  background: #f2f7f7;
+  color: #40545e;
+  font-size: 12px;
+  line-height: 1.6
+}
+
+.theme-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 20px;
+  padding: 18px 22px;
+  border-radius: 8px;
+  border: 1px solid #e9eded
+}
+
+.theme-preview-title {
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  opacity: .65;
+  margin-bottom: 4px
+}
+
+.theme-preview-item {
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 5px
+}
+
+.theme-preview-item.active {
+  background: #23454d;
+  color: #8be0d9;
+  box-shadow: inset 3px 0 #67cbc3
+}
+
+@media (max-width: 820px) {
+  .brand-settings {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+    padding: 18px
+  }
+
+  .brand-preview {
+    flex-direction: row;
+    justify-content: flex-start;
+    text-align: left
+  }
+
+  .theme-settings {
+    padding-bottom: 18px
+  }
+
+  .settings-tabs {
+    padding: 10px 18px 0
+  }
+
+  .settings-section {
+    padding: 0 18px
+  }
+
+  .theme-form,
+  .app-form {
+    padding: 14px 18px 0
+  }
+
+  .settings-actions {
+    margin: 0 18px
+  }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *,

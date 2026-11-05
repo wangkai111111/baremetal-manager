@@ -9,7 +9,7 @@ import {
   NFormItem,
   useMessage
 } from 'naive-ui'
-import { errorText, resource, rows, type RecordData } from '../api'
+import { api, errorText, resource, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
 
 const message = useMessage()
@@ -31,17 +31,22 @@ const form = ref<RecordData>({
 async function load() {
   loading.value = true
   try {
-    const data = rows(await resource.list('/pxe-config', { page: 1, page_size: 1 }))
-    if (data.items.length) {
-      const item = data.items[0]
-      form.value = {
-        dhcp_server: item.dhcp_server || '',
-        tftp_server: item.tftp_server || '',
-        http_boot_server: item.http_boot_server || '',
-        vlan_id: item.vlan_id || null,
-        dhcp_range_start: item.dhcp_range_start || '',
-        dhcp_range_end: item.dhcp_range_end || ''
-      }
+    // 后端返回单个配置对象，不是分页列表
+    const item = unwrap<RecordData>(await resource.list('/pxe-config'))
+    // 后端以 JSON 字符串保存配置，这里解析为结构化字段
+    let parsed: RecordData = {}
+    try {
+      parsed = item.config ? JSON.parse(String(item.config)) : {}
+    } catch {
+      parsed = {}
+    }
+    form.value = {
+      dhcp_server: parsed.dhcp_server || '',
+      tftp_server: parsed.tftp_server || '',
+      http_boot_server: parsed.http_boot_server || '',
+      vlan_id: parsed.vlan_id ?? null,
+      dhcp_range_start: parsed.dhcp_range_start || '',
+      dhcp_range_end: parsed.dhcp_range_end || ''
     }
   } catch (e) {
     message.error(errorText(e))
@@ -60,13 +65,16 @@ watch(
 async function save() {
   saving.value = true
   try {
-    await resource.create('/pxe-config', {
-      dhcp_server: form.value.dhcp_server,
-      tftp_server: form.value.tftp_server,
-      http_boot_server: form.value.http_boot_server,
-      vlan_id: form.value.vlan_id,
-      dhcp_range_start: form.value.dhcp_range_start,
-      dhcp_range_end: form.value.dhcp_range_end
+    // 后端仅保存一个 config 字符串，这里将结构化表单序列化为 JSON
+    await api.put('/pxe-config', {
+      config: JSON.stringify({
+        dhcp_server: form.value.dhcp_server,
+        tftp_server: form.value.tftp_server,
+        http_boot_server: form.value.http_boot_server,
+        vlan_id: form.value.vlan_id ?? null,
+        dhcp_range_start: form.value.dhcp_range_start,
+        dhcp_range_end: form.value.dhcp_range_end
+      })
     })
     message.success('PXE 配置已保存')
   } catch (e) {

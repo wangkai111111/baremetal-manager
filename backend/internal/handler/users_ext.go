@@ -18,7 +18,7 @@ func RegisterUserManagementRoutes(rg *gin.RouterGroup, store *repository.Store) 
 	{
 		users.GET("", listUsers(store))         // 用户列表（支持分页）
 		users.PUT("/:id", updateUser(store))    // 更新用户信息
-		users.DELETE("/:id", deleteUser(store))  // 删除用户
+		users.DELETE("/:id", deleteUser(store)) // 删除用户
 	}
 }
 
@@ -27,19 +27,8 @@ func RegisterUserManagementRoutes(rg *gin.RouterGroup, store *repository.Store) 
 func RegisterRoleRoutes(rg *gin.RouterGroup, store *repository.Store) {
 	roles := rg.Group("/roles")
 	{
-		roles.GET("", listRoles(store))                  // 角色列表（预定义角色 + 权限矩阵）
+		roles.GET("", listRoles(store))                       // 角色列表（预定义角色 + 权限矩阵）
 		roles.GET("/permissions", getPermissionMatrix(store)) // 获取完整权限矩阵
-	}
-}
-
-// RegisterMemberRoutes 注册项目成员管理路由
-// 路由前缀: /api/v1/projects/:projectId/members
-func RegisterMemberRoutes(rg *gin.RouterGroup, store *repository.Store) {
-	members := rg.Group("/members")
-	{
-		members.GET("", listMembers(store))             // 项目成员列表
-		members.POST("", addOrUpdateMember(store))       // 添加/更新成员
-		members.DELETE("/:userId", removeMember(store))   // 移除成员
 	}
 }
 
@@ -60,7 +49,7 @@ func listUsers(store *repository.Store) gin.HandlerFunc {
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 
 		var users []model.User
-		query := store.DB.Order("id asc")
+		query := store.DB.Model(&model.User{}).Order("id asc")
 		result, err := store.Paginate(query, page, pageSize, &users)
 		if err != nil {
 			Fail(c, http.StatusInternalServerError, "DB_ERROR", "查询用户列表失败")
@@ -201,9 +190,9 @@ func listRoles(store *repository.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 构建角色列表
 		type roleInfo struct {
-			Name        string   `json:"name"`         // 角色名称
-			Permissions []string `json:"permissions"`   // 权限列表
-			Description string   `json:"description"`   // 角色描述
+			Name        string   `json:"name"`        // 角色名称
+			Permissions []string `json:"permissions"` // 权限列表
+			Description string   `json:"description"` // 角色描述
 		}
 
 		descriptions := map[string]string{
@@ -397,6 +386,71 @@ func addOrUpdateMember(store *repository.Store) gin.HandlerFunc {
 	}
 }
 
+// updateMember 更新项目成员的角色或权限。
+func updateMember(store *repository.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		projectID, err := strconv.ParseUint(c.Param("projectId"), 10, 64)
+		if err != nil || projectID == 0 {
+			Fail(c, http.StatusBadRequest, "INVALID_PARAM", "无效的项目ID")
+			return
+		}
+
+		// 仅项目管理员可调整成员权限
+		userID := c.GetUint("userID")
+		role, _ := store.Role(userID, uint(projectID))
+		if role != "admin" {
+			Fail(c, http.StatusForbidden, "FORBIDDEN", "仅项目管理员可管理成员")
+			return
+		}
+
+		targetID, err := strconv.ParseUint(c.Param("userId"), 10, 64)
+		if err != nil || targetID == 0 {
+			Fail(c, http.StatusBadRequest, "INVALID_PARAM", "无效的用户ID")
+			return
+		}
+
+		var input struct {
+			Role        string `json:"role"`
+			Permissions string `json:"permissions"`
+		}
+		if err := c.ShouldBindJSON(&input); err != nil {
+			Fail(c, http.StatusBadRequest, "INVALID_REQUEST", "请求参数错误")
+			return
+		}
+
+		updates := map[string]interface{}{}
+		if input.Role != "" {
+			if input.Role != "admin" && input.Role != "operator" && input.Role != "viewer" {
+				Fail(c, http.StatusBadRequest, "INVALID_REQUEST", "角色必须为 admin、operator 或 viewer")
+				return
+			}
+			updates["role"] = input.Role
+		}
+		if input.Permissions != "" {
+			updates["permissions"] = input.Permissions
+		}
+		if len(updates) == 0 {
+			Fail(c, http.StatusBadRequest, "INVALID_REQUEST", "没有需要更新的字段")
+			return
+		}
+
+		result := store.DB.Model(&model.Membership{}).
+			Where("user_id = ? AND project_id = ?", targetID, projectID).
+			Updates(updates)
+		if result.Error != nil {
+			Fail(c, http.StatusInternalServerError, "DB_ERROR", "更新成员失败")
+			return
+		}
+		if result.RowsAffected == 0 {
+			Fail(c, http.StatusNotFound, "NOT_FOUND", "成员关系不存在")
+			return
+		}
+
+		store.Audit(userID, uint(projectID), "member.update", fmt.Sprint(targetID))
+		OK(c, gin.H{"user_id": targetID, "project_id": projectID})
+	}
+}
+
 // removeMember 移除项目成员
 func removeMember(store *repository.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -465,4 +519,3 @@ func requireAdminUserID(c *gin.Context, store *repository.Store) uint {
 	}
 	return userID
 }
-

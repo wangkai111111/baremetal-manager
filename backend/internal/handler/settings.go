@@ -14,9 +14,9 @@ import (
 func RegisterSettingsRoutes(rg *gin.RouterGroup, store *repository.Store) {
 	settings := rg.Group("/settings")
 	{
-		settings.GET("", listSettings(store))                      // 所有设置项
-		settings.GET("/category/:category", getByCategory(store))   // 按分类查询
-		settings.PUT("/:key", updateSetting(store))                 // 更新设置项
+		settings.GET("", listSettings(store))                     // 所有设置项
+		settings.GET("/category/:category", getByCategory(store)) // 按分类查询
+		settings.PUT("/:key", updateSetting(store))               // 更新设置项
 	}
 }
 
@@ -95,6 +95,16 @@ func updateSetting(store *repository.Store) gin.HandlerFunc {
 			Category:    input.Category,
 			UpdatedBy:   &userID,
 			UpdatedAt:   time.Now(),
+		}
+
+		// 仅更新配置值时保留原有的说明与分类，避免被空字段覆盖
+		if prev, err := store.GetSystemSettingByKey(key); err == nil {
+			if setting.Description == "" {
+				setting.Description = prev.Description
+			}
+			if setting.Category == "" {
+				setting.Category = prev.Category
+			}
 		}
 
 		if err := store.UpsertSystemSetting(setting); err != nil {

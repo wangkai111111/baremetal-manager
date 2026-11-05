@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"reflect"
 	"strings"
 	"time"
 
@@ -82,6 +83,12 @@ func (s *Store) Paginate(query *gorm.DB, page, pageSize int, dest interface{}) (
 		pageSize = 100
 	}
 
+	// 调用方未显式设置 Model 时，按目标切片元素类型推断表名，
+	// 否则 Count 会因缺少表信息而报 "Table not set"。
+	if query.Statement.Model == nil {
+		query = query.Model(inferModel(dest))
+	}
+
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
 		return nil, err
@@ -98,6 +105,22 @@ func (s *Store) Paginate(query *gorm.DB, page, pageSize int, dest interface{}) (
 		Page:     page,
 		PageSize: pageSize,
 	}, nil
+}
+
+// inferModel 从分页目标参数中推断 GORM 模型。
+// dest 通常是 *[]Model 或 *Model，取切片元素类型构造模型实例。
+func inferModel(dest interface{}) interface{} {
+	value := reflect.ValueOf(dest)
+	for value.Kind() == reflect.Ptr {
+		if value.IsNil() {
+			return dest
+		}
+		value = value.Elem()
+	}
+	if value.Kind() == reflect.Slice {
+		return reflect.New(value.Type().Elem()).Interface()
+	}
+	return dest
 }
 
 // ============================================================

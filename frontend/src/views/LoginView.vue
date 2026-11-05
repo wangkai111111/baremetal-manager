@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+// 登录页 — 展示平台品牌并校验账号密码
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NInput, NForm, NFormItem, useMessage } from 'naive-ui'
 import { useAuth } from '../stores/auth'
 import { errorText } from '../api'
+import { loadBrand, loginNotice, platformLogo, platformName } from '../stores/brand'
 
 const username = ref('')
 const password = ref('')
@@ -11,6 +13,11 @@ const loading = ref(false)
 const auth = useAuth()
 const router = useRouter()
 const message = useMessage()
+
+onMounted(() => {
+  // 读取管理员配置的平台名称与 Logo
+  loadBrand()
+})
 
 async function submit() {
   if (!username.value || !password.value) return
@@ -30,8 +37,9 @@ async function submit() {
   <div class="login-screen">
     <div class="login-side">
       <div class="login-side-top">
-        <span class="brand-mark">M<span>·</span></span>
-        <strong>METAL<span>OPS</span></strong>
+        <img v-if="platformLogo" class="brand-logo" :src="platformLogo" alt="平台 Logo" />
+        <span v-else class="brand-mark">M<span>·</span></span>
+        <strong>{{ platformName }}</strong>
       </div>
       <div class="login-side-body">
         <div class="eyebrow">INFRASTRUCTURE OPERATIONS / 01</div>
@@ -62,6 +70,7 @@ async function submit() {
         <div class="eyebrow dark">WELCOME BACK</div>
         <h2>登录控制台</h2>
         <p>请输入账户信息以继续访问。</p>
+        <p v-if="loginNotice" class="login-notice">{{ loginNotice }}</p>
         <n-form @submit.prevent="submit">
           <n-form-item label="用户名">
             <n-input

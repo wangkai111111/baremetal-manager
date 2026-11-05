@@ -23,7 +23,6 @@ const auth = useAuth()
 // === 角色选项 ===
 const roleOptions = [
   { label: '管理员', value: 'admin' },
-  { label: '经理', value: 'manager' },
   { label: '运维', value: 'operator' },
   { label: '只读', value: 'viewer' }
 ]
@@ -55,7 +54,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
     render: (row: RecordData) => {
       const role = String(row.role || 'viewer')
       const label = roleOptions.find(o => o.value === role)?.label || role
-      const tagType = role === 'admin' ? 'error' : role === 'manager' ? 'warning' : role === 'operator' ? 'info' : 'default'
+      const tagType = role === 'admin' ? 'error' : role === 'operator' ? 'info' : 'default'
       return h(
         NTag,
         { size: 'small', bordered: false, type: tagType },

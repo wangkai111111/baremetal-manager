@@ -41,8 +41,8 @@ func TransformMonitorData(rawData json.RawMessage) *MonitorResult {
 		System:   extractSystem(data),
 		CPU:      extractCPU(data),
 		Memory:   extractMemory(data),
-		Network:  make(map[string]interface{}),
-		Storage:  make(map[string]interface{}),
+		Network:  extractNetwork(data),
+		Storage:  extractStorage(data),
 		BMC:      extractBMC(data),
 		Power:    extractPower(data),
 		Firmware: extractFirmware(data),
@@ -71,9 +71,19 @@ func extractCPU(data map[string]interface{}) map[string]interface{} {
 	if ps, ok := data["ProcessorSummary"].(map[string]interface{}); ok {
 		result["model"] = safeString(ps, "Model")
 		result["count"] = safeNumber(ps, "Count")
-		result["cores"] = safeNumber(ps, "CoreCount")
-		result["threads"] = safeNumber(ps, "ThreadCount")
-		result["max_speed_mhz"] = safeNumber(ps, "MaxSpeedMHz")
+		// Dell 等厂商只提供 LogicalProcessorCount，没有 CoreCount/ThreadCount
+		if cores, ok := ps["CoreCount"]; ok {
+			result["cores"] = cores
+		}
+		if threads, ok := ps["ThreadCount"]; ok {
+			result["threads"] = threads
+		} else if logical, ok := ps["LogicalProcessorCount"]; ok {
+			result["threads"] = logical
+		}
+		if speed, ok := ps["MaxSpeedMHz"]; ok {
+			result["max_speed_mhz"] = speed
+		}
+		result["status"] = extractNestedStatus(ps)
 	}
 	return result
 }
@@ -92,10 +102,34 @@ func extractMemory(data map[string]interface{}) map[string]interface{} {
 	return result
 }
 
+// extractNetwork 提取网卡信息。
+func extractNetwork(data map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	if ifaces, ok := data["NetworkInterfaces"].([]interface{}); ok && len(ifaces) > 0 {
+		result["interfaces"] = ifaces
+	}
+	return result
+}
+
+// extractStorage 提取硬盘信息。
+func extractStorage(data map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	if drives, ok := data["Drives"].([]interface{}); ok && len(drives) > 0 {
+		result["drives"] = drives
+	}
+	return result
+}
+
 // extractBMC 提取 BMC 信息。
 func extractBMC(data map[string]interface{}) map[string]interface{} {
 	result := make(map[string]interface{})
-	// 从 Links.Manager 中提取 BMC 引用
+	// 优先使用管理器资源详情
+	if detail, ok := data["BmcDetail"].(map[string]interface{}); ok {
+		for k, v := range detail {
+			result[k] = v
+		}
+	}
+	// 从 Links 中补充管理器引用
 	if links, ok := data["Links"].(map[string]interface{}); ok {
 		if mgr, ok := links["Manager"].(map[string]interface{}); ok {
 			result["manager_ref"] = safeString(mgr, "@odata.id")
@@ -127,6 +161,12 @@ func extractFirmware(data map[string]interface{}) map[string]interface{} {
 		result["bios"] = map[string]interface{}{
 			"version": safeString(bios, "Version"),
 			"date":    safeString(bios, "ReleaseDate"),
+		}
+	}
+	// BMC 固件版本来自管理器资源
+	if detail, ok := data["BmcDetail"].(map[string]interface{}); ok {
+		if fw := safeString(detail, "firmware_version"); fw != "" {
+			result["bmc_firmware"] = fw
 		}
 	}
 	return result

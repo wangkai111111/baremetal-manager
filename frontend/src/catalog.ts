@@ -102,25 +102,28 @@ export const sections: Section[] = [
     path: '/subnets',
     title: 'IPAM · 子网',
     subtitle: '规划管理网络地址空间',
-    api: '/subnets',
+    api: '/networks',
     permission: 'network:read',
     fields: [
       field('name', '名称', true),
       field('cidr', 'CIDR', true),
-      field('gateway', '网关')
-    ]
+      field('gateway', '网关'),
+      field('dns_servers', 'DNS 服务器')
+    ],
+    columns: ['name', 'cidr', 'gateway', 'dns_servers', 'created_at']
   },
   {
     path: '/ip-addresses',
     title: 'IP 地址',
     subtitle: '地址分配与占用追踪',
-    api: '/ip-addresses',
+    api: '/ip-allocations',
     permission: 'network:read',
     fields: [
       field('address', 'IP 地址', true),
       { ...field('network_id', '子网 ID', true), type: 'number' },
       { ...field('asset_id', '资产 ID'), type: 'number' }
-    ]
+    ],
+    columns: ['address', 'network_id', 'asset_id', 'created_at']
   },
   {
     path: '/pxe',
@@ -202,12 +205,11 @@ export const sections: Section[] = [
     permission: 'network:write',
     fields: [
       field('name', '地址池名称', true),
-      field('network_id', '子网 ID', true),
-      field('start_ip', '起始 IP', true),
-      field('end_ip', '结束 IP', true),
-      field('description', '描述')
+      { ...field('network_id', '子网 ID', true), type: 'number' },
+      field('cidr', 'CIDR', true),
+      field('gateway', '网关')
     ],
-    columns: ['name', 'start_ip', 'end_ip', 'network_id', 'created_at']
+    columns: ['name', 'network_id', 'cidr', 'gateway', 'created_at']
   },
   // === 新增：标签管理 ===
   {
@@ -299,7 +301,7 @@ export const sections: Section[] = [
     path: '/audit-logs',
     title: '审计日志',
     subtitle: '关键操作与访问轨迹',
-    api: '/audit-logs',
+    api: '/audit',
     permission: 'audit:read',
     fields: [],
     columns: ['user_id', 'action', 'target', 'created_at'],

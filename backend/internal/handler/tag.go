@@ -11,7 +11,7 @@ import (
 
 // RegisterTagRoutes 注册标签管理路由
 // 标签路由前缀: /api/v1/projects/:projectId/tags
-// 资产标签绑定路由前缀: /api/v1/projects/:projectId/assets/:assetId/tags
+// 资产标签绑定路由前缀: /api/v1/projects/:projectId/assets/:id/tags
 func RegisterTagRoutes(rg *gin.RouterGroup, store *repository.Store) {
 	tags := rg.Group("/tags")
 	{
@@ -21,12 +21,12 @@ func RegisterTagRoutes(rg *gin.RouterGroup, store *repository.Store) {
 		tags.DELETE("/:id", deleteTag(store))   // 删除标签
 	}
 
-	// 资产-标签绑定路由
+	// 资产-标签绑定路由（使用 :id 与其他路由保持一致）
 	assets := rg.Group("/assets")
 	{
-		assets.POST("/:assetId/tags", bindAssetTag(store))             // 绑定标签到资产
-		assets.DELETE("/:assetId/tags/:tagId", unbindAssetTag(store))   // 解绑资产标签
-		assets.GET("/:assetId/tags", listAssetTags(store))             // 查询资产标签
+		assets.POST("/:id/tags", bindAssetTag(store))             // 绑定标签到资产
+		assets.DELETE("/:id/tags/:tagId", unbindAssetTag(store))  // 解绑资产标签
+		assets.GET("/:id/tags", listAssetTags(store))             // 查询资产标签
 	}
 }
 
@@ -181,7 +181,7 @@ func bindAssetTag(store *repository.Store) gin.HandlerFunc {
 		}
 
 		// 解析资产 ID
-		assetID, err := strconv.ParseUint(c.Param("assetId"), 10, 64)
+		assetID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 		if err != nil || assetID == 0 {
 			Fail(c, http.StatusBadRequest, "INVALID_PARAM", "无效的资产ID")
 			return
@@ -231,7 +231,7 @@ func unbindAssetTag(store *repository.Store) gin.HandlerFunc {
 		}
 
 		// 解析资产 ID
-		assetID, err := strconv.ParseUint(c.Param("assetId"), 10, 64)
+		assetID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 		if err != nil || assetID == 0 {
 			Fail(c, http.StatusBadRequest, "INVALID_PARAM", "无效的资产ID")
 			return
@@ -272,7 +272,7 @@ func listAssetTags(store *repository.Store) gin.HandlerFunc {
 		}
 
 		// 解析资产 ID
-		assetID, err := strconv.ParseUint(c.Param("assetId"), 10, 64)
+		assetID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 		if err != nil || assetID == 0 {
 			Fail(c, http.StatusBadRequest, "INVALID_PARAM", "无效的资产ID")
 			return
