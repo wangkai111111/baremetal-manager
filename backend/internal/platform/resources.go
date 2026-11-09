@@ -51,9 +51,15 @@ var resources = []resource{
 	{"firmware-upgrades", "firmware_upgrades", "", "", true}, {"sensor-records", "sensor_records", "", "", true},
 	{"alerts", "alerts", "", "", true}, {"alert-events", "alert_events", "", "", true}, {"notification-deliveries", "notification_deliveries", "", "", true},
 	{"discovery-candidates", "discovery_candidates", "", "", true}, {"sol-sessions", "sol_sessions", "", "", true}, {"audit", "audits", "", "", true},
+
+	// 双模式新增资源：部门管理（自用模式）
+	{"departments", "departments", "name parent_id description", "name", false},
+	// 以下资源已迁移至自定义处理器（租户级作用域），不再使用通用 CRUD：
+	// products, orders, bills, accounts, payments, invoices, coupons, work_orders
+	// 自定义处理器位于同目录下对应的 .go 文件中
 }
 var references = map[string]string{"rack_id": "racks", "datacenter_id": "datacenters", "asset_id": "assets", "tag_id": "tags", "network_id": "networks", "pool_id": "ip_pools", "image_id": "images", "image_template_id": "image_templates", "kickstart_template_id": "kickstart_templates", "partition_template_id": "partition_templates", "install_plan_id": "install_plans", "script_id": "post_install_scripts", "firmware_package_id": "firmware_packages", "rule_id": "alert_rules", "channel_id": "alert_channels", "window_id": "maintenance_windows"}
-var jsonFields = map[string]bool{"config": true, "layout": true, "compatible_models": true, "metrics": true, "selector": true}
+var jsonFields = map[string]bool{"config": true, "layout": true, "compatible_models": true, "metrics": true, "selector": true, "spec_json": true, "pricing_json": true, "detail_json": true}
 var hidden = " - 'bmc_secret_ciphertext' - 'bmc_secret_key_id' - 'password_hash' - 'secret_ciphertext' - 'secret_key_id' - 'callback_token_hash' - 'config_snapshot' - 'redfish_snapshot' - 'snapshot' - 'payload' - 'result' - 'before_snapshot' - 'after_snapshot'"
 
 func queryScope(db *gorm.DB, r resource, sc scope) *gorm.DB {

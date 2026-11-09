@@ -17,7 +17,7 @@ export function clearProjectRequests() {
   globalLoading.value = false
   NProgress.done()
 }
-const projectResources = new Set(['assets', 'tasks', 'images', 'alerts', 'audit', 'networks', 'ip-allocations', 'members', 'datacenters', 'racks', 'tags', 'alert-rules', 'alert-channels', 'kickstart-templates', 'ip-pools', 'firmware-packages', 'firmware-baselines', 'firmware-upgrades', 'install-plans', 'sol-sessions', 'hardware', 'firmware-inventory', 'installations', 'installation-events', 'asset-tags', 'install-plan-scripts', 'monitor-configs', 'pxe-configs', 'image-templates', 'partition-templates', 'post-install-scripts', 'sensor-records', 'asset-monitor-configs', 'maintenance-windows', 'roles', 'api-keys'])
+const projectResources = new Set(['assets', 'tasks', 'images', 'alerts', 'audit', 'networks', 'ip-allocations', 'members', 'datacenters', 'racks', 'tags', 'alert-rules', 'alert-channels', 'kickstart-templates', 'ip-pools', 'firmware-packages', 'firmware-baselines', 'firmware-upgrades', 'install-plans', 'sol-sessions', 'hardware', 'firmware-inventory', 'installations', 'installation-events', 'asset-tags', 'install-plan-scripts', 'monitor-configs', 'pxe-configs', 'image-templates', 'partition-templates', 'post-install-scripts', 'sensor-records', 'asset-monitor-configs', 'maintenance-windows', 'roles', 'api-keys', 'departments', 'products', 'orders', 'payments', 'bills', 'invoices', 'coupons', 'work-orders'])
 export const api = axios.create({ baseURL: '/api/v1', timeout: 30000 })
 api.interceptors.request.use(config => {
   const token = sessionStorage.getItem('bmm_token')
@@ -115,3 +115,78 @@ export function taskStatusType(status: unknown): 'success' | 'warning' | 'error'
   if (status === 'pending' || status === 'retry_wait') return 'warning'
   return 'default'
 }
+
+// === Setup API ===
+export const setupApi = {
+  getStatus: () => api.get('/setup/status'),
+  setMode: (mode: string) => api.post('/setup/mode', { mode }),
+  setConfig: (config: Record<string, any>) => api.post('/setup/config', config)
+}
+
+// === Department API ===
+export const departmentApi = resource
+export const departmentStats = (id: string) => api.get(`/departments/${id}/stats`)
+
+// === Depreciation API ===
+export const depreciationApi = {
+  get: (assetId: string) => api.get(`/assets/${assetId}/depreciation`),
+  warrantyAlerts: (days?: number) => api.get('/assets/warranty-alerts', { params: { days } })
+}
+
+// === Asset Assignment API ===
+export const assetAssignApi = {
+  assign: (assetId: string, departmentId: string) => api.post(`/assets/${assetId}/assign`, { department_id: departmentId }),
+  batchAssign: (assetIds: string[], departmentId: string) => api.post('/assets/batch-assign', { asset_ids: assetIds, department_id: departmentId })
+}
+
+// === Product API ===
+export const productApi = resource
+
+// === Order API ===
+export const orderApi = {
+  ...resource,
+  transition: (id: string, action: string) => api.post(`/orders/${id}/${action}`),
+  exportOrder: (id: string) => api.get(`/orders/${id}/export`, { responseType: 'blob' })
+}
+
+// === Account API ===
+export const accountApi = {
+  get: () => api.get('/accounts'),
+  recharge: (data: any) => api.post('/accounts/recharge', data)
+}
+
+// === Payment API ===
+export const paymentApi = resource
+
+// === Bill API ===
+export const billApi = {
+  ...resource,
+  generate: (data: any) => api.post('/bills/generate', data),
+  exportBill: (id: string) => api.get(`/bills/${id}/export`, { responseType: 'blob' })
+}
+
+// === Invoice API ===
+export const invoiceApi = {
+  ...resource,
+  updateStatus: (id: string, status: string) => api.put(`/invoices/${id}/${status}`)
+}
+
+// === Coupon API ===
+export const couponApi = {
+  ...resource,
+  redeem: (code: string) => api.post(`/coupons/${code}/redeem`)
+}
+
+// === Work Order API ===
+export const workOrderApi = {
+  ...resource,
+  transition: (id: string, action: string) => api.put(`/work-orders/${id}/${action}`)
+}
+
+// === Operations Dashboard API ===
+export const operationsApi = {
+  getDashboard: () => api.get('/admin/operations-dashboard')
+}
+
+// === Auth Register API ===
+export const authRegister = (data: any) => api.post('/auth/register', data)

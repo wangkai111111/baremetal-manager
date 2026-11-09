@@ -17,3 +17,8 @@ var ExpansionSQL string
 //
 //go:embed 003_target_schema.sql
 var TargetSQL string
+
+// ModeSystemSQL 是第 4 阶段迁移：系统部署模式、部门、资产折旧、运营体系及增强审计日志。
+//
+//go:embed 004_mode_system.sql
+var ModeSystemSQL string

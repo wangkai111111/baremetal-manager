@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, onUnmounted } from 'vue'
-import { api, unwrap, rows, clearProjectRequests, type RecordData } from '../api'
+import { api, unwrap, rows, clearProjectRequests, setupApi, type RecordData } from '../api'
 import dayjs from 'dayjs'
 
 // === 统一权限标识符常量 ===
@@ -28,7 +28,22 @@ export const Permissions = {
   SETTINGS_READ: 'settings:read',
   SETTINGS_WRITE: 'settings:write',
   PROJECTS_READ: 'projects:read',
-  PROJECTS_WRITE: 'projects:write'
+  PROJECTS_WRITE: 'projects:write',
+  BILLING_READ: 'billing:read',
+  BILLING_WRITE: 'billing:write',
+  ORDERS_READ: 'orders:read',
+  ORDERS_WRITE: 'orders:write',
+  PRODUCTS_READ: 'products:read',
+  PRODUCTS_WRITE: 'products:write',
+  FINANCE_READ: 'finance:read',
+  FINANCE_WRITE: 'finance:write',
+  MARKETING_READ: 'marketing:read',
+  MARKETING_WRITE: 'marketing:write',
+  OPERATIONS_READ: 'operations:read',
+  DEPARTMENTS_READ: 'departments:read',
+  DEPARTMENTS_WRITE: 'departments:write',
+  WORK_ORDERS_READ: 'work_orders:read',
+  WORK_ORDERS_WRITE: 'work_orders:write'
 } as const
 
 // === Membership 数据类型定义 ===
@@ -59,6 +74,38 @@ export const useAuth = defineStore('auth', () => {
   const projects = ref<RecordData[]>([])
   const contextReady = ref(false)
   const contextError = ref('')
+  const systemMode = ref<'self_use' | 'external_operation' | 'uninitialized'>('uninitialized')
+  const setupStatus = ref<{ initialized: boolean; mode: string; locked: boolean } | null>(null)
+
+  // === 系统初始化状态检查 ===
+  async function checkSetupStatus() {
+    try {
+      const data = unwrap<RecordData>(await setupApi.getStatus())
+      setupStatus.value = {
+        initialized: data.initialized === true,
+        mode: String(data.mode || 'uninitialized'),
+        locked: data.locked === true
+      }
+      if (data.initialized && data.mode) {
+        systemMode.value = data.mode === 'external_operation' ? 'external_operation' : 'self_use'
+      } else {
+        systemMode.value = 'uninitialized'
+      }
+    } catch {
+      // 检查初始化状态失败，默认为未初始化
+      setupStatus.value = null
+      systemMode.value = 'uninitialized'
+    }
+  }
+
+  function canAccessMode(mode: string): boolean {
+    if (systemMode.value === 'uninitialized') return false
+    if (systemMode.value === 'self_use' && mode === 'self_use') return true
+    if (systemMode.value === 'external_operation' && mode === 'external_operation') return true
+    // 自用模式下也可以访问部分通用功能
+    if (mode === 'both') return true
+    return false
+  }
 
   async function loadContext() {
     contextReady.value = false
@@ -283,6 +330,8 @@ export const useAuth = defineStore('auth', () => {
     projects,
     contextReady,
     contextError,
+    systemMode,
+    setupStatus,
     loadContext,
     loadProjects,
     selectTenant,
@@ -296,6 +345,8 @@ export const useAuth = defineStore('auth', () => {
     logout,
     can,
     loadProjectPermissions,
-    parseTokenExpiry
+    parseTokenExpiry,
+    checkSetupStatus,
+    canAccessMode
   }
 })

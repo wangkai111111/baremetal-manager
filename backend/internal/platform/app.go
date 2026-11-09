@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strconv"
@@ -16,10 +17,11 @@ import (
 )
 
 type App struct {
-	store  *store
-	secret []byte
-	node   string
-	router *gin.Engine
+	store         *store
+	secret        []byte
+	node          string
+	router        *gin.Engine
+	setupComplete bool // 系统是否已完成初始化设置
 }
 type store struct{ db *gorm.DB }
 type user struct {
@@ -47,6 +49,10 @@ func New(db *gorm.DB) (*App, error) {
 		return nil, errors.New("BMC_ENCRYPTION_KEY must be exactly 32 bytes")
 	}
 	a := &App{store: &store{db}, secret: []byte(secret), node: uuid.NewString()}
+	// 检查系统初始化设置是否完成
+	if complete, err := IsSetupComplete(db); err == nil {
+		a.setupComplete = complete
+	}
 	a.router = a.routes()
 	return a, nil
 }
@@ -193,4 +199,181 @@ func (a *App) readiness(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"status": "ready"})
+}
+
+// ============================================================
+// 系统初始化设置相关接口
+// ============================================================
+
+// setupStatus 返回系统初始化状态。
+// GET /api/v1/setup/status
+func (a *App) setupStatus(c *gin.Context) {
+	mode, err := GetSystemMode(a.store.db)
+	if err != nil {
+		fail(c, 500, "查询系统模式失败")
+		return
+	}
+	locked, err := IsModeLocked(a.store.db)
+	if err != nil {
+		fail(c, 500, "查询模式锁定状态失败")
+		return
+	}
+	ok(c, gin.H{
+		"initialized": a.setupComplete,
+		"mode":        mode,
+		"locked":      locked,
+	})
+}
+
+// setupMode 设置系统部署模式（需要管理员权限）。
+// POST /api/v1/setup/mode
+func (a *App) setupMode(c *gin.Context) {
+	if !current(c).IsPlatformAdmin {
+		fail(c, 403, "需要平台管理员权限")
+		return
+	}
+	if a.setupComplete {
+		fail(c, 400, "系统模式已初始化，不可重复设置")
+		return
+	}
+	var in struct {
+		Mode string `json:"mode"`
+	}
+	if c.ShouldBindJSON(&in) != nil || in.Mode == "" {
+		fail(c, 400, "请提供有效的系统模式")
+		return
+	}
+	if err := InitializeMode(a.store.db, in.Mode); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	a.setupComplete = true
+	ok(c, gin.H{
+		"mode":     in.Mode,
+		"features": GetAvailableFeatures(in.Mode),
+	})
+}
+
+// setupConfig 完成系统初始化配置（需要管理员权限）。
+// POST /api/v1/setup/config
+// 请求体: {admin_username, admin_password, admin_email, bmc_network, datacenter_name}
+func (a *App) setupConfig(c *gin.Context) {
+	if !current(c).IsPlatformAdmin {
+		fail(c, 403, "需要平台管理员权限")
+		return
+	}
+	var in struct {
+		AdminUsername   string `json:"admin_username"`
+		AdminPassword   string `json:"admin_password"`
+		AdminEmail      string `json:"admin_email"`
+		BMCNetwork      string `json:"bmc_network"`
+		DatacenterName  string `json:"datacenter_name"`
+	}
+	if c.ShouldBindJSON(&in) != nil {
+		fail(c, 400, "请求参数无效")
+		return
+	}
+	// 验证必填字段
+	if in.AdminUsername == "" || in.AdminPassword == "" {
+		fail(c, 400, "管理员用户名和密码为必填项")
+		return
+	}
+	if len(in.AdminPassword) < 12 || len(in.AdminPassword) > 72 {
+		fail(c, 400, "密码长度必须在12到72字节之间")
+		return
+	}
+
+	err := a.store.db.Transaction(func(tx *gorm.DB) error {
+		// 1. 创建或更新超级管理员用户
+		if in.AdminUsername != "" {
+			hash, e := bcrypt.GenerateFromPassword([]byte(in.AdminPassword), bcrypt.DefaultCost)
+			if e != nil {
+				return errors.New("密码加密失败")
+			}
+			var existingUser struct{ ID int64 }
+			e = tx.Table("users").Select("id").Where("lower(username)=lower(?) AND deleted_at IS NULL", in.AdminUsername).Scan(&existingUser.ID).Error
+			if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
+				return e
+			}
+			if existingUser.ID > 0 {
+				// 更新现有管理员密码
+				updates := map[string]any{"password_hash": string(hash), "status": "active"}
+				if in.AdminEmail != "" {
+					updates["email"] = in.AdminEmail
+				}
+				if e := tx.Table("users").Where("id=?", existingUser.ID).Updates(updates).Error; e != nil {
+					return e
+				}
+			} else {
+				// 创建新的超级管理员
+				email := in.AdminEmail
+				if email == "" {
+					email = in.AdminUsername + "@localhost"
+				}
+				userRow := map[string]any{
+					"username":          in.AdminUsername,
+					"password_hash":     string(hash),
+					"name":              in.AdminUsername,
+					"email":             email,
+					"role":              "admin",
+					"status":            "active",
+					"is_platform_admin": true,
+				}
+				if e := tx.Table("users").Create(&userRow).Error; e != nil {
+					return e
+				}
+			}
+		}
+
+		// 2. 存储 BMC 网络配置到 system_settings
+		if in.BMCNetwork != "" {
+			data, _ := json.Marshal(in.BMCNetwork)
+			if e := tx.Exec(
+				"INSERT INTO system_settings(key,value,create_by) VALUES (? (?),?) ON CONFLICT (key) WHERE deleted_at IS NULL DO UPDATE SET value=EXCLUDED.value",
+				"bmc.default_network", string(data), current(c).ID,
+			).Error; e != nil {
+				return e
+			}
+		}
+
+		// 3. 创建默认机房（如果提供了名称）
+		if in.DatacenterName != "" {
+			// 获取第一个可用项目作为机房归属
+			var project struct{ ID, TenantID int64 }
+			e := tx.Table("projects").Select("id,tenant_id").Where("deleted_at IS NULL AND status='active'").Order("id").Take(&project).Error
+			if e == nil {
+				dcRow := map[string]any{
+					"name":       in.DatacenterName,
+					"project_id": project.ID,
+					"create_by":  current(c).ID,
+				}
+				if e := tx.Table("datacenters").Create(&dcRow).Error; e != nil {
+					return e
+				}
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		fail(c, 500, "系统配置初始化失败: "+err.Error())
+		return
+	}
+	ok(c, gin.H{"message": "系统配置初始化完成"})
+}
+
+// requireSetup 中间件：检查系统是否已完成初始化设置。
+// 未完成时仅允许 /api/v1/setup/* 路由访问。
+func (a *App) requireSetup(c *gin.Context) {
+	if !a.setupComplete {
+		// 允许 setup 相关路由通过
+		path := c.Request.URL.Path
+		if strings.HasPrefix(path, "/api/v1/setup/") {
+			c.Next()
+			return
+		}
+		fail(c, 403, "系统尚未完成初始化设置，请先访问 /api/v1/setup/* 接口")
+		return
+	}
+	c.Next()
 }

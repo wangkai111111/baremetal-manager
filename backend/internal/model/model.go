@@ -62,6 +62,7 @@ type Asset struct {
 	PurchaseDate       *time.Time     `json:"purchase_date,omitempty" gorm:"comment:采购日期"`
 	WarrantyExpiry     *time.Time     `json:"warranty_expiry,omitempty" gorm:"comment:维保到期日期"`
 	Vendor             string         `json:"vendor" gorm:"size:200;comment:供应商"`
+	DepartmentID       *int64         `json:"department_id,omitempty" gorm:"index;comment:所属部门"`
 	RedfishSnapshot    string         `json:"-" gorm:"type:jsonb;default:null;comment:Redfish硬件信息快照"`
 	RedfishCollectedAt *time.Time     `json:"redfish_collected_at,omitempty" gorm:"comment:Redfish最近采集时间"`
 	RedfishError       string         `json:"redfish_error,omitempty" gorm:"type:text;comment:Redfish最近采集错误"`
@@ -390,6 +391,216 @@ type SystemSetting struct {
 	UpdatedBy   *uint     `json:"updated_by,omitempty" gorm:"comment:更新用户"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
+
+// ============================================================
+// 以下为 004_mode_system.sql 新增模型
+// ============================================================
+
+// SystemMode 系统部署模式
+type SystemMode struct {
+	ID        int64     `json:"id" gorm:"primaryKey;column:id"`
+	Mode      string    `json:"mode" gorm:"column:mode;not null"`
+	Locked    bool      `json:"locked" gorm:"column:locked;not null;default:false"`
+	CreatedAt time.Time `json:"created_at" gorm:"column:created_at"`
+	UpdatedAt time.Time `json:"updated_at" gorm:"column:updated_at"`
+}
+
+func (SystemMode) TableName() string { return "system_modes" }
+
+// Department 部门信息表（自用模式）
+type Department struct {
+	ID          uint           `json:"id" gorm:"primaryKey"`
+	TenantID    int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	Name        string         `json:"name" gorm:"column:name;size:128;not null"`
+	ParentID    *int64         `json:"parent_id,omitempty" gorm:"column:parent_id;index"`
+	Description string         `json:"description" gorm:"column:description;type:text"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// AssetDepreciation 资产折旧记录
+type AssetDepreciation struct {
+	ID                    uint           `json:"id" gorm:"primaryKey"`
+	TenantID              int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	AssetID               uint           `json:"asset_id" gorm:"column:asset_id;not null;index"`
+	DepreciationMethod    string         `json:"depreciation_method" gorm:"column:depreciation_method;size:32"`
+	PurchaseCost          float64        `json:"purchase_cost" gorm:"column:purchase_cost"`
+	SalvageValue          float64        `json:"salvage_value" gorm:"column:salvage_value"`
+	UsefulLifeMonths      int            `json:"useful_life_months" gorm:"column:useful_life_months"`
+	MonthlyDepreciation   float64        `json:"monthly_depreciation" gorm:"column:monthly_depreciation"`
+	AccumulatedDepreciation float64      `json:"accumulated_depreciation" gorm:"column:accumulated_depreciation"`
+	NetValue              float64        `json:"net_value" gorm:"column:net_value"`
+	StartDate             *time.Time     `json:"start_date,omitempty" gorm:"column:start_date"`
+	Status                string         `json:"status" gorm:"column:status;size:16"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
+	DeletedAt             gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// TenantProfile 租户扩展档案（运营模式）
+type TenantProfile struct {
+	ID             uint           `json:"id" gorm:"primaryKey"`
+	TenantID       int64          `json:"tenant_id" gorm:"column:tenant_id;not null;uniqueIndex"`
+	ContactName    string         `json:"contact_name" gorm:"column:contact_name;size:128"`
+	ContactPhone   string         `json:"contact_phone" gorm:"column:contact_phone;size:32"`
+	ContactEmail   string         `json:"contact_email" gorm:"column:contact_email;size:255"`
+	CompanyName    string         `json:"company_name" gorm:"column:company_name;size:256"`
+	CompanyAddress string         `json:"company_address" gorm:"column:company_address;type:text"`
+	IDNumber       string         `json:"id_number" gorm:"column:id_number;size:64"`
+	Verified       bool           `json:"verified" gorm:"column:verified;not null;default:false"`
+	VerifiedAt     *time.Time     `json:"verified_at,omitempty" gorm:"column:verified_at"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// Product 产品/型号上架表（运营模式）
+type Product struct {
+	ID            uint           `json:"id" gorm:"primaryKey"`
+	TenantID      int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	Name          string         `json:"name" gorm:"column:name;size:128;not null"`
+	Description   string         `json:"description" gorm:"column:description;type:text"`
+	SpecJSON      string         `json:"spec_json" gorm:"column:spec_json;type:jsonb"`
+	PricingJSON   string         `json:"pricing_json" gorm:"column:pricing_json;type:jsonb"`
+	BillingCycle  string         `json:"billing_cycle" gorm:"column:billing_cycle;size:16"`
+	Status        string         `json:"status" gorm:"column:status;size:16;not null;default:active"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// Order 订单记录（运营模式）
+type Order struct {
+	ID             uint           `json:"id" gorm:"primaryKey"`
+	TenantID       int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	UserID         int64          `json:"user_id" gorm:"column:user_id;not null;index"`
+	Type           string         `json:"type" gorm:"column:type;size:16;not null"`
+	ProductID      *int64         `json:"product_id,omitempty" gorm:"column:product_id;index"`
+	AssetID        *int64         `json:"asset_id,omitempty" gorm:"column:asset_id;index"`
+	Amount         float64        `json:"amount" gorm:"column:amount;not null;default:0"`
+	DiscountAmount float64        `json:"discount_amount" gorm:"column:discount_amount;not null;default:0"`
+	FinalAmount    float64        `json:"final_amount" gorm:"column:final_amount;not null;default:0"`
+	Status         string         `json:"status" gorm:"column:status;size:16;not null;default:pending"`
+	PaidAt         *time.Time     `json:"paid_at,omitempty" gorm:"column:paid_at"`
+	CompletedAt    *time.Time     `json:"completed_at,omitempty" gorm:"column:completed_at"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// Bill 账单记录（运营模式）
+type Bill struct {
+	ID          uint           `json:"id" gorm:"primaryKey"`
+	TenantID    int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	PeriodStart *time.Time     `json:"period_start,omitempty" gorm:"column:period_start"`
+	PeriodEnd   *time.Time     `json:"period_end,omitempty" gorm:"column:period_end"`
+	TotalAmount float64        `json:"total_amount" gorm:"column:total_amount;not null;default:0"`
+	Status      string         `json:"status" gorm:"column:status;size:16;not null;default:unpaid"`
+	DetailJSON  string         `json:"detail_json" gorm:"column:detail_json;type:jsonb"`
+	DueDate     *time.Time     `json:"due_date,omitempty" gorm:"column:due_date"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// Account 租户账户余额（运营模式）
+type Account struct {
+	ID            uint           `json:"id" gorm:"primaryKey"`
+	TenantID      int64          `json:"tenant_id" gorm:"column:tenant_id;not null;uniqueIndex"`
+	Balance       float64        `json:"balance" gorm:"column:balance;not null;default:0"`
+	FrozenAmount  float64        `json:"frozen_amount" gorm:"column:frozen_amount;not null;default:0"`
+	CreditLimit   float64        `json:"credit_limit" gorm:"column:credit_limit;not null;default:0"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// Payment 支付记录（运营模式）
+type Payment struct {
+	ID            uint           `json:"id" gorm:"primaryKey"`
+	AccountID     int64          `json:"account_id" gorm:"column:account_id;not null;index"`
+	Amount        float64        `json:"amount" gorm:"column:amount;not null"`
+	Method        string         `json:"method" gorm:"column:method;size:16"`
+	Status        string         `json:"status" gorm:"column:status;size:16;not null;default:pending"`
+	TransactionID string         `json:"transaction_id" gorm:"column:transaction_id;size:128"`
+	PaidAt        *time.Time     `json:"paid_at,omitempty" gorm:"column:paid_at"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// Invoice 发票记录（运营模式）
+type Invoice struct {
+	ID         uint           `json:"id" gorm:"primaryKey"`
+	TenantID   int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	BillID     *int64         `json:"bill_id,omitempty" gorm:"column:bill_id;index"`
+	Type       string         `json:"type" gorm:"column:type;size:16"`
+	Title      string         `json:"title" gorm:"column:title;size:256"`
+	TaxNumber  string         `json:"tax_number" gorm:"column:tax_number;size:64"`
+	Amount     float64        `json:"amount" gorm:"column:amount"`
+	Status     string         `json:"status" gorm:"column:status;size:16;not null;default:requested"`
+	IssuedAt   *time.Time     `json:"issued_at,omitempty" gorm:"column:issued_at"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// Coupon 优惠券（运营模式）
+type Coupon struct {
+	ID          uint           `json:"id" gorm:"primaryKey"`
+	TenantID    *int64         `json:"tenant_id,omitempty" gorm:"column:tenant_id;index"`
+	Code        string         `json:"code" gorm:"column:code;size:64;uniqueIndex"`
+	Name        string         `json:"name" gorm:"column:name;size:128"`
+	Type        string         `json:"type" gorm:"column:type;size:16"`
+	Value       float64        `json:"value" gorm:"column:value"`
+	MinAmount   float64        `json:"min_amount" gorm:"column:min_amount;not null;default:0"`
+	MaxDiscount *float64       `json:"max_discount,omitempty" gorm:"column:max_discount"`
+	ValidFrom   *time.Time     `json:"valid_from,omitempty" gorm:"column:valid_from"`
+	ValidUntil  *time.Time     `json:"valid_until,omitempty" gorm:"column:valid_until"`
+	UsageLimit  *int           `json:"usage_limit,omitempty" gorm:"column:usage_limit"`
+	UsedCount   int            `json:"used_count" gorm:"column:used_count;not null;default:0"`
+	Status      string         `json:"status" gorm:"column:status;size:16;not null;default:active"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// WorkOrder 工单（两种模式通用）
+type WorkOrder struct {
+	ID          uint           `json:"id" gorm:"primaryKey"`
+	TenantID    int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	UserID      int64          `json:"user_id" gorm:"column:user_id;not null;index"`
+	Type        string         `json:"type" gorm:"column:type;size:16;not null"`
+	Title       string         `json:"title" gorm:"column:title;size:256;not null"`
+	Description string         `json:"description" gorm:"column:description;type:text"`
+	Status      string         `json:"status" gorm:"column:status;size:16;not null;default:open"`
+	Priority    string         `json:"priority" gorm:"column:priority;size:16;not null;default:medium"`
+	AssignedTo  *int64         `json:"assigned_to,omitempty" gorm:"column:assigned_to;index"`
+	ResolvedAt  *time.Time     `json:"resolved_at,omitempty" gorm:"column:resolved_at"`
+	ClosedAt    *time.Time     `json:"closed_at,omitempty" gorm:"column:closed_at"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+}
+
+// OperationAuditLog 增强审计日志
+type OperationAuditLog struct {
+	ID         int64     `json:"id" gorm:"primaryKey;column:id"`
+	TenantID   *int64    `json:"tenant_id,omitempty" gorm:"column:tenant_id;index"`
+	ProjectID  *int64    `json:"project_id,omitempty" gorm:"column:project_id;index"`
+	UserID     *int64    `json:"user_id,omitempty" gorm:"column:user_id;index"`
+	Action     string    `json:"action" gorm:"column:action;size:128;not null"`
+	TargetType string    `json:"target_type" gorm:"column:target_type;size:64"`
+	TargetID   *int64    `json:"target_id,omitempty" gorm:"column:target_id"`
+	Detail     string    `json:"detail" gorm:"column:detail;type:jsonb"`
+	ClientIP   string    `json:"client_ip" gorm:"column:client_ip;size:64"`
+	UserAgent  string    `json:"user_agent" gorm:"column:user_agent;type:text"`
+	Result     string    `json:"result" gorm:"column:result;size:16"`
+	CreatedAt  time.Time `json:"created_at" gorm:"column:created_at"`
+}
+
+func (OperationAuditLog) TableName() string { return "operation_audit_logs" }
 
 // KickstartTemplate 装机应答模板表
 type KickstartTemplate struct {

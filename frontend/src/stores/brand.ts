@@ -14,6 +14,8 @@ export const loginNotice = ref('')
 export const operationMode = ref<'self_hosted' | 'external'>('self_hosted')
 export const emailVerificationRequired = ref(false)
 export const billingEnabled = ref(false)
+export const systemMode = ref('')
+export const theme = ref('light')
 
 // 从公开接口读取平台名称、Logo、导航栏配色与应用设置
 export async function loadBrand() {
@@ -30,6 +32,8 @@ export async function loadBrand() {
     operationMode.value = data.operation_mode === 'external' ? 'external' : 'self_hosted'
     emailVerificationRequired.value = data.email_verification_required === true
     billingEnabled.value = data.billing_enabled === true
+    systemMode.value = String(data.operation_mode || data.operationMode || '')
+    theme.value = String(data.theme || 'light')
     // 同步更新浏览器标签页标题
     document.title = platformName.value
   } catch {

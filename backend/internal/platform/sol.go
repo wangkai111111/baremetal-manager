@@ -308,6 +308,10 @@ func (a *App) updateSettings(c *gin.Context) {
 		fail(c, 500, "settings update failed")
 		return
 	}
+	// 如果更新了运行模式设置，清除模式缓存
+	if _, ok := in["platform.operation_mode"]; ok {
+		InvalidateModeCache()
+	}
 	ok(c, a.publicSettings())
 }
 
