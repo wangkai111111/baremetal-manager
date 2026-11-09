@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import {
   NButton,
   NInput,
+  NInputNumber,
   NDataTable,
   NModal,
   NForm,
@@ -16,7 +17,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { h } from 'vue'
-import { errorText, resource, rows, type RecordData } from '../api'
+import { api, errorText, resource, rows, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
 import {
   footerText,
@@ -33,7 +34,7 @@ const message = useMessage()
 const auth = useAuth()
 
 // === 设置项分类 ===
-type SettingCategory = 'theme' | 'app' | 'bmc' | 'monitor' | 'alert' | 'sol' | 'pxe'
+type SettingCategory = 'theme' | 'app' | 'operation' | 'bmc' | 'monitor' | 'alert' | 'sol' | 'pxe'
 
 // === 列表数据状态 ===
 const items = ref<RecordData[]>([])
@@ -53,6 +54,7 @@ const isAdmin = computed(() => auth.user?.role === 'admin' || auth.can('settings
 const categoryPrefixes: Record<SettingCategory, string[]> = {
   theme: ['brand.', 'theme.'],
   app: ['app.'],
+  operation: ['platform.', 'registration.', 'billing.'],
   bmc: ['bmc.'],
   monitor: ['monitor.', 'scan.'],
   alert: ['alert.', 'notify.'],
@@ -89,6 +91,50 @@ const appFooterVisible = ref(footerVisible.value)
 const appLoginNotice = ref(loginNotice.value)
 const appSaving = ref(false)
 
+const operationMode = ref('self_hosted')
+const registrationEnabled = ref(false)
+const emailVerification = ref(false)
+const billingEnabled = ref(false)
+const pricingJson = ref('[]')
+const operationSaving = ref(false)
+const smtpHost = ref('')
+const smtpPort = ref(587)
+const smtpUsername = ref('')
+const smtpPassword = ref('')
+const smtpFrom = ref('')
+const smtpTls = ref(true)
+const smtpTestTo = ref('')
+const smtpTesting = ref(false)
+const smtpTestResult = ref('')
+const smtpTestSucceeded = ref(false)
+
+async function testSMTP() {
+  if (!isAdmin.value || smtpTesting.value) return
+  smtpTestResult.value = ''
+  if (!smtpHost.value.trim() || !smtpPort.value || !smtpFrom.value.trim() || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(smtpTestTo.value.trim())) {
+    message.warning('请填写 SMTP 主机、端口、发件人和有效的测试收件邮箱')
+    return
+  }
+  smtpTesting.value = true
+  try {
+    await api.post('/settings/smtp-test', {
+      host: smtpHost.value.trim(), port: smtpPort.value,
+      username: smtpUsername.value.trim(),
+      password: smtpPassword.value === '********' ? '' : smtpPassword.value,
+      from: smtpFrom.value.trim(), tls: smtpTls.value, to: smtpTestTo.value.trim()
+    })
+    smtpTestSucceeded.value = true
+    smtpTestResult.value = 'SMTP 服务器已接受测试邮件，请检查收件箱或垃圾邮件。'
+    message.success(smtpTestResult.value)
+  } catch (error) {
+    smtpTestSucceeded.value = false
+    smtpTestResult.value = errorText(error)
+    message.error(smtpTestResult.value)
+  } finally {
+    smtpTesting.value = false
+  }
+}
+
 // === 从设置项同步主题字段 ===
 function syncBrand() {
   const nameItem = items.value.find(item => String(item.key) === 'brand.platform_name')
@@ -115,6 +161,53 @@ function resetTheme() {
 }
 
 // === 从设置项同步应用配置 ===
+function syncOperation() {
+  const mode = items.value.find(item => String(item.key) === 'platform.operation_mode')
+  const email = items.value.find(item => String(item.key) === 'registration.email_verification')
+  const billing = items.value.find(item => String(item.key) === 'billing.enabled')
+  const prices = items.value.find(item => String(item.key) === 'billing.model_prices')
+  smtpHost.value = String(items.value.find(item => String(item.key) === 'smtp.host')?.value || '')
+  smtpPort.value = Number(items.value.find(item => String(item.key) === 'smtp.port')?.value || 587)
+  smtpUsername.value = String(items.value.find(item => String(item.key) === 'smtp.username')?.value || '')
+  smtpFrom.value = String(items.value.find(item => String(item.key) === 'smtp.from')?.value || '')
+  smtpTls.value = String(items.value.find(item => String(item.key) === 'smtp.tls')?.value) !== 'false'
+  operationMode.value = mode?.value === 'external' ? 'external' : 'self_hosted'
+  registrationEnabled.value = String(items.value.find(item => String(item.key) === 'registration.enabled')?.value) === 'true'
+  emailVerification.value = String(email?.value) === 'true'
+  billingEnabled.value = String(billing?.value) === 'true'
+  pricingJson.value = String(prices?.value || '[]')
+}
+
+async function saveOperationSettings() {
+  operationSaving.value = true
+  try {
+    if (!['self_hosted', 'external'].includes(operationMode.value)) throw new Error('请选择有效运营模式')
+    JSON.parse(pricingJson.value)
+    const smtpEntries: Record<string, unknown> = {
+      'smtp.host': smtpHost.value,
+      'smtp.port': Number(smtpPort.value),
+      'smtp.username': smtpUsername.value,
+      ...(smtpPassword.value ? { 'smtp.password': smtpPassword.value } : {}),
+      'smtp.from': smtpFrom.value,
+      'smtp.tls': smtpTls.value
+    }
+    for (const [key, value] of Object.entries(smtpEntries)) await resource.update('/settings', key, { value })
+    for (const [key, value] of Object.entries({
+      'platform.operation_mode': operationMode.value,
+      'billing.enabled': billingEnabled.value,
+      'billing.model_prices': JSON.parse(pricingJson.value),
+      'registration.enabled': registrationEnabled.value,
+      'registration.email_verification': emailVerification.value
+    })) await resource.update('/settings', key, { value })
+    message.success('运营策略已保存')
+    await load()
+  } catch (e) {
+    message.error(errorText(e))
+  } finally {
+    operationSaving.value = false
+  }
+}
+
 function syncApp() {
   const footerItem = items.value.find(item => String(item.key) === 'app.footer_text')
   const visibleItem = items.value.find(item => String(item.key) === 'app.footer_visible')
@@ -189,6 +282,7 @@ async function load() {
     syncBrand()
     syncTheme()
     syncApp()
+    syncOperation()
   } catch (e) {
     message.error(errorText(e))
   } finally {
@@ -425,6 +519,7 @@ async function saveAppSettings() {
 const tabLabels: Record<SettingCategory, string> = {
   theme: '主题设置',
   app: '应用设置',
+  operation: '运营策略',
   bmc: 'BMC 配置',
   monitor: '监控配置',
   alert: '告警配置',
@@ -579,6 +674,36 @@ const tabLabels: Record<SettingCategory, string> = {
         </div>
       </div>
 
+      <!-- 运营设置：平台模式、租户隔离、计费与注册策略 -->
+      <div v-else-if="activeTab === 'operation'" class="theme-settings operation-settings">
+        <div class="operation-hero"><div><div class="operation-kicker">OPERATIONS CONTROL / 01—03</div><h2>运营策略</h2><p>集中管理部署边界、身份验证与商业化规则，变更仅影响平台策略层。</p></div><div class="operation-status"><span class="status-dot" />{{ operationMode === 'external' ? '对外运营模式' : '自用模式' }}</div></div>
+        <section class="operation-card operation-mode-card"><div class="operation-card-head"><div><span class="operation-index">01</span><div><h3>部署模式</h3><p>选择平台的资产边界与租户组织方式。</p></div></div><span class="card-meta">ACCESS MODEL</span></div><div class="mode-options">
+          <button type="button" class="mode-option" :class="{ active: operationMode === 'self_hosted' }" :aria-pressed="operationMode === 'self_hosted'" :disabled="!isAdmin" @click="operationMode = 'self_hosted'"><span class="mode-radio"><span /></span><span><strong>自用模式</strong><small>适用于单一组织的内部基础设施管理。</small></span><span class="mode-code">SELF</span></button>
+          <button type="button" class="mode-option" :class="{ active: operationMode === 'external' }" :aria-pressed="operationMode === 'external'" :disabled="!isAdmin" @click="operationMode = 'external'"><span class="mode-radio"><span /></span><span><strong>对外运营模式</strong><small>租户仅可查看和操作自己创建的资产。</small></span><span class="mode-code">MULTI</span></button>
+        </div></section>
+        <section class="operation-card identity-card"><div class="operation-card-head"><div><span class="operation-index">02</span><div><h3>身份与邮件</h3><p>配置注册验证流程与系统发信通道。</p></div></div><span class="card-meta">IDENTITY / SMTP</span></div>
+          <div class="setting-toggle-row"><div><strong>开放注册</strong><p>默认关闭。控制是否允许访客自主创建账号，与邮箱验证独立配置。</p></div><n-switch v-model:value="registrationEnabled" :disabled="!isAdmin" /></div>
+          <div class="setting-toggle-row"><div><strong>注册邮箱验证</strong><p>开启后，新租户注册必须完成邮箱验证。</p></div><n-switch v-model:value="emailVerification" :disabled="!isAdmin" /></div>
+          <div v-if="emailVerification" class="operation-notice">启用邮箱验证前，请确认 SMTP 主机、端口、账号、密码和发件人均已填写。</div>
+          <div class="smtp-block"><div class="subsection-label">SMTP 发信配置</div><n-form label-placement="top" class="smtp-form">
+            <n-form-item label="SMTP 主机"><n-input v-model:value="smtpHost" :disabled="!isAdmin" placeholder="smtp.example.com" /></n-form-item><n-form-item label="SMTP 端口"><n-input-number v-model:value="smtpPort" :disabled="!isAdmin" :min="1" :max="65535" /></n-form-item>
+            <n-form-item label="SMTP 用户名"><n-input v-model:value="smtpUsername" :disabled="!isAdmin" placeholder="mailer@example.com" /></n-form-item><n-form-item label="SMTP 密码"><n-input v-model:value="smtpPassword" type="password" show-password-on="click" :disabled="!isAdmin" placeholder="留空表示保持原密码" /></n-form-item>
+            <n-form-item label="发件人地址"><n-input v-model:value="smtpFrom" :disabled="!isAdmin" placeholder="noreply@example.com" /></n-form-item><n-form-item label="传输加密 TLS"><n-switch v-model:value="smtpTls" :disabled="!isAdmin" /></n-form-item>
+          </n-form>
+          <div class="smtp-test-panel">
+            <n-form-item label="测试收件邮箱" label-placement="top"><n-input v-model:value="smtpTestTo" :disabled="!isAdmin || smtpTesting" placeholder="输入用于接收测试邮件的邮箱" /></n-form-item>
+            <n-button :disabled="!isAdmin" :loading="smtpTesting" @click="testSMTP">发送测试邮件</n-button>
+            <p>使用当前表单配置发送，不会自动保存；密码留空时使用已保存的密码。认证发信需启用 TLS。</p>
+            <n-alert v-if="smtpTestResult" :type="smtpTestSucceeded ? 'success' : 'error'" role="status">{{ smtpTestResult }}</n-alert>
+          </div></div>
+        </section>
+        <section class="operation-card billing-card"><div class="operation-card-head"><div><span class="operation-index">03</span><div><h3>商业化计费</h3><p>维护资源定价策略，不代表已接入支付渠道。</p></div></div><span class="card-meta">BILLING</span></div>
+          <div class="setting-toggle-row"><div><strong>启用计费系统</strong><p>开启后平台可读取机型定价配置。</p></div><n-switch v-model:value="billingEnabled" :disabled="!isAdmin" /></div>
+          <div v-if="billingEnabled" class="pricing-editor"><div class="subsection-label">机型定价配置 <span>高级配置 · JSON</span></div><n-input v-model:value="pricingJson" type="textarea" :rows="7" :disabled="!isAdmin" placeholder="[{&quot;model&quot;:&quot;R750&quot;,&quot;unit&quot;:&quot;hour&quot;,&quot;price&quot;:12.5,&quot;currency&quot;:&quot;CNY&quot;}]" /></div>
+        </section>
+        <div class="operation-savebar"><div><span class="savebar-mark" />保存后对平台策略生效</div><div class="operation-actions"><n-button quaternary @click="syncOperation">重置</n-button><n-button v-if="isAdmin" type="primary" :loading="operationSaving" @click="saveOperationSettings">保存运营设置</n-button></div></div>
+      </div>
+
       <!-- 应用设置：侧边栏底部文案、登录页公告等 -->
       <div v-else-if="activeTab === 'app'" class="theme-settings">
         <div class="app-form">
@@ -684,3 +809,20 @@ const tabLabels: Record<SettingCategory, string> = {
     </n-modal>
   </div>
 </template>
+
+<style scoped>
+.operation-settings { background: #f6f8f9; padding: 28px; color: #1f3038; }
+.operation-hero { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; }
+.operation-kicker,.card-meta,.subsection-label { color:#74838a; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
+.operation-hero h2 { margin:8px 0 6px; font-size:28px; letter-spacing:-.03em; }.operation-hero p,.operation-card-head p,.setting-toggle-row p { margin:0; color:#74838a; font-size:13px; }
+.operation-status { display:flex; align-items:center; gap:8px; color:#69787e; font-size:12px; padding-top:8px; }.status-dot,.savebar-mark { width:7px; height:7px; display:inline-block; border-radius:50%; background:#d49644; }
+.operation-card { background:#fff; border:1px solid #dfe6e8; border-radius:4px; padding:24px; margin-bottom:16px; box-shadow:0 4px 14px rgba(31,48,56,.035); }.operation-card-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:22px; }.operation-card-head > div { display:flex; gap:14px; align-items:flex-start; }.operation-index { color:#c17a2d; font:700 11px/1.8 ui-monospace,SFMono-Regular,monospace; }.operation-card h3 { margin:0 0 5px; font-size:17px; }
+.mode-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.mode-option { display:flex; align-items:center; gap:13px; min-height:78px; padding:15px 16px; text-align:left; background:#fbfcfc; border:1px solid #dfe6e8; border-radius:3px; color:#1f3038; cursor:pointer; transition:.16s ease; }.mode-option:hover:not(:disabled),.mode-option.active { border-color:#c17a2d; background:#fffaf4; }.mode-option:disabled { cursor:not-allowed; opacity:.55; }.mode-option strong,.setting-toggle-row strong { display:block; font-size:14px; }.mode-option small { display:block; margin-top:5px; color:#7a898f; font-size:11px; }.mode-radio { width:16px; height:16px; flex:0 0 16px; border:1px solid #aebcc1; border-radius:50%; display:grid; place-items:center; }.mode-option.active .mode-radio { border-color:#c17a2d; }.mode-option.active .mode-radio span { width:8px; height:8px; border-radius:50%; background:#c17a2d; }.mode-code { margin-left:auto; color:#9aa7ab; font:10px ui-monospace,monospace; }
+.setting-toggle-row { display:flex; justify-content:space-between; align-items:center; gap:20px; padding:15px 0; border-top:1px solid #edf0f1; }.operation-notice { margin:4px 0 20px; padding:11px 13px; border-left:3px solid #d49644; background:#fff8ed; color:#765a35; font-size:12px; }.smtp-block,.pricing-editor { border-top:1px solid #edf0f1; padding-top:18px; margin-top:10px; }.subsection-label { margin-bottom:14px; }.subsection-label span { color:#a2adb1; letter-spacing:0; text-transform:none; font-weight:400; }.smtp-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:18px; }.smtp-form :deep(.n-form-item) { margin-bottom:16px; }.smtp-form :deep(.n-input-number) { width:100%; }
+.operation-savebar { display:flex; justify-content:space-between; align-items:center; padding:15px 4px 2px; color:#75848a; font-size:12px; }.operation-savebar > div:first-child { display:flex; align-items:center; gap:8px; }.operation-actions { display:flex; gap:10px; }
+@media (min-width: 1050px) { .operation-settings { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }.operation-hero,.operation-savebar,.operation-mode-card,.identity-card,.billing-card { grid-column:1/-1; } }
+.operation-settings .mode-option:focus-visible { outline: 2px solid #237b70; outline-offset: 3px; }
+.smtp-test-panel { border-top: 1px solid #e4e9ed; padding-top: 18px; }
+.smtp-test-panel > p { color: #64748b; font-size: 12px; line-height: 1.7; margin: 12px 0; }
+@media (max-width: 680px) { .operation-settings { padding:18px 14px; }.operation-hero { display:block; }.operation-status { margin-top:14px; }.operation-card { padding:18px 16px; }.mode-options,.smtp-form { grid-template-columns:1fr; }.card-meta { display:none; }.operation-savebar { align-items:flex-start; gap:14px; flex-direction:column; } }
+</style>

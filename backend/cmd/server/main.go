@@ -2,68 +2,91 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"baremetal-manager/backend/internal/handler"
-	"baremetal-manager/backend/internal/model"
-	"baremetal-manager/backend/internal/repository"
-	"baremetal-manager/backend/internal/service"
-	"baremetal-manager/backend/seeds"
-	"golang.org/x/crypto/bcrypt"
+	"baremetal-manager/backend/internal/platform"
+	"baremetal-manager/backend/migrations"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-// main 初始化依赖及管理员账户，并按启动参数运行 API、任务工作进程或调度器。
+// main 将迁移与运行分离，API 与工作节点绝不执行 AutoMigrate。
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	dsn := os.Getenv("DATABASE_URL")
-	redisURL := os.Getenv("REDIS_URL")
-	if dsn == "" || redisURL == "" {
-		log.Fatal("DATABASE_URL and REDIS_URL are required")
+	if dsn == "" {
+		return errors.New("DATABASE_URL is required")
 	}
-	service.RequiredSecret()
-	store, err := repository.Open(dsn)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	// 执行种子数据初始化（默认系统设置等）
-	if err := seeds.SeedData(store.DB); err != nil {
-		log.Printf("种子数据初始化警告: %v", err)
-	}
-	s, err := service.New(store, redisURL)
+	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer s.Queue.Close()
-	if username, password := os.Getenv("BOOTSTRAP_ADMIN_USER"), os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"); username != "" && password != "" {
-		var count int64
-		store.DB.Model(&model.User{}).Count(&count)
-		if count == 0 {
-			hash, e := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-			if e != nil {
-				log.Fatal(e)
-			}
-			store.DB.Create(&model.User{Username: username, PasswordHash: string(hash), Role: "admin"})
-		}
-	}
+	defer sqlDB.Close()
+	sqlDB.SetMaxOpenConns(20)
+	sqlDB.SetMaxIdleConns(5)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	mode := "api"
 	if len(os.Args) > 1 {
 		mode = os.Args[1]
 	}
+	if mode == "migrate" {
+		if err := migrations.Apply(db); err != nil {
+			return err
+		}
+		if err := migrations.Bootstrap(db); err != nil {
+			return err
+		}
+		if err := migrations.GrantApplicationRole(db); err != nil {
+			return err
+		}
+		log.Print("target schema migration and bootstrap completed")
+		return nil
+	}
+	if err := migrations.Verify(db); err != nil {
+		return err
+	}
+	app, err := platform.New(db)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	switch mode {
 	case "worker":
-		log.Fatal(s.Worker(redisURL))
+		app.Worker(ctx)
 	case "scheduler":
-		s.Scheduler(context.Background())
+		app.Scheduler(ctx)
 	case "api":
-		h, e := handler.New(s)
-		if e != nil {
-			log.Fatal(e)
+		server := &http.Server{Addr: ":8000", Handler: app.Router(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
+		done := make(chan error, 1)
+		go func() { done <- server.ListenAndServe() }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+		case <-ctx.Done():
+			shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			return server.Shutdown(shutdown)
 		}
-		server := &http.Server{Addr: ":8000", Handler: h.Router(), ReadHeaderTimeout: 10 * time.Second}
-		log.Fatal(server.ListenAndServe())
 	default:
-		log.Fatal("unknown mode")
+		return errors.New("unknown mode: expected api, worker, scheduler or migrate")
 	}
+	return nil
 }

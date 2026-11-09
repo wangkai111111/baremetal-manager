@@ -59,7 +59,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
       return dc ? String(dc.label) : String(row.datacenter_id ?? '—')
     }
   },
-  { title: 'U 位高度', key: 'height_u', minWidth: 90 },
+  { title: 'U 位高度', key: 'total_u', minWidth: 90 },
   { title: '位置', key: 'location', minWidth: 120 },
   { title: '供电容量', key: 'power_capacity', minWidth: 100 },
   { title: '创建时间', key: 'created_at', minWidth: 150 },
@@ -142,20 +142,22 @@ watch(
 // === 打开新建/编辑弹窗 ===
 function openEdit(row?: RecordData) {
   currentId.value = row?.id ?? null
-  form.value = row ? { ...row } : { height_u: 42 }
+  form.value = row ? { ...row } : { total_u: 42 }
   editing.value = true
 }
 
 // === 打开 U 位可视化 ===
-function openUVisualization(row: RecordData) {
+async function openUVisualization(row: RecordData) {
   selectedRack.value = row
-  const heightU = Number(row.height_u || 42)
-  // 模拟 U 位状态：随机标记部分为已用（实际应从后端获取）
-  uSlots.value = Array.from({ length: heightU }, (_, i) => ({
-    u: heightU - i,
-    status: Math.random() > 0.7 ? 'used' : 'free'
-  }))
-  showUVis.value = true
+  uSlots.value = []
+  try {
+    const result = rows(await resource.list('/assets', { rack_id: row.id, page_size: 100 }))
+    if (result.total > result.items.length) throw new Error('资产记录未完整加载，无法准确展示 U 位')
+    const occupied = new Set(result.items.filter(asset => String(asset.rack_id) === String(row.id)).map(asset => Number(asset.rack_u_position)).filter(u => u > 0))
+    const heightU = Number(row.total_u || 42)
+    uSlots.value = Array.from({ length: heightU }, (_, i) => ({ u: heightU - i, status: occupied.has(heightU - i) ? 'used' : 'free' }))
+    showUVis.value = true
+  } catch (e) { message.error(errorText(e)) }
 }
 
 // === 保存机柜数据 ===
@@ -169,7 +171,7 @@ async function save() {
     const payload = {
       name: form.value.name,
       datacenter_id: form.value.datacenter_id || null,
-      height_u: form.value.height_u || 42,
+      total_u: form.value.total_u || 42,
       location: form.value.location || '',
       power_capacity: form.value.power_capacity || 0
     }
@@ -279,7 +281,7 @@ async function remove(row: RecordData) {
             />
           </n-form-item>
           <n-form-item label="U 位高度">
-            <n-input-number v-model:value="(form.height_u as number)" :min="1" :max="50" style="width: 100%" />
+            <n-input-number v-model:value="(form.total_u as number)" :min="1" :max="50" style="width: 100%" />
           </n-form-item>
           <n-form-item label="位置">
             <n-input v-model:value="(form.location as string)" placeholder="请输入机柜位置" />

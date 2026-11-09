@@ -1,128 +1,24 @@
 <script setup lang="ts">
-// 装机方案管理页面 — 查看装机任务进度与状态（重装执行暂不支持）
-import { computed, ref, watch } from 'vue'
-import {
-  NButton,
-  NDataTable,
-  NTag,
-  NProgress,
-  useMessage
-} from 'naive-ui'
-import type { DataTableColumns } from 'naive-ui'
-import { h } from 'vue'
-import { errorText, resource, rows, type RecordData } from '../api'
-import { useAuth } from '../stores/auth'
-
-const message = useMessage()
-const auth = useAuth()
-
-// === 列表数据状态 ===
-const items = ref<RecordData[]>([])
-const total = ref(0)
-const loading = ref(false)
-const page = ref(1)
-const pageSize = 20
-
-// === 状态标签颜色映射 ===
-function statusTagType(status: unknown): 'success' | 'warning' | 'error' | 'info' | 'default' {
-  const s = String(status || '').toLowerCase()
-  return s === 'completed' ? 'success'
-    : s === 'running' ? 'info'
-    : s === 'failed' ? 'error'
-    : s === 'pending' ? 'warning'
-    : 'default'
-}
-
-// === 表格列定义 ===
-const columns = computed<DataTableColumns<RecordData>>(() => [
-  { title: '资产名称', key: 'asset_name', minWidth: 140, render: (row: RecordData) => String(row.asset_name || row.asset_id || '—') },
-  { title: '镜像', key: 'image_name', minWidth: 120, render: (row: RecordData) => String(row.image_name || row.image_id || '—') },
-  { title: '模板', key: 'template_name', minWidth: 120, render: (row: RecordData) => String(row.template_name || row.template_id || '—') },
-  {
-    title: '状态',
-    key: 'status',
-    minWidth: 100,
-    render: (row: RecordData) =>
-      h(
-        NTag,
-        { size: 'small', bordered: false, type: statusTagType(row.status) },
-        { default: () => String(row.status || 'pending') }
-      )
-  },
-  {
-    title: '进度',
-    key: 'progress',
-    minWidth: 140,
-    render: (row: RecordData) => {
-      const pct = Number(row.progress || 0)
-      const status = row.status === 'failed' ? 'error' : row.status === 'completed' ? 'success' : 'default'
-      return h(NProgress, { type: 'line', percentage: pct, status, height: 6 })
-    }
-  },
-  { title: '创建时间', key: 'created_at', minWidth: 150 }
-])
-
-// === 加载装机任务列表（仅显示 reinstall 类型）===
-async function load() {
-  loading.value = true
-  try {
-    const data = rows(await resource.list('/tasks', { page: page.value, page_size: pageSize, kind: 'reinstall' }))
-    items.value = data.items
-    total.value = data.total
-  } catch (e) {
-    message.error(errorText(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-watch(
-  () => auth.projectId,
-  () => {
-    page.value = 1
-    load()
-  },
-  { immediate: true }
-)
+import { ref } from 'vue'
+import { NTabs, NTabPane, NButton } from 'naive-ui'
+import ResourceView from './ResourceView.vue'
+import type { Section } from '../catalog'
+const active = ref('plans')
+const resources: { key: string; section: Section }[] = [
+  { key: 'images', section: { path: '/installations', title: '镜像模板', subtitle: '配置镜像引用与安装参数', api: '/image-templates', permission: 'images:read', fields: [{ key: 'name', label: '名称', required: true }, { key: 'image_id', label: '镜像 ID', type: 'number', required: true }, { key: 'config', label: '参数 JSON', type: 'json' }], columns: ['name', 'image_id', 'created_at'] } },
+  { key: 'partitions', section: { path: '/installations', title: '分区模板', subtitle: '维护真实分区布局', api: '/partition-templates', permission: 'install:read', fields: [{ key: 'name', label: '名称', required: true }, { key: 'layout', label: '布局 JSON', type: 'json', required: true }], columns: ['name', 'revision', 'created_at'] } },
+  { key: 'scripts', section: { path: '/installations', title: '安装后脚本', subtitle: '仅保存配置，不执行脚本', api: '/post-install-scripts', permission: 'install:read', fields: [{ key: 'name', label: '名称', required: true }, { key: 'interpreter', label: '解释器', required: true }, { key: 'content', label: '脚本内容', type: 'textarea', required: true }, { key: 'sha256', label: 'SHA256', required: true }, { key: 'timeout_seconds', label: '超时秒数', type: 'number' }], columns: ['name', 'interpreter', 'revision', 'created_at'] } },
+  { key: 'plans', section: { path: '/installations', title: '装机方案', subtitle: '仅管理方案配置；自动化安装执行尚不可用，不会触发安装。', api: '/install-plans', permission: 'tasks:read', fields: [{ key: 'name', label: '方案名称', required: true }, { key: 'image_template_id', label: '镜像模板 ID', type: 'number', required: true }, { key: 'kickstart_template_id', label: '应答模板 ID', type: 'number', required: true }, { key: 'partition_template_id', label: '分区模板 ID', type: 'number', required: true }, { key: 'network_id', label: '网络 ID', type: 'number' }], columns: ['name', 'image_template_id', 'kickstart_template_id', 'partition_template_id', 'created_at'] } },
+  { key: 'tasks', section: { path: '/tasks', title: '装机任务记录', subtitle: '查看已有任务的真实状态', api: '/installations', permission: 'tasks:read', fields: [], columns: ['kind', 'asset_id', 'status', 'error', 'created_at'], readonly: true } }
+]
 </script>
-
 <template>
-  <div class="page">
-    <div class="page-head">
-      <div>
-        <div class="eyebrow dark">OPERATIONS / INSTALL PLANS</div>
-        <h1>装机方案</h1>
-        <p>查看装机任务进度与状态；自动化重装执行暂未开放</p>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-toolbar">
-        <div>
-          <div class="panel-title">装机任务列表 <span class="count">{{ total }}</span></div>
-          <p class="panel-caption">查看装机任务执行进度与状态</p>
-        </div>
-        <div class="toolbar-actions">
-          <n-button quaternary @click="load">刷新</n-button>
-        </div>
-      </div>
-      <n-data-table
-        remote
-        :columns="columns"
-        :data="items"
-        :loading="loading"
-        :row-key="(row: RecordData) => row.id ?? ''"
-        :scroll-x="Math.max(columns.length * 145, 600)"
-        :pagination="{
-          page,
-          pageSize,
-          itemCount: total,
-          showSizePicker: false,
-          onUpdatePage: (p: number) => { page = p; load() }
-        }"
-      />
-      <div v-if="!loading && !items.length" class="empty-hint">
-        当前没有装机任务记录。
-      </div>
-    </div>
+  <div>
+    <n-button disabled>执行安装（尚不可用）</n-button>
+    <n-tabs v-model:value="active" type="line">
+      <n-tab-pane v-for="item in resources" :key="item.key" :name="item.key" :tab="item.section.title">
+        <ResourceView v-if="active === item.key" :section="item.section" :key="item.key" />
+      </n-tab-pane>
+    </n-tabs>
   </div>
 </template>

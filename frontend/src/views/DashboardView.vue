@@ -38,9 +38,9 @@ const alertPieChart = ref<echarts.ECharts>()
 
 // === 任务成功率统计 ===
 const taskStats = computed(() => {
-  const success = tasks.value.filter(t => t.status === 'completed').length
-  const failed = tasks.value.filter(t => t.status === 'failed').length
-  const pending = tasks.value.filter(t => t.status !== 'completed' && t.status !== 'failed').length
+  const success = tasks.value.filter(t => t.status === 'succeeded').length
+  const failed = tasks.value.filter(t => ['failed', 'timeout'].includes(String(t.status))).length
+  const pending = tasks.value.filter(t => ['pending', 'running', 'retry_wait'].includes(String(t.status))).length
   return { success, failed, pending }
 })
 
@@ -96,14 +96,7 @@ function renderHealthTrend() {
     days.push(`${d.getMonth() + 1}/${d.getDate()}`)
   }
 
-  // 模拟在线率数据（实际应从传感器 API 获取）
-  const onlineRates = days.map((_, i) => {
-    const base = assets.value.length > 0
-      ? (assets.value.filter(a => a.status === 'online' || a.status === 'active').length / Math.max(assets.value.length, 1)) * 100
-      : 0
-    // 添加轻微波动使图表更自然
-    return Math.min(100, Math.max(0, base + (Math.sin(i * 0.8) * 5)))
-  })
+  const onlineRates: number[] = []
 
   healthTrendChart.value.setOption({
     tooltip: { trigger: 'axis', formatter: '{b}<br/>在线率: {c}%' },
@@ -158,7 +151,7 @@ function resize() {
 async function loadProjects() {
   projectLoading.value = true
   try {
-    const result = rows(await resource.list('/projects'))
+    const result = rows(await resource.list('/projects', { tenant_id: auth.tenantId }))
     projects.value = result.items
   } catch (e) {
     message.error(errorText(e))
@@ -289,12 +282,12 @@ onUnmounted(() => {
     <!-- 项目维度切换 & 时间范围筛选 -->
     <div class="time-range-filter">
       <n-select
-        v-model:value="auth.projectId"
+        :value="auth.projectId"
         placeholder="选择项目"
         :loading="projectLoading"
         :options="projects.map(p => ({ label: String(p.name), value: String(p.id) }))"
         style="width: 200px"
-        @update:value="load"
+        @update:value="auth.selectProject"
       />
       <n-radio-group v-model:value="timeRange" size="small">
         <n-radio-button value="today">今日</n-radio-button>
@@ -333,7 +326,7 @@ onUnmounted(() => {
     <!-- 任务成功率统计条 -->
     <div class="panel" style="margin-bottom: 18px;">
       <div class="task-stats-bar">
-        <span style="font-size: 12px; color: #687e89; font-weight: 600;">任务统计：</span>
+        <span style="font-size: 12px; color: #687e89; font-weight: 600;">最近已加载任务统计：</span>
         <div class="stat-item">
           <span class="stat-dot success"></span>
           成功 {{ taskStats.success }}
@@ -357,7 +350,7 @@ onUnmounted(() => {
           <p class="panel-caption">最近 7 天资产在线率变化</p>
         </div>
       </div>
-      <div ref="healthTrendEl" class="health-trend-chart"></div>
+      <div class="chart-empty">暂无历史在线率数据；需接入真实监控聚合接口。</div>
     </section>
 
     <div class="dashboard-grid">
@@ -421,7 +414,7 @@ onUnmounted(() => {
           <n-tag
             size="small"
             :type="
-              task.status === 'completed'
+              task.status === 'succeeded'
                 ? 'success'
                 : task.status === 'failed'
                   ? 'error'

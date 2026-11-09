@@ -5,6 +5,7 @@ import { NButton, NModal, useMessage } from 'naive-ui'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { api, unwrap, errorText } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -61,9 +62,15 @@ const fit = new FitAddon()
 
 let socket: WebSocket | undefined
 let observer: ResizeObserver | undefined
+let disposed = false
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+terminal.onData(data => {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(data)
+})
 
 // === 建立 WebSocket 连接 ===
-function connectSocket() {
+async function connectSocket() {
+  if (disposed) return
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const token = sessionStorage.getItem('bmm_token')
   const projectId = sessionStorage.getItem('bmm_project_id')
@@ -76,10 +83,19 @@ function connectSocket() {
   state.value = '连接中'
   reconnecting.value = true
 
-  socket = new WebSocket(
-    `${protocol}//${location.host}/api/v1/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(String(route.params.id))}/sol`,
-    ['bearer', token]
-  )
+  try {
+    const ticket = unwrap<{ url: string }>(await api.post(`/assets/${encodeURIComponent(String(route.params.id))}/sol-ticket`))
+    if (disposed) return
+    const url = new URL(ticket.url, location.origin)
+    if (url.origin !== location.origin) throw new Error('拒绝非同源 SOL 地址')
+    socket = new WebSocket(`${protocol}//${location.host}${url.pathname}${url.search}`)
+  } catch (e) {
+    if (disposed) return
+    state.value = errorText(e)
+    reconnecting.value = false
+    message.error(state.value)
+    return
+  }
   socket.binaryType = 'arraybuffer'
 
   socket.onopen = () => {
@@ -100,6 +116,7 @@ function connectSocket() {
   }
 
   socket.onclose = () => {
+    if (disposed) return
     state.value = '连接已断开'
     terminal.write('\r\n[连接已断开]\r\n')
     stopSessionTimer()
@@ -108,7 +125,7 @@ function connectSocket() {
       reconnecting.value = true
       state.value = `重连中 (${reconnectCount.value + 1}/${maxReconnects})...`
       terminal.write(`\r\n[尝试重连 ${reconnectCount.value + 1}/${maxReconnects}，${reconnectDelay.value / 1000}秒后...]\r\n`)
-      setTimeout(() => {
+      reconnectTimer = setTimeout(() => {
         reconnectCount.value++
         connectSocket()
       }, reconnectDelay.value)
@@ -119,9 +136,6 @@ function connectSocket() {
     }
   }
 
-  terminal.onData(data => {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(data)
-  })
 }
 
 // === 会话倒计时 ===
@@ -202,6 +216,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
+  if (reconnectTimer) clearTimeout(reconnectTimer)
   observer?.disconnect()
   socket?.close()
   terminal.dispose()

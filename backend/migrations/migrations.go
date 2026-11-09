@@ -12,3 +12,8 @@ var InitialSQL string
 //
 //go:embed 002_expansion.sql
 var ExpansionSQL string
+
+// TargetSQL 是已批准的目标空库结构，不允许在旧版业务表上重放。
+//
+//go:embed 003_target_schema.sql
+var TargetSQL string

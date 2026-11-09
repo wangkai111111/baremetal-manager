@@ -428,28 +428,18 @@ func (h *Handler) Task(c *gin.Context) {
 	c.JSON(200, v)
 }
 
-// Monitor 实时读取指定设备的 BMC 状态并返回结构化数据。
+// Monitor 返回数据库中最近一次采集的 Redfish 快照，不在用户点击详情时访问 BMC。
 func (h *Handler) Monitor(c *gin.Context) {
 	var a model.Asset
 	if h.S.Store.DB.Where("project_id = ?", pid(c)).First(&a, id(c)).Error != nil {
 		fail(c, 404, "asset not found")
 		return
 	}
-	secret, err := service.DecryptCredential(a.BMCSecret)
-	if err != nil {
-		fail(c, 500, "BMC credential unavailable")
+	if a.RedfishSnapshot == "" {
+		fail(c, 404, "Redfish data not collected yet")
 		return
 	}
-	a.BMCSecret = secret
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
-	defer cancel()
-	info, err := h.S.BMC.Inspect(ctx, a)
-	if err != nil {
-		fail(c, 502, "BMC unavailable")
-		return
-	}
-	// 将原始 Redfish 数据转换为结构化格式
-	result := TransformMonitorData(info)
+	result := TransformMonitorData(json.RawMessage(a.RedfishSnapshot))
 	// 补充传感器最新数据
 	sensorRecords, _ := h.S.Store.LatestSensorRecordsByAsset(a.ID)
 	sensors := make(map[string]interface{})
@@ -611,8 +601,6 @@ func (h *Handler) CreateIP(c *gin.Context) {
 	h.S.Store.Audit(uid(c), pid(c), "ip.allocate", v.Address)
 	c.JSON(201, v)
 }
-
-
 
 // SOL 验证设备与令牌后建立限时 WebSocket 串口会话。
 func (h *Handler) SOL(c *gin.Context) {

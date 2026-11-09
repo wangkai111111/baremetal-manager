@@ -36,7 +36,7 @@ const loading = ref(false)
 // === 编辑弹窗 ===
 const editing = ref(false)
 const saving = ref(false)
-const editForm = ref<{ name?: string; ip_address?: string; bmc_address?: string; bmc_user?: string; bmc_secret?: string; mac_address?: string }>({})
+const editForm = ref<{ name?: string; management_ip?: string; bmc_address?: string; bmc_user?: string; bmc_secret?: string; mac_address?: string }>({})
 
 // === 标签管理 ===
 const tagModal = ref(false)
@@ -109,16 +109,19 @@ async function loadAllTags() {
 }
 
 // === 检查 SOL 会话状态 ===
-function checkSolSession() {
-  // 简单检查：如果资产状态为在线，则可能有活跃 SOL 会话
-  solSessionActive.value = String(asset.value.status || '').toLowerCase() === 'online'
+async function checkSolSession() {
+  solSessionActive.value = false
+  try {
+    const result = rows(await resource.list('/sol-sessions', { asset_id: id.value, status: 'active' }))
+    solSessionActive.value = result.items.some(session => String(session.asset_id) === id.value && session.status === 'active')
+  } catch { /* 未获取会话时不显示活跃状态 */ }
 }
 
 // === 加载传感器数据 ===
 async function loadSensorData() {
   try {
-    const result = unwrap<RecordData>(await api.get(`/assets/${encodeURIComponent(id.value)}/sensors/latest`))
-    sensorData.value = result
+    const result = rows(await resource.list('/sensor-records', { asset_id: id.value, page_size: 1 }))
+    sensorData.value = result.items[0] ?? null
     await nextTick()
     renderSensorCharts()
   } catch {
@@ -134,7 +137,7 @@ function renderSensorCharts() {
   if (cpuTempGaugeEl.value) {
     cpuTempChart.value?.dispose()
     cpuTempChart.value = echarts.init(cpuTempGaugeEl.value)
-    const cpuTemp = Number(sensorData.value.cpu_temperature || sensorData.value.cpu_temp || 45)
+    const cpuTemp = Number(sensorData.value.cpu_temperature ?? sensorData.value.cpu_temp ?? NaN)
     cpuTempChart.value.setOption({
       series: [{
         type: 'gauge',
@@ -159,7 +162,7 @@ function renderSensorCharts() {
   if (fanSpeedGaugeEl.value) {
     fanSpeedChart.value?.dispose()
     fanSpeedChart.value = echarts.init(fanSpeedGaugeEl.value)
-    const fanSpeed = Number(sensorData.value.fan_speed || sensorData.value.fan_rpm || 3000)
+    const fanSpeed = Number(sensorData.value.fan_speed ?? sensorData.value.fan_rpm ?? NaN)
     fanSpeedChart.value.setOption({
       series: [{
         type: 'gauge',
@@ -184,8 +187,8 @@ function renderSensorCharts() {
   if (powerBarChartEl.value) {
     powerBarChart.value?.dispose()
     powerBarChart.value = echarts.init(powerBarChartEl.value)
-    const powerWatts = Number(sensorData.value.power_watts || sensorData.value.power || 250)
-    const voltage = Number(sensorData.value.voltage || sensorData.value.power_voltage || 220)
+    const powerWatts = Number(sensorData.value.power_watts ?? sensorData.value.power ?? NaN)
+    const voltage = Number(sensorData.value.voltage ?? sensorData.value.power_voltage ?? NaN)
     powerBarChart.value.setOption({
       tooltip: { trigger: 'axis' },
       grid: { left: 50, right: 20, top: 20, bottom: 35 },
@@ -214,13 +217,16 @@ function resize() {
 async function loadTab() {
   detail.value = []
   if (tab.value === 'overview') return
+  if (monitorTabs.includes(tab.value)) {
+    if (tab.value === 'hardware') await loadSensorData()
+    return
+  }
   const target = tabs.find(t => t.key === tab.value)!
   loading.value = true
   try {
     const response = await api.get(
-      target.path === 'monitor'
-        ? `/assets/${encodeURIComponent(id.value)}/monitor`
-        : `/${target.path}`
+      `/${target.path}`,
+      { params: { asset_id: id.value, ...(tab.value === 'installations' ? { kind: 'reinstall' } : {}) } }
     )
     const result = unwrap<unknown>(response)
     if (
@@ -493,10 +499,10 @@ function operate(action: string, label: string) {
 function openEdit() {
   editForm.value = {
     name: String(asset.value.name || ''),
-    ip_address: String(asset.value.ip_address || ''),
+    management_ip: String(asset.value.management_ip || ''),
     bmc_address: String(asset.value.bmc_address || ''),
     bmc_user: String(asset.value.bmc_user || ''),
-    bmc_secret: String(asset.value.bmc_secret || ''),
+    bmc_secret: '',
     mac_address: String(asset.value.mac_address || '')
   }
   editing.value = true
@@ -506,7 +512,9 @@ function openEdit() {
 async function saveEdit() {
   saving.value = true
   try {
-    await resource.update('/assets', id.value, editForm.value)
+    const payload: RecordData = { ...editForm.value }
+    if (!payload.bmc_secret) delete payload.bmc_secret
+    await resource.update('/assets', id.value, payload)
     message.success('资产信息已更新')
     editing.value = false
     loadAsset()
@@ -570,7 +578,7 @@ onUnmounted(() => {
         <div class="eyebrow dark">ASSET / {{ id }}</div>
         <h1>{{ asset.name || '资产详情' }}</h1>
         <p>
-          业务 IP {{ asset.ip_address || '—' }} · BMC {{ asset.bmc_address || '—' }}
+          业务 IP {{ asset.management_ip || '—' }} · BMC {{ asset.bmc_address || '—' }}
         </p>
       </div>
       <div class="head-actions asset-actions">
@@ -603,7 +611,7 @@ onUnmounted(() => {
       </div>
       <div>
         <span>业务 IP</span>
-        <strong>{{ asset.ip_address || '—' }}</strong>
+        <strong>{{ asset.management_ip || '—' }}</strong>
       </div>
     </div>
 
@@ -806,7 +814,7 @@ onUnmounted(() => {
             <n-input v-model:value="editForm.name" placeholder="请输入资产名称" />
           </n-form-item>
           <n-form-item label="业务 IP">
-            <n-input v-model:value="editForm.ip_address" placeholder="请输入业务 IP" />
+            <n-input v-model:value="editForm.management_ip" placeholder="请输入业务 IP" />
           </n-form-item>
           <n-form-item label="BMC 地址">
             <n-input v-model:value="editForm.bmc_address" placeholder="请输入 BMC 地址" />

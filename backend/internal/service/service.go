@@ -51,7 +51,37 @@ func (s *Service) Submit(user, project, asset uint, kind string, payload json.Ra
 	return op, nil
 }
 
-// Handle 处理队列中的设备操作并更新执行状态。
+// RefreshAsset 采集并持久化资产的 Redfish 快照，详情页只读取该快照。
+func (s *Service) RefreshAsset(ctx context.Context, asset *model.Asset) error {
+	secret, err := DecryptCredential(asset.BMCSecret)
+	if err != nil {
+		s.Store.DB.Model(asset).Updates(map[string]any{"redfish_error": err.Error()})
+		return err
+	}
+	probe := *asset
+	probe.BMCSecret = secret
+	raw, err := s.BMC.Inspect(ctx, probe)
+	if err != nil {
+		s.Store.DB.Model(asset).Updates(map[string]any{"redfish_error": err.Error()})
+		return err
+	}
+	now := time.Now()
+	updates := map[string]any{
+		"redfish_snapshot":     string(raw),
+		"redfish_collected_at": now,
+		"redfish_error":        "",
+	}
+	var data map[string]interface{}
+	if json.Unmarshal(raw, &data) == nil {
+		for field, key := range map[string]string{"serial_number": "SerialNumber", "manufacturer": "Manufacturer", "model": "Model"} {
+			if value, ok := data[key].(string); ok && value != "" {
+				updates[field] = value
+			}
+		}
+	}
+	return s.Store.DB.Model(asset).Updates(updates).Error
+}
+
 func (s *Service) Handle(ctx context.Context, t *asynq.Task) error {
 	var msg struct {
 		ID uint `json:"id"`
@@ -67,11 +97,7 @@ func (s *Service) Handle(ctx context.Context, t *asynq.Task) error {
 	if err := s.Store.DB.Where("project_id = ?", op.ProjectID).First(&asset, op.AssetID).Error; err != nil {
 		return err
 	}
-	secret, err := DecryptCredential(asset.BMCSecret)
-	if err != nil {
-		return err
-	}
-	asset.BMCSecret = secret
+	var err error
 	s.Store.DB.Model(&op).Updates(map[string]any{"status": "running", "attempts": op.Attempts + 1})
 	var payload struct {
 		Action  string `json:"action"`
@@ -80,9 +106,12 @@ func (s *Service) Handle(ctx context.Context, t *asynq.Task) error {
 	_ = json.Unmarshal([]byte(op.Payload), &payload)
 	switch op.Kind {
 	case "power":
-		err = s.BMC.Power(ctx, asset, payload.Action)
+		asset.BMCSecret, err = DecryptCredential(asset.BMCSecret)
+		if err == nil {
+			err = s.BMC.Power(ctx, asset, payload.Action)
+		}
 	case "inspect":
-		_, err = s.BMC.Inspect(ctx, asset)
+		err = s.RefreshAsset(ctx, &asset)
 	case "reinstall", "firmware":
 		err = errors.New("provisioning integration not configured")
 	default:
@@ -125,11 +154,7 @@ func (s *Service) Scheduler(ctx context.Context) {
 			s.Store.DB.Find(&assets)
 			for _, asset := range assets {
 				ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
-				secret, err := DecryptCredential(asset.BMCSecret)
-				if err == nil {
-					asset.BMCSecret = secret
-					_, err = s.BMC.Inspect(ctx2, asset)
-				}
+				err := s.RefreshAsset(ctx2, &asset)
 				cancel()
 				if err != nil {
 					s.Store.DB.Create(&model.Alert{ProjectID: asset.ProjectID, AssetID: asset.ID, Severity: "warning", Message: "BMC unreachable"})

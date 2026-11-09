@@ -40,7 +40,7 @@ import {
   ChevronForwardOutline
 } from '@vicons/ionicons5'
 import { useAuth } from '../stores/auth'
-import { footerText, footerVisible, loadBrand, navBackground, navTextColor, platformLogo, platformName, platformTagline } from '../stores/brand'
+import { footerText, footerVisible, loadBrand, navBackground, navTextColor, operationMode, platformLogo, platformName, platformTagline } from '../stores/brand'
 import { resource, rows, api, errorText, type RecordData } from '../api'
 
 const route = useRoute()
@@ -48,7 +48,7 @@ const router = useRouter()
 const message = useMessage()
 const auth = useAuth()
 const mobileOpen = ref(false)
-const projects = ref<RecordData[]>([])
+const projects = computed(() => auth.projects)
 
 // === 通知中心 ===
 const notificationOpen = ref(false)
@@ -83,17 +83,7 @@ const userMenuOptions = computed(() => [
 
 // === 加载项目列表 ===
 onMounted(async () => {
-  try {
-    projects.value = rows(await resource.list('/projects')).items
-    if (
-      projects.value.length &&
-      !projects.value.some(p => String(p.id) === auth.projectId)
-    ) {
-      auth.selectProject(projects.value[0].id!)
-    }
-  } catch {
-    /* Project list errors are surfaced by page requests. */
-  }
+  await auth.loadContext()
   // 加载通知
   loadNotifications()
   // 加载平台品牌信息
@@ -172,6 +162,7 @@ const groups = [
   {
     label: '基础设施',
     items: [
+      { label: '租户管理', path: '/tenants', icon: LayersOutline },
       { label: '项目管理', path: '/projects', icon: LayersOutline },
       { label: '机房管理', path: '/datacenters', icon: BusinessOutline },
       { label: '机柜管理', path: '/racks', icon: CubeOutline },
@@ -217,9 +208,17 @@ const visibleGroups = computed(() =>
   groups
     .map(group => ({
       ...group,
-      items: group.items.filter(
-        item => !permission(item.path) || auth.can(permission(item.path))
-      )
+      items: group.items.filter(item => {
+        if (item.path === '/tenants' || item.path === '/user-management' || item.path === '/role-management' || item.path === '/api-keys') {
+          return auth.user?.is_platform_admin === true
+        }
+        if (item.path === '/racks' || item.path === '/datacenters' || item.path === '/firmware' || item.path === '/installations') {
+          return operationMode.value !== 'external' && (!permission(item.path) || auth.can(permission(item.path)))
+        }
+        if (item.path === '/system-settings') return auth.user?.is_platform_admin === true
+        if (item.path === '/alerts' && operationMode.value === 'external') return auth.user?.is_platform_admin === true
+        return !permission(item.path) || auth.can(permission(item.path))
+      })
     }))
     .filter(group => group.items.length)
 )
@@ -265,7 +264,10 @@ function goProjectMembers() {
 function onProjectChange(event: Event) {
   const target = event.target as HTMLSelectElement
   auth.selectProject(target.value)
-  router.go(0)
+  notifications.value = []
+  unreadCount.value = 0
+  router.push('/')
+  loadNotifications()
 }
 
 // === 个人设置展示数据 ===
@@ -283,7 +285,10 @@ const tokenExpiryText = computed(() =>
 // === 从个人设置切换到其他项目 ===
 function onSettingsProjectChange(value: string) {
   auth.selectProject(value)
-  router.go(0)
+  notifications.value = []
+  unreadCount.value = 0
+  router.push('/')
+  loadNotifications()
 }
 
 // === 从个人设置打开修改密码弹窗 ===
@@ -323,6 +328,10 @@ function openPasswordModal() {
       <div v-if="!sidebarCollapsed" class="workspace-label">
         工作空间 <span>PRODUCTION</span>
       </div>
+      <select v-if="!sidebarCollapsed" class="project-picker" aria-label="选择租户" :value="auth.tenantId" @change="auth.selectTenant(($event.target as HTMLSelectElement).value); notifications = []; unreadCount = 0; router.push('/')">
+        <option value="" disabled>请选择租户</option>
+        <option v-for="tenant in auth.tenants" :key="String(tenant.id)" :value="String(tenant.id)">{{ tenant.name }}</option>
+      </select>
       <select
         v-if="projects.length && !sidebarCollapsed"
         class="project-picker"
@@ -432,7 +441,12 @@ function openPasswordModal() {
         </div>
       </header>
       <main class="content">
-        <router-view />
+        <div v-if="auth.contextError" class="empty-hint" role="alert">{{ auth.contextError }} <n-button text @click="auth.loadContext">重试</n-button></div>
+        <div v-else-if="!auth.contextReady" class="empty-hint">正在加载租户与项目…</div>
+        <template v-else>
+          <div v-if="!auth.projectId" class="empty-hint">尚无可用项目，请在租户和项目管理中创建或联系管理员授权。</div>
+          <router-view :key="`${auth.tenantId}:${auth.projectId}:${route.fullPath}`" />
+        </template>
       </main>
     </div>
 

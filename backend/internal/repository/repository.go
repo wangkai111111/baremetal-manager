@@ -35,6 +35,7 @@ func Open(dsn string) (*Store, error) {
 		}
 		if e := tx.AutoMigrate(
 			&model.User{}, &model.Project{}, &model.Membership{}, &model.Asset{},
+			&model.AssetHardware{}, &model.FirmwareInventory{},
 			&model.SOLSession{}, &model.Operation{}, &model.Image{}, &model.Alert{},
 			&model.Audit{}, &model.Network{}, &model.IPAllocation{},
 			// 002_expansion 新增模型

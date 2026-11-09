@@ -11,6 +11,9 @@ export const navTextColor = ref('#a9bbc7')
 export const footerText = ref('控制平面在线')
 export const footerVisible = ref(true)
 export const loginNotice = ref('')
+export const operationMode = ref<'self_hosted' | 'external'>('self_hosted')
+export const emailVerificationRequired = ref(false)
+export const billingEnabled = ref(false)
 
 // 从公开接口读取平台名称、Logo、导航栏配色与应用设置
 export async function loadBrand() {
@@ -24,6 +27,9 @@ export async function loadBrand() {
     footerText.value = String(data.footer_text || '控制平面在线')
     footerVisible.value = data.footer_visible !== false
     loginNotice.value = String(data.login_notice || '')
+    operationMode.value = data.operation_mode === 'external' ? 'external' : 'self_hosted'
+    emailVerificationRequired.value = data.email_verification_required === true
+    billingEnabled.value = data.billing_enabled === true
     // 同步更新浏览器标签页标题
     document.title = platformName.value
   } catch {

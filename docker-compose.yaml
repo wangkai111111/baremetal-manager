@@ -18,7 +18,7 @@ x-backend-common: &backend-common
     context: ./backend
   image: ${BACKEND_IMAGE:-baremetal-manager/backend:latest}
   environment:
-    DATABASE_URL: ${DATABASE_URL:-postgresql://bmm:change-me@postgres:5432/bmm}
+    DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL for the target database and application role}
     REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to at least 32 random characters}
     BMC_ENCRYPTION_KEY: ${BMC_ENCRYPTION_KEY:?Set BMC_ENCRYPTION_KEY to a 32-byte key}
@@ -26,13 +26,13 @@ x-backend-common: &backend-common
     BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
     BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD}
     MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-bmm-minio}
-    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change-me-minio}
+    MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-bmm-minio}
+    MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
     MINIO_BUCKET: ${MINIO_BUCKET:-baremetal-images}
     LOG_LEVEL: ${LOG_LEVEL:-info}
 
     # 种子数据控制
-    SEED_DATA: "${SEED_DATA:-true}"
+    SEED_DATA: "false"
 
     # 告警推送配置
     ALERT_WECHAT_WEBHOOK: ${ALERT_WECHAT_WEBHOOK:-}
@@ -49,6 +49,8 @@ x-backend-common: &backend-common
     # BMC 并发限流
     BMC_MAX_CONCURRENT: "${BMC_MAX_CONCURRENT:-10}"
   depends_on:
+    migrate:
+      condition: service_completed_successfully
     postgres:
       condition: service_healthy
     redis:
@@ -108,20 +110,41 @@ x-frontend-common: &frontend-common
         memory: 256M
 
 services:
+  # 唯一结构变更入口；失败时 API/worker 不启动，旧数据卷保持不变。
+  migrate:
+    <<: *service-defaults
+    build:
+      context: ./backend
+    image: ${BACKEND_IMAGE:-baremetal-manager/backend:latest}
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: ${DATABASE_MIGRATION_URL:?Set DATABASE_MIGRATION_URL using the database owner}
+      DATABASE_APP_USER: ${DATABASE_APP_USER:-bmm_app}
+      DATABASE_APP_PASSWORD: ${DATABASE_APP_PASSWORD:?Set DATABASE_APP_PASSWORD}
+      BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+
   postgres:
     <<: *service-defaults
     image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-bmm}
-      POSTGRES_USER: ${POSTGRES_USER:-bmm}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-bmm_target}
+      POSTGRES_USER: ${POSTGRES_USER:-bmm_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
       - ./deploy/postgres/healthcheck.sh:/usr/local/bin/bmm-pg-healthcheck:ro
     ports:
-      - "15432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
     healthcheck:
       test: ["CMD", "/usr/local/bin/bmm-pg-healthcheck"]
       interval: 10s
@@ -173,7 +196,7 @@ services:
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bmm-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
     volumes:
       - minio-data:/data
     expose:
@@ -206,7 +229,7 @@ services:
         condition: service_healthy
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bmm-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET:-baremetal-images}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
     volumes:
@@ -217,10 +240,7 @@ services:
       # mc 工具需要写入配置目录
       - /root/.mc:size=16m,mode=0755
 
-  backend-1:
-    <<: *backend-common
-
-  backend-2:
+  backend:
     <<: *backend-common
 
   worker:
@@ -238,20 +258,10 @@ services:
     healthcheck:
       disable: true
 
-  frontend-1:
+  frontend:
     <<: *frontend-common
     depends_on:
-      backend-1:
-        condition: service_healthy
-      backend-2:
-        condition: service_healthy
-
-  frontend-2:
-    <<: *frontend-common
-    depends_on:
-      backend-1:
-        condition: service_healthy
-      backend-2:
+      backend:
         condition: service_healthy
 
   lb:
@@ -259,17 +269,13 @@ services:
     image: ${HAPROXY_IMAGE:-haproxy:3.0-alpine}
     ports:
       - "${HTTP_PORT:-8080}:8080"
-      - "0.0.0.0:${HAPROXY_STATS_PORT:-8404}:8404"
+      - "127.0.0.1:${HAPROXY_STATS_PORT:-8404}:8404"
     volumes:
       - ./deploy/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
-      backend-1:
+      backend:
         condition: service_healthy
-      backend-2:
-        condition: service_healthy
-      frontend-1:
-        condition: service_healthy
-      frontend-2:
+      frontend:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
@@ -315,6 +321,7 @@ networks:
 
 volumes:
   postgres-data:
+    name: ${POSTGRES_VOLUME:-baremetal-manager-target-pgdata}
   redis-data:
   minio-data:
   tftp-data:

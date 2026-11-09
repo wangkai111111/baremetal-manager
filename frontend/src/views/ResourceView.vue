@@ -13,7 +13,6 @@ import {
   NPopconfirm,
   NTag,
   useMessage,
-  NUpload,
   useDialog
 } from 'naive-ui'
 import type { DataTableColumns, DataTableRowKey } from 'naive-ui'
@@ -22,6 +21,7 @@ import type { Section } from '../catalog'
 import { labels } from '../catalog'
 import { errorText, resource, rows, type RecordData, api, exportToExcel, batchOps } from '../api'
 import { useAuth } from '../stores/auth'
+import { operationMode } from '../stores/brand'
 
 const props = defineProps<{ section: Section }>()
 const route = useRoute()
@@ -33,6 +33,7 @@ const auth = useAuth()
 const items = ref<RecordData[]>([])
 const total = ref(0)
 const loading = ref(false)
+const loadError = ref('')
 const search = ref('')
 const page = ref(1)
 const pageSize = ref(20)
@@ -60,30 +61,33 @@ const datacenterOptions = ref<{ label: string; value: string }[]>([])
 const tagOptions = ref<{ label: string; value: string }[]>([])
 
 // === 状态选项列表 ===
-const statusOptions = [
+const statusOptions = computed(() => props.section.api === '/tasks' ? ['pending', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'timeout', 'unknown'].map(value => ({ label: value, value })) : [
   { label: '在线', value: 'online' },
   { label: '离线', value: 'offline' },
   { label: '活跃', value: 'active' },
   { label: '就绪', value: 'ready' },
   { label: '故障', value: 'error' },
   { label: '维护中', value: 'maintenance' }
-]
+])
 
 const canWrite = computed(() =>
-  (props.section.api === '/projects'
-    ? auth.user?.role === 'admin'
+  (['/projects', '/tenants'].includes(props.section.api)
+    ? auth.can('projects:write')
     : auth.can(props.section.permission.replace(':read', ':write'))) &&
-  ['/projects', '/assets', '/networks', '/ip-allocations', '/tags', '/ip-pools'].includes(props.section.api)
+  ['/tenants', '/projects', '/assets', '/networks', '/ip-allocations', '/tags', '/ip-pools', '/images', '/pxe-configs', '/install-plans', '/firmware-packages', '/firmware-baselines', '/image-templates', '/partition-templates', '/post-install-scripts'].includes(props.section.api)
 )
+
+const isExternal = computed(() => operationMode.value === 'external')
+const rackFieldHidden = computed(() => isExternal.value && ['/assets', '/racks', '/datacenters'].includes(props.section.api))
 
 // === 列定义（含排序） ===
 const columns = computed<DataTableColumns<RecordData>>(() => {
-  const fields = props.section.columns || [
+  const fields = (props.section.columns || [
     ...props.section.fields.map(f => f.key).filter(key => !key.includes('password')),
     'status',
     'created_at'
-  ]
-  const cols: DataTableColumns<RecordData> = fields.map(key => ({
+  ]).filter(key => !(rackFieldHidden.value && ['rack_id', 'rack_u_position', 'height_u', 'datacenter_id'].includes(key)))
+  const cols: DataTableColumns<RecordData> = fields.filter(key => !/password|secret/i.test(key)).map(key => ({
     title: labels[key] || props.section.fields.find(f => f.key === key)?.label || key,
     key,
     minWidth: 125,
@@ -110,7 +114,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
   if (
     props.section.api === '/assets' ||
     props.section.api === '/images' ||
-    props.section.api === '/alerts'
+    props.section.api === '/alerts' || (canWrite.value && !['/projects', '/tenants'].includes(props.section.api))
   ) {
     cols.push({
       title: '操作',
@@ -126,13 +130,6 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
                 { default: () => '详情' }
               )
             : null,
-          props.section.api === '/images'
-            ? h(
-                NButton,
-                { text: true, type: 'primary', onClick: () => downloadImage(row) },
-                { default: () => '下载' }
-              )
-            : null,
           props.section.api === '/alerts' && !row.resolved && auth.can('alerts:write')
             ? h(
                 NButton,
@@ -140,14 +137,14 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
                 { default: () => '处理' }
               )
             : null,
-          canWrite.value && ['/assets'].includes(props.section.api)
+          canWrite.value && !props.section.readonly
             ? h(
                 NButton,
                 { text: true, onClick: () => openEdit(row) },
                 { default: () => '编辑' }
               )
             : null,
-          canWrite.value && props.section.api === '/assets'
+          canWrite.value && !props.section.readonly
             ? h(
                 NPopconfirm,
                 { onPositiveClick: () => remove(row) },
@@ -166,36 +163,41 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
 
 function tagType(value: unknown): 'success' | 'warning' | 'error' | 'info' | 'default' {
   const s = String(value || '').toLowerCase()
-  return ['active', 'online', 'ready', 'success', 'completed', 'healthy'].includes(s)
+  return ['active', 'online', 'ready', 'succeeded', 'healthy'].includes(s)
     ? 'success'
-    : ['failed', 'error', 'critical', 'offline'].includes(s)
+    : ['failed', 'timeout', 'error', 'critical', 'offline'].includes(s)
       ? 'error'
-      : ['pending', 'warning', 'running'].includes(s)
+      : ['pending', 'retry_wait', 'warning', 'running'].includes(s)
         ? 'warning'
         : 'default'
 }
 
 // === 后端分页加载 ===
 async function load() {
-  if (props.section.api !== '/projects' && !auth.projectId) {
+  if (!['/projects', '/tenants'].includes(props.section.api) && !auth.projectId) {
     items.value = []
     total.value = 0
     return
   }
   loading.value = true
+  loadError.value = ''
+  items.value = []
+  total.value = 0
   try {
     // 构建查询参数
     const params: Record<string, unknown> = {
       page: page.value,
       page_size: pageSize.value
     }
+    if (props.section.api === '/tasks' && route.path === '/installations') params.kind = 'reinstall'
+    if (props.section.api === '/projects') params.tenant_id = auth.tenantId
     if (search.value) params.search = search.value
     if (filterStatus.value) params.status = filterStatus.value
     if (filterTag.value.length) params.tags = filterTag.value.join(',')
     if (filterDatacenter.value) params.datacenter_id = filterDatacenter.value
 
     const data = rows(await resource.list(props.section.api, params))
-    const scoped = ['/installations', '/firmware'].includes(route.path)
+    const scoped = props.section.api === '/tasks' && ['/installations', '/firmware'].includes(route.path)
       ? data.items.filter(
           item => item.kind === (route.path === '/installations' ? 'reinstall' : 'firmware')
         )
@@ -203,7 +205,8 @@ async function load() {
     items.value = scoped
     total.value = data.total
   } catch (e) {
-    message.error(errorText(e))
+    loadError.value = errorText(e)
+    message.error(loadError.value)
   } finally {
     loading.value = false
   }
@@ -235,7 +238,7 @@ async function loadFilterOptions() {
 }
 
 watch(
-  [() => props.section, () => auth.projectId],
+  [() => props.section, () => auth.projectId, () => auth.tenantId],
   () => {
     page.value = 1
     search.value = ''
@@ -257,7 +260,10 @@ watch([filterStatus, filterTag, filterDatacenter], () => {
 
 function openEdit(row?: RecordData) {
   currentId.value = row?.id ?? null
-  form.value = row ? { ...row } : {}
+  form.value = row ? { ...row, bmc_secret: undefined } : {}
+  for (const field of props.section.fields) {
+    if (field.type === 'json' && row?.[field.key] != null) form.value[field.key] = JSON.stringify(row[field.key], null, 2)
+  }
   editing.value = true
 }
 
@@ -266,20 +272,6 @@ async function resolveAlert(row: RecordData) {
     await api.post(`/alerts/${row.id}/resolve`)
     message.success('告警已处理')
     load()
-  } catch (e) {
-    message.error(errorText(e))
-  }
-}
-
-async function downloadImage(row: RecordData) {
-  try {
-    const response = await api.get(`/images/${row.id}/download`, { responseType: 'blob' })
-    const url = URL.createObjectURL(response.data)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = String(row.name || `image-${row.id}`)
-    link.click()
-    URL.revokeObjectURL(url)
   } catch (e) {
     message.error(errorText(e))
   }
@@ -311,13 +303,13 @@ function validateCIDR(value: string): boolean {
 
 async function save() {
   for (const field of props.section.fields) {
-    if (field.required && !form.value[field.key]) {
+    if (field.required && !(currentId.value != null && field.type === 'password') && (form.value[field.key] == null || form.value[field.key] === '')) {
       message.warning(`请填写${field.label}`)
       return
     }
     // 格式验证
     const val = String(form.value[field.key] || '')
-    if (field.key === 'bmc_address' || field.key === 'ip_address') {
+    if (field.key === 'bmc_address' || field.key === 'management_ip') {
       if (!validateIP(val)) {
         message.warning(`${field.label} 格式不正确，请输入有效的 IP 地址`)
         return
@@ -335,14 +327,19 @@ async function save() {
     const payload = Object.fromEntries(
       props.section.fields
         .filter(f => form.value[f.key] !== undefined && form.value[f.key] !== '')
-        .map(f => [f.key, form.value[f.key]])
+        .map(f => [f.key, f.type === 'json' && typeof form.value[f.key] === 'string' ? JSON.parse(String(form.value[f.key])) : form.value[f.key]])
     )
+    if (props.section.api === '/projects') {
+      if (!auth.tenantId) throw new Error('请先选择租户')
+      payload.tenant_id = Number(auth.tenantId)
+    }
     if (currentId.value != null) {
       await resource.update(props.section.api, currentId.value, payload)
     } else {
       await resource.create(props.section.api, payload)
     }
     message.success('保存成功')
+    if (['/projects', '/tenants'].includes(props.section.api)) await auth.loadContext()
     editing.value = false
     load()
   } catch (e) {
@@ -362,18 +359,6 @@ async function remove(row: RecordData) {
   }
 }
 
-async function upload(file: File) {
-  const data = new FormData()
-  data.append('file', file)
-  try {
-    await api.post('/images', data)
-    message.success('镜像上传成功')
-    load()
-  } catch (e) {
-    message.error(errorText(e))
-  }
-}
-
 async function scan() {
   if (!scanIds.value.length) {
     message.warning('请选择要扫描的资产')
@@ -381,7 +366,7 @@ async function scan() {
   }
   saving.value = true
   try {
-    await api.post('/assets/scan', { asset_ids: scanIds.value })
+    await batchOps.scan(scanIds.value.map(Number))
     message.success('扫描任务已提交')
     scanning.value = false
     scanIds.value = []
@@ -471,13 +456,6 @@ async function handleBatchPower(action: string) {
         <p>{{ section.subtitle }}</p>
       </div>
       <div class="head-actions">
-        <n-upload
-          v-if="section.api === '/images' && auth.can('images:write')"
-          :show-file-list="false"
-          :custom-request="({ file }) => { if (file.file) upload(file.file as File) }"
-        >
-          <n-button type="primary">上传镜像</n-button>
-        </n-upload>
         <n-button
           v-if="section.api === '/assets' && canWrite"
           @click="scanning = true"
@@ -604,7 +582,7 @@ async function handleBatchPower(action: string) {
         }"
       />
       <div v-if="!loading && !items.length" class="empty-hint">
-        当前没有数据，或尚未创建相关资源。
+        {{ loadError ? `加载失败：${loadError}` : '当前没有数据，或尚未创建相关资源。' }}
       </div>
     </div>
     <n-modal
@@ -616,10 +594,10 @@ async function handleBatchPower(action: string) {
       <n-form label-placement="top">
         <div class="resource-form-grid">
           <n-form-item
-            v-for="field in section.fields"
+            v-for="field in section.fields.filter(field => !(rackFieldHidden && ['rack_id', 'rack_u_position', 'height_u', 'datacenter_id'].includes(field.key)))"
             :key="field.key"
             :label="field.label"
-            :required="field.required"
+            :required="field.required && !(currentId != null && field.type === 'password')"
             :class="{ 'form-item-wide': field.type === 'textarea' || field.key === 'description' }"
           >
             <n-select
@@ -638,11 +616,11 @@ async function handleBatchPower(action: string) {
               :type="
                 field.type === 'password'
                   ? 'password'
-                  : field.type === 'textarea'
+                  : field.type === 'textarea' || field.type === 'json'
                     ? 'textarea'
                     : 'text'
               "
-              :placeholder="`请输入${field.label}`"
+              :placeholder="currentId != null && field.type === 'password' ? '留空保留现有密钥' : `请输入${field.label}`"
             />
           </n-form-item>
         </div>

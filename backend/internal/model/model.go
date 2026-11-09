@@ -8,16 +8,16 @@ import (
 
 // User 表示可登录系统的用户及其角色。
 type User struct {
-	ID          uint       `json:"id" gorm:"primaryKey"`
-	Username    string     `json:"username" gorm:"uniqueIndex;not null"`
-	PasswordHash string   `json:"-" gorm:"not null"`
-	Role        string     `json:"role" gorm:"not null"`
-	Name        string     `json:"name" gorm:"size:200;comment:用户姓名"`
-	Email       string     `json:"email" gorm:"size:255;comment:用户邮箱"`
-	Status      string     `json:"status" gorm:"size:20;default:active;comment:用户状态"`
-	LastLoginAt *time.Time `json:"last_login_at,omitempty" gorm:"comment:最后登录时间"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID           uint       `json:"id" gorm:"primaryKey"`
+	Username     string     `json:"username" gorm:"uniqueIndex;not null"`
+	PasswordHash string     `json:"-" gorm:"not null"`
+	Role         string     `json:"role" gorm:"not null"`
+	Name         string     `json:"name" gorm:"size:200;comment:用户姓名"`
+	Email        string     `json:"email" gorm:"size:255;comment:用户邮箱"`
+	Status       string     `json:"status" gorm:"size:20;default:active;comment:用户状态"`
+	LastLoginAt  *time.Time `json:"last_login_at,omitempty" gorm:"comment:最后登录时间"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Project 表示用于隔离资源和成员的项目。
@@ -44,27 +44,30 @@ type Membership struct {
 
 // Asset 表示项目中的裸金属设备及其 BMC 连接信息。
 type Asset struct {
-	ID             uint           `json:"id" gorm:"primaryKey"`
-	ProjectID      uint           `json:"project_id" gorm:"index;not null"`
-	Name           string         `json:"name" gorm:"not null"`
-	BMCAddress     string         `json:"bmc_address" gorm:"not null"`
-	BMCUser        string         `json:"bmc_user"`
-	BMCSecret      string         `json:"-"`
-	IPAddress      string         `json:"ip_address"`
-	MACAddress     string         `json:"mac_address"`
-	Status         string         `json:"status"`
-	SerialNumber   string         `json:"serial_number" gorm:"size:200;comment:序列号"`
-	Manufacturer   string         `json:"manufacturer" gorm:"size:200;comment:制造商"`
-	Model          string         `json:"model" gorm:"size:200;comment:型号"`
-	DatacenterID   *uint          `json:"datacenter_id,omitempty" gorm:"index;comment:所属机房"`
-	RackID         *uint          `json:"rack_id,omitempty" gorm:"index;comment:所属机柜"`
-	RackUPosition  *int           `json:"rack_u_position,omitempty" gorm:"comment:U位位置"`
-	PurchaseDate   *time.Time     `json:"purchase_date,omitempty" gorm:"comment:采购日期"`
-	WarrantyExpiry *time.Time     `json:"warranty_expiry,omitempty" gorm:"comment:维保到期日期"`
-	Vendor         string         `json:"vendor" gorm:"size:200;comment:供应商"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
-	DeletedAt      gorm.DeletedAt `json:"-" gorm:"index"`
+	ID                 uint           `json:"id" gorm:"primaryKey"`
+	ProjectID          uint           `json:"project_id" gorm:"index;not null"`
+	Name               string         `json:"name" gorm:"not null"`
+	BMCAddress         string         `json:"bmc_address" gorm:"not null"`
+	BMCUser            string         `json:"bmc_user"`
+	BMCSecret          string         `json:"-"`
+	IPAddress          string         `json:"ip_address"`
+	MACAddress         string         `json:"mac_address"`
+	Status             string         `json:"status"`
+	SerialNumber       string         `json:"serial_number" gorm:"size:200;comment:序列号"`
+	Manufacturer       string         `json:"manufacturer" gorm:"size:200;comment:制造商"`
+	Model              string         `json:"model" gorm:"size:200;comment:型号"`
+	DatacenterID       *uint          `json:"datacenter_id,omitempty" gorm:"index;comment:所属机房"`
+	RackID             *uint          `json:"rack_id,omitempty" gorm:"index;comment:所属机柜"`
+	RackUPosition      *int           `json:"rack_u_position,omitempty" gorm:"comment:U位位置"`
+	PurchaseDate       *time.Time     `json:"purchase_date,omitempty" gorm:"comment:采购日期"`
+	WarrantyExpiry     *time.Time     `json:"warranty_expiry,omitempty" gorm:"comment:维保到期日期"`
+	Vendor             string         `json:"vendor" gorm:"size:200;comment:供应商"`
+	RedfishSnapshot    string         `json:"-" gorm:"type:jsonb;default:null;comment:Redfish硬件信息快照"`
+	RedfishCollectedAt *time.Time     `json:"redfish_collected_at,omitempty" gorm:"comment:Redfish最近采集时间"`
+	RedfishError       string         `json:"redfish_error,omitempty" gorm:"type:text;comment:Redfish最近采集错误"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 // SOLSession 记录设备串口远程会话及其有效期。
@@ -145,16 +148,16 @@ type Audit struct {
 
 // Network 表示项目网络及其地址范围和网关。
 type Network struct {
-	ID           uint      `json:"id" gorm:"primaryKey"`
-	ProjectID    uint      `json:"project_id" gorm:"index"`
-	Name         string    `json:"name"`
-	CIDR         string    `json:"cidr" gorm:"column:cidr"`
-	Gateway      string    `json:"gateway"`
-	VlanID       *int      `json:"vlan_id,omitempty" gorm:"comment:VLAN ID"`
-	DNSServers   string    `json:"dns_servers" gorm:"size:500;comment:DNS服务器地址"`
-	DHCPEnabled  bool      `json:"dhcp_enabled" gorm:"default:false;comment:DHCP开关"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID          uint      `json:"id" gorm:"primaryKey"`
+	ProjectID   uint      `json:"project_id" gorm:"index"`
+	Name        string    `json:"name"`
+	CIDR        string    `json:"cidr" gorm:"column:cidr"`
+	Gateway     string    `json:"gateway"`
+	VlanID      *int      `json:"vlan_id,omitempty" gorm:"comment:VLAN ID"`
+	DNSServers  string    `json:"dns_servers" gorm:"size:500;comment:DNS服务器地址"`
+	DHCPEnabled bool      `json:"dhcp_enabled" gorm:"default:false;comment:DHCP开关"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // IPAllocation 记录网络地址向设备的分配信息。
@@ -205,22 +208,22 @@ type AssetHardware struct {
 
 // FirmwareInventory 记录设备固件版本，不负责执行固件更新。
 type FirmwareInventory struct {
-	ID              uint           `json:"id" gorm:"primaryKey"`
-	ProjectID       uint           `json:"project_id" gorm:"index;not null"`
-	AssetID         uint           `json:"asset_id" gorm:"index;not null"`
-	Component       string         `json:"component" gorm:"not null"`
-	Version         string         `json:"version" gorm:"not null"`
-	Vendor          string         `json:"vendor"`
-	ReleasedAt      *time.Time     `json:"released_at,omitempty"`
-	Details         string         `json:"details" gorm:"type:jsonb"`
-	ComponentType   string         `json:"component_type" gorm:"size:50;comment:组件类型"`
-	UpgradeAvailable bool          `json:"upgrade_available" gorm:"default:false;comment:是否可升级"`
-	TargetVersion   string         `json:"target_version" gorm:"size:100;comment:目标升级版本"`
-	CreateBy        uint           `json:"create_by" gorm:"index;not null"`
-	UpdateBy        uint           `json:"update_by" gorm:"index;not null"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `json:"-" gorm:"index"`
+	ID               uint           `json:"id" gorm:"primaryKey"`
+	ProjectID        uint           `json:"project_id" gorm:"index;not null"`
+	AssetID          uint           `json:"asset_id" gorm:"index;not null"`
+	Component        string         `json:"component" gorm:"not null"`
+	Version          string         `json:"version" gorm:"not null"`
+	Vendor           string         `json:"vendor"`
+	ReleasedAt       *time.Time     `json:"released_at,omitempty"`
+	Details          string         `json:"details" gorm:"type:jsonb"`
+	ComponentType    string         `json:"component_type" gorm:"size:50;comment:组件类型"`
+	UpgradeAvailable bool           `json:"upgrade_available" gorm:"default:false;comment:是否可升级"`
+	TargetVersion    string         `json:"target_version" gorm:"size:100;comment:目标升级版本"`
+	CreateBy         uint           `json:"create_by" gorm:"index;not null"`
+	UpdateBy         uint           `json:"update_by" gorm:"index;not null"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 // IPPool 描述项目网络中可分配的地址范围。
@@ -293,18 +296,18 @@ type Datacenter struct {
 
 // Rack 机柜信息表
 type Rack struct {
-	ID           uint           `json:"id" gorm:"primaryKey"`
-	Name         string         `json:"name" gorm:"size:200;not null;comment:机柜名称"`
-	DatacenterID uint           `json:"datacenter_id" gorm:"index;not null;comment:所属机房"`
-	ProjectID    uint           `json:"project_id" gorm:"index;not null;comment:所属项目"`
-	HeightU      int            `json:"height_u" gorm:"default:42;comment:U位高度"`
-	Location     string         `json:"location" gorm:"size:500;comment:机柜位置"`
-	PowerCapacity string        `json:"power_capacity" gorm:"size:100;comment:供电容量"`
-	CreateBy     *uint          `json:"create_by,omitempty" gorm:"comment:创建人"`
-	UpdateBy     *uint          `json:"update_by,omitempty" gorm:"comment:更新人"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index;comment:软删除"`
+	ID            uint           `json:"id" gorm:"primaryKey"`
+	Name          string         `json:"name" gorm:"size:200;not null;comment:机柜名称"`
+	DatacenterID  uint           `json:"datacenter_id" gorm:"index;not null;comment:所属机房"`
+	ProjectID     uint           `json:"project_id" gorm:"index;not null;comment:所属项目"`
+	HeightU       int            `json:"height_u" gorm:"default:42;comment:U位高度"`
+	Location      string         `json:"location" gorm:"size:500;comment:机柜位置"`
+	PowerCapacity string         `json:"power_capacity" gorm:"size:100;comment:供电容量"`
+	CreateBy      *uint          `json:"create_by,omitempty" gorm:"comment:创建人"`
+	UpdateBy      *uint          `json:"update_by,omitempty" gorm:"comment:更新人"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index;comment:软删除"`
 }
 
 // Tag 标签定义表

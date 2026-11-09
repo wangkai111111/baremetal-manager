@@ -1,7 +1,7 @@
 export interface Field {
   key: string
   label: string
-  type?: 'select' | 'textarea' | 'password' | 'number'
+  type?: 'select' | 'textarea' | 'password' | 'number' | 'json'
   options?: string[]
   required?: boolean
 }
@@ -24,6 +24,7 @@ const field = (key: string, label: string, required = false): Field => ({
 })
 
 export const sections: Section[] = [
+  { path: '/tenants', title: '租户管理', subtitle: '组织租户访问边界', api: '/tenants', permission: 'projects:read', fields: [field('name', '租户名称', true), field('code', '编码', true), field('description', '描述')], columns: ['name', 'code', 'description', 'created_at'] },
   {
     path: '/projects',
     title: '项目管理',
@@ -73,10 +74,11 @@ export const sections: Section[] = [
       field('bmc_address', 'BMC 地址', true),
       field('bmc_user', 'BMC 用户名'),
       { ...field('bmc_secret', 'BMC 密码'), type: 'password' },
-      field('ip_address', '业务 IP'),
-      field('mac_address', 'MAC 地址')
+      { ...field('bmc_port', 'BMC 端口'), type: 'number' },
+      { ...field('bmc_protocol', 'BMC 协议'), type: 'select', options: ['redfish', 'ipmi'] },
+      field('management_ip', '管理 IP')
     ],
-    columns: ['name', 'bmc_address', 'ip_address', 'status', 'project_id', 'created_at']
+    columns: ['name', 'bmc_address', 'management_ip', 'status', 'power_state', 'created_at']
   },
   {
     path: '/images',
@@ -84,9 +86,8 @@ export const sections: Section[] = [
     subtitle: '镜像仓库与安装介质',
     api: '/images',
     permission: 'images:read',
-    fields: [],
-    columns: ['name', 'size', 'created_at'],
-    readonly: true
+    fields: [field('name', '镜像名称', true), field('os_type', '操作系统', true), field('version', '版本', true), field('architecture', '架构', true), field('object_key', '存储对象键', true), { ...field('size_bytes', '大小（字节）', true), type: 'number' }, field('sha256', 'SHA256', true)],
+    columns: ['name', 'os_type', 'version', 'status', 'created_at']
   },
   {
     path: '/installations',
@@ -337,6 +338,12 @@ export const labels: Record<string, string> = {
   bmc_user: 'BMC 用户名',
   bmc_secret: 'BMC 密码',
   ip_address: '业务 IP',
+  management_ip: '管理 IP',
+  bmc_port: 'BMC 端口',
+  bmc_protocol: 'BMC 协议',
+  rack_u_position: '机柜 U 位',
+  power_state: '电源状态',
+  tenant_id: '租户 ID',
   mac_address: 'MAC 地址',
   size: '大小 (字节)',
   kind: '任务类型',
