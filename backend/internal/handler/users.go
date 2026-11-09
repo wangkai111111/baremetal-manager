@@ -34,6 +34,8 @@ func (h *Handler) CreateUser(c *gin.Context) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Role     string `json:"role"`
+		Name     string `json:"name"`
+		Email    string `json:"email"`
 	}
 	if c.ShouldBindJSON(&in) != nil || in.Username == "" || len(in.Password) < 12 {
 		fail(c, 400, "invalid user")
@@ -49,7 +51,13 @@ func (h *Handler) CreateUser(c *gin.Context) {
 		in.Role = "user"
 	}
 	hash, _ := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
-	u := model.User{Username: in.Username, PasswordHash: string(hash), Role: in.Role}
+	u := model.User{
+		Username:     in.Username,
+		PasswordHash: string(hash),
+		Role:         in.Role,
+		Name:         in.Name,
+		Email:        in.Email,
+	}
 	if h.S.Store.DB.Create(&u).Error != nil {
 		fail(c, 409, "username exists")
 		return

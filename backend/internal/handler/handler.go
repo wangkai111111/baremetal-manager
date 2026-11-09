@@ -128,7 +128,7 @@ func (h *Handler) Router() *gin.Engine {
 	p.GET("/audit", h.Audits)
 	p.GET("/networks", h.Networks)
 	p.GET("/ip-allocations", h.IPs)
-	p.GET("/members", h.Members)
+	p.GET("/members", listMembers(h.S.Store))
 	p.GET("/sol-sessions", h.SOLSessions)
 	w := authorized.Group("/projects/:projectId")
 	w.Use(h.Auth.Project(true))
@@ -139,7 +139,7 @@ func (h *Handler) Router() *gin.Engine {
 	w.POST("/alerts/:id/resolve", h.ResolveAlert)
 	w.POST("/networks", h.CreateNetwork)
 	w.POST("/ip-allocations", h.CreateIP)
-	w.POST("/members", h.AddMember)
+	w.POST("/members", addOrUpdateMember(h.S.Store))
 	w.PUT("/members/:userId", updateMember(h.S.Store))
 	w.DELETE("/members/:userId", removeMember(h.S.Store))
 	w.POST("/assets/batch-actions", h.BatchAction)
@@ -612,38 +612,7 @@ func (h *Handler) CreateIP(c *gin.Context) {
 	c.JSON(201, v)
 }
 
-// Members 列出当前项目的成员及其权限。
-func (h *Handler) Members(c *gin.Context) {
-	var v []model.Membership
-	h.S.Store.DB.Where("project_id = ?", pid(c)).Find(&v)
-	c.JSON(200, v)
-}
 
-// AddMember 供项目管理员新增或更新项目成员及权限。
-func (h *Handler) AddMember(c *gin.Context) {
-	role, e := h.S.Store.Role(uid(c), pid(c))
-	if e != nil || role != "admin" {
-		fail(c, 403, "forbidden")
-		return
-	}
-	var v model.Membership
-	if c.ShouldBindJSON(&v) != nil || v.UserID == 0 || (v.Role != "admin" && v.Role != "operator" && v.Role != "viewer") || len(v.Permissions) > 500 {
-		fail(c, 400, "invalid member")
-		return
-	}
-	var user model.User
-	if h.S.Store.DB.First(&user, v.UserID).Error != nil {
-		fail(c, 404, "user not found")
-		return
-	}
-	v.ProjectID = pid(c)
-	if h.S.Store.DB.Save(&v).Error != nil {
-		fail(c, 500, "save failed")
-		return
-	}
-	h.S.Store.Audit(uid(c), pid(c), "member.upsert", fmt.Sprint(v.UserID))
-	c.JSON(200, v)
-}
 
 // SOL 验证设备与令牌后建立限时 WebSocket 串口会话。
 func (h *Handler) SOL(c *gin.Context) {

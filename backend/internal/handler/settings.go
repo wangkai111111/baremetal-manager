@@ -14,9 +14,30 @@ import (
 func RegisterSettingsRoutes(rg *gin.RouterGroup, store *repository.Store) {
 	settings := rg.Group("/settings")
 	{
+		// 公开品牌信息读取（仅需登录，不需要 admin 权限）
+		settings.GET("/public/branding", getPublicBranding(store))
+
 		settings.GET("", listSettings(store))                     // 所有设置项
 		settings.GET("/category/:category", getByCategory(store)) // 按分类查询
 		settings.PUT("/:key", updateSetting(store))               // 更新设置项
+	}
+}
+
+// getPublicBranding 公开品牌信息读取接口（所有已登录用户可访问）
+// 从 system_settings 表读取 category='brand' 的所有记录，以 key-value 格式返回
+func getPublicBranding(store *repository.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		settings, err := store.GetSystemSettingsByCategory("brand")
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, "DB_ERROR", "读取品牌信息失败")
+			return
+		}
+		// 转换为 key-value 格式返回
+		result := make(map[string]string)
+		for _, s := range settings {
+			result[s.Key] = s.Value
+		}
+		OK(c, result)
 	}
 }
 

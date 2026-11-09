@@ -391,7 +391,7 @@ function openPasswordModal() {
             </template>
           </n-button>
           <span class="breadcrumb">
-            METALOPS <span>/</span> {{ route.meta.title || '总览' }}
+            {{ platformName }} <span>/</span> {{ route.meta.title || '总览' }}
           </span>
         </div>
         <div class="topbar-right">

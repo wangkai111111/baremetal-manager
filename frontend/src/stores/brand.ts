@@ -24,6 +24,8 @@ export async function loadBrand() {
     footerText.value = String(data.footer_text || '控制平面在线')
     footerVisible.value = data.footer_visible !== false
     loginNotice.value = String(data.login_notice || '')
+    // 同步更新浏览器标签页标题
+    document.title = platformName.value
   } catch {
     // 读取失败时保留默认配置
   }

@@ -48,8 +48,15 @@ func listUsers(store *repository.Store) gin.HandlerFunc {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 
+		// 处理搜索参数（模糊匹配用户名、姓名、邮箱）
+		search := c.Query("search")
+
 		var users []model.User
 		query := store.DB.Model(&model.User{}).Order("id asc")
+		if search != "" {
+			likePattern := "%" + search + "%"
+			query = query.Where("username LIKE ? OR name LIKE ? OR email LIKE ?", likePattern, likePattern, likePattern)
+		}
 		result, err := store.Paginate(query, page, pageSize, &users)
 		if err != nil {
 			Fail(c, http.StatusInternalServerError, "DB_ERROR", "查询用户列表失败")
