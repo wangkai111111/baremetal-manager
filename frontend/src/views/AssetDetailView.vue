@@ -467,9 +467,63 @@ const memoryGiB = computed(() => {
   const fromModules = componentsOf('memory').reduce((sum, row) => sum + numOf(row.capacity_mib) / 1024, 0)
   return fromModules > 0 ? Math.round(fromModules) : 0
 })
-const diskBytes = computed(() => componentsOf('storage').filter(r => str(r.kind) === 'drive').reduce((sum, row) => sum + numOf(row.capacity_bytes), 0))
-const diskCount = computed(() => componentsOf('storage').filter(r => str(r.kind) === 'drive').length)
-const diskMedia = computed(() => [...new Set(componentsOf('storage').filter(r => str(r.kind) === 'drive').map(r => str(r.media_type)).filter(Boolean))].join('/'))
+const physicalDisks = computed(() => {
+  const rows: RecordData[] = []
+  for (const source of componentsOf('storage').filter(row => str(row.kind) === 'drive')) {
+    if (/backplane|enclosure|expander|背板/i.test(`${str(source.name)} ${str(source.model)}`)) continue
+    const serial = str(source.serial_number).trim().toLowerCase()
+    const validSerial = serial && !/^(0+|unknown|none|n\/a|not specified)$/i.test(serial)
+    const existing = rows.find(row => {
+      const otherSerial = str(row.serial_number).trim().toLowerCase()
+      if (validSerial && otherSerial && serial !== otherSerial) return false
+      if (row.model && source.model && str(row.model).trim().toLowerCase() !== str(source.model).trim().toLowerCase()) return false
+      if (row.manufacturer && source.manufacturer && str(row.manufacturer).trim().toLowerCase() !== str(source.manufacturer).trim().toLowerCase()) return false
+      return (validSerial && serial === otherSerial)
+        || (!!source.name && str(source.name).trim() === str(row.name).trim() && numOf(source.capacity_bytes) > 0 && numOf(source.capacity_bytes) === numOf(row.capacity_bytes))
+    })
+    if (existing) {
+      for (const [key, value] of Object.entries(source)) {
+        if (existing[key] == null || existing[key] === '' || existing[key] === 0) existing[key] = value
+      }
+    } else rows.push({ ...source })
+  }
+  return rows
+})
+const networkInterfaces = computed(() => {
+  const network = componentsOf('network')
+  const kinds = ['port', 'interface', 'network_function', 'adapter', 'ethernet']
+  const preferred = kinds.find(kind => network.some(row => str(row.kind) === kind && !!row.mac))
+    || kinds.find(kind => network.some(row => str(row.kind) === kind))
+  const rows: RecordData[] = []
+  for (const source of network.filter(row => str(row.kind) === preferred || !!row.mac)
+    .sort((a, b) => Number(str(b.kind) === preferred) - Number(str(a.kind) === preferred))) {
+    const mac = str(source.mac).replace(/[^a-f0-9]/gi, '').toLowerCase()
+    const validMac = /^[a-f0-9]{12}$/.test(mac) && !/^(0{12}|f{12})$/.test(mac)
+    if (str(source.kind) !== preferred && !validMac) continue
+    const existing = validMac ? rows.find(row => str(row.mac).replace(/[^a-f0-9]/gi, '').toLowerCase() === mac) : undefined
+    if (existing) {
+      for (const [key, value] of Object.entries(source)) {
+        if (existing[key] == null || existing[key] === '' || existing[key] === 0) existing[key] = value
+      }
+    } else rows.push({ ...source })
+  }
+  return rows
+})
+const raidCards = computed(() => {
+  const rows = componentsOf('storage').filter(row => {
+    if (!['controller', 'storage'].includes(str(row.kind))) return false
+    const description = `${str(row.name)} ${str(row.model)}`
+    return /raid|perc|megaraid|smart array/i.test(description)
+      && !/backplane|enclosure|expander|\bAHCI\b|\bHBA\b|背板/i.test(description)
+  })
+  return rows.filter((row, index) => rows.findIndex(other =>
+    row.serial_number ? row.serial_number === other.serial_number
+      : row.id === other.id && row.name === other.name && row.model === other.model
+  ) === index)
+})
+const diskBytes = computed(() => physicalDisks.value.reduce((sum, row) => sum + numOf(row.capacity_bytes), 0))
+const diskCount = computed(() => physicalDisks.value.length)
+const diskMedia = computed(() => [...new Set(physicalDisks.value.map(row => str(row.media_type)).filter(Boolean))].join('/'))
 
 const specText = computed(() => {
   const parts: string[] = []
@@ -484,11 +538,9 @@ const specText = computed(() => {
 // ============================================================
 type ConfigField = { label: string; value: string; mono?: boolean; hint?: string; tone?: 'warn' | 'danger' }
 const nicSummaryText = computed(() => {
-  const network = componentsOf('network')
-  const kind = ['port', 'interface', 'network_function', 'adapter', 'ethernet'].find(value => network.some(r => str(r.kind) === value))
-  if (!kind) return '—'
-  const rows = network.filter(r => str(r.kind) === kind)
-  const label = kind === 'port' ? '个端口' : kind === 'adapter' ? '张适配器' : '个接口'
+  const rows = networkInterfaces.value
+  if (!rows.length) return '—'
+  const label = rows.every(row => str(row.kind) === 'adapter') ? '张适配器' : '个接口'
   const fastest = Math.max(...rows.map(r => numOf(r.speed_mbps)))
   return fastest > 0 ? `${rows.length} ${label} · 最高 ${formatField('speed_mbps', fastest)}` : `${rows.length} ${label}`
 })
@@ -643,6 +695,7 @@ function buildSectionColumns(rows: RecordData[], fields: FieldDef[]): DataTableC
     { title: '#', key: '__no', width: 54, render: (_row, index) => h('span', { class: 'mono row-no' }, String(index + 1)) }
   ]
   fields
+    .filter(field => !(['health', 'state'].includes(field.key) && rows.some(row => row.health || row.state)))
     .filter(field => rows.some(row => row[field.key] != null && row[field.key] !== ''))
     .forEach(field => {
       columns.push({
@@ -661,7 +714,6 @@ function buildSectionColumns(rows: RecordData[], fields: FieldDef[]): DataTableC
 }
 
 const hardwareSections = computed<HardwareSection[]>(() => {
-  const storage = componentsOf('storage')
   const sensors = componentsOf('sensors')
   const sections: HardwareSection[] = [
     {
@@ -681,7 +733,7 @@ const hardwareSections = computed<HardwareSection[]>(() => {
       ]
     },
     {
-      key: 'disk', title: '磁盘', group: 'storage', rows: storage.filter(row => str(row.kind) === 'drive'), empty: '快照中没有物理盘明细',
+      key: 'disk', title: '磁盘', group: 'storage', rows: physicalDisks.value, empty: '快照中没有物理盘明细',
       fields: [
         { key: 'name', label: '盘位 / 名称', width: 140 }, { key: 'model', label: '型号', width: 170 },
         { key: 'capacity_bytes', label: '容量', width: 110 }, { key: 'media_type', label: '介质' },
@@ -689,16 +741,17 @@ const hardwareSections = computed<HardwareSection[]>(() => {
       ]
     },
     {
-      key: 'raid', title: 'RAID / 逻辑卷', group: 'storage',
-      rows: storage.filter(row => ['volume', 'controller'].includes(str(row.kind)) || !!row.raid_type),
-      empty: '未采集到 RAID 控制器或逻辑卷（多为无 RAID 的直通配置）',
+      key: 'raid', title: 'RAID卡', group: 'storage',
+      rows: raidCards.value,
+      empty: '未采集到可识别的 RAID 卡',
       fields: [
-        { key: 'name', label: '名称', width: 150 }, { key: 'kind', label: '类别' }, { key: 'raid_type', label: 'RAID 类型' },
-        { key: 'capacity_bytes', label: '容量', width: 110 }, { key: 'protocol', label: '接口协议' }, { key: 'model', label: '型号' }
+        { key: 'name', label: '名称', width: 150 }, { key: 'manufacturer', label: '制造商' },
+        { key: 'model', label: '型号', width: 170 }, { key: 'serial_number', label: '序列号', mono: true, width: 150 },
+        { key: 'version', label: '固件版本' }, { key: 'protocol', label: '接口协议' }
       ]
     },
     {
-      key: 'nic', title: '网卡', group: 'network', rows: componentsOf('network'), empty: '快照中没有网卡明细',
+      key: 'nic', title: '网卡', group: 'network', rows: networkInterfaces.value, empty: '快照中没有网卡明细',
       fields: [
         { key: 'name', label: '名称', width: 140 }, { key: 'kind', label: '类别' }, { key: 'manufacturer', label: '制造商' },
         { key: 'model', label: '型号', width: 150 }, { key: 'mac', label: 'MAC 地址', mono: true, width: 160 },
@@ -763,7 +816,7 @@ const ipColumns = computed<DataTableColumns<RecordData>>(() => [
   { title: '分配时间', key: 'allocated_at', minWidth: 150, render: row => h('span', { class: 'mono' }, fmtTime(row.allocated_at)) },
   { title: '释放时间', key: 'released_at', minWidth: 150, render: row => h('span', { class: 'mono' }, fmtTime(row.released_at)) }
 ])
-const nicColumns = computed<DataTableColumns<RecordData>>(() => buildSectionColumns(componentsOf('network'), [
+const nicColumns = computed<DataTableColumns<RecordData>>(() => buildSectionColumns(networkInterfaces.value, [
   { key: 'name', label: '接口名称', width: 150 }, { key: 'kind', label: '类别' },
   { key: 'mac', label: 'MAC 地址', mono: true, width: 160 }, { key: 'model', label: '型号', width: 150 },
   { key: 'speed_mbps', label: '协商速率', width: 110 }, { key: 'link', label: '链路状态' }, { key: 'state', label: '在位状态' }
@@ -1457,10 +1510,10 @@ onUnmounted(() => {
 
           <section class="card section">
             <header class="section-head">
-              <h2>网卡接口<span v-if="componentsOf('network').length" class="count-chip mono">{{ componentsOf('network').length }}</span></h2>
+              <h2>网卡接口<span v-if="networkInterfaces.length" class="count-chip mono">{{ networkInterfaces.length }}</span></h2>
               <span class="section-note">{{ stateOf('network') }}</span>
             </header>
-            <n-data-table v-if="componentsOf('network').length" size="small" :columns="nicColumns" :data="componentsOf('network')"
+            <n-data-table v-if="networkInterfaces.length" size="small" :columns="nicColumns" :data="networkInterfaces"
               :loading="networkLoading" :pagination="false" :max-height="320" />
             <div v-else class="empty-hint">采集快照中没有网卡明细，请先在「硬件信息」执行采集。</div>
           </section>
