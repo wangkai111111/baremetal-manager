@@ -89,15 +89,19 @@ func (a *App) createOrder(c *gin.Context) {
 	sc := contextScope(c)
 	u := current(c)
 	var in struct {
-		Type          string  `json:"type"`
-		ProductID     *int64  `json:"product_id"`
-		AssetID       *int64  `json:"asset_id"`
-		Amount        float64 `json:"amount"`
+		Type           string  `json:"type"`
+		ProductID      *int64  `json:"product_id"`
+		AssetID        *int64  `json:"asset_id"`
+		Amount         float64 `json:"amount"`
 		DiscountAmount float64 `json:"discount_amount"`
-		CouponCode    string  `json:"coupon_code"`
+		CouponCode     string  `json:"coupon_code"`
 	}
 	if c.ShouldBindJSON(&in) != nil || !validOrderTypes[in.Type] {
 		fail(c, 400, "请提供有效的订单类型（purchase/renew/upgrade/refund）")
+		return
+	}
+	if in.Type == "purchase" && in.AssetID != nil && !sc.Admin && currentSystemMode(a.store.db) == ModeExternalOperation {
+		fail(c, 403, "购买订单的资产由平台交付绑定")
 		return
 	}
 	// 如果指定了产品，验证其存在并计算金额
@@ -186,12 +190,12 @@ func (a *App) applyCoupon(tenantID int64, code string, amount float64) (float64,
 		TenantID    *int64 `gorm:"column:tenant_id"`
 		Type        string
 		Value       float64
-		MinAmount   float64  `gorm:"column:min_amount"`
-		MaxDiscount *float64 `gorm:"column:max_discount"`
+		MinAmount   float64    `gorm:"column:min_amount"`
+		MaxDiscount *float64   `gorm:"column:max_discount"`
 		ValidFrom   *time.Time `gorm:"column:valid_from"`
 		ValidUntil  *time.Time `gorm:"column:valid_until"`
-		UsageLimit  *int     `gorm:"column:usage_limit"`
-		UsedCount   int      `gorm:"column:used_count"`
+		UsageLimit  *int       `gorm:"column:usage_limit"`
+		UsedCount   int        `gorm:"column:used_count"`
 		Status      string
 	}
 	e := a.store.db.Table("coupons").
@@ -251,17 +255,41 @@ func (a *App) transitionOrder(c *gin.Context) {
 		fail(c, 400, "请指定状态流转动作")
 		return
 	}
+	operationMode := currentSystemMode(a.store.db) == ModeExternalOperation
+	if operationMode && !sc.Admin && transition != "cancelled" {
+		fail(c, 403, "租户仅可取消待支付订单，其他状态由平台或支付流程处理")
+		return
+	}
+	var in struct {
+		AssetID *int64 `json:"asset_id"`
+	}
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&in); err != nil {
+			fail(c, 400, "无效的交付参数")
+			return
+		}
+	}
+	if in.AssetID != nil && (!sc.Admin || *in.AssetID <= 0 || transition != "completed") {
+		fail(c, 400, "仅平台完成购买交付时可绑定有效资产")
+		return
+	}
 	// 查询当前订单
 	var order struct {
-		ID     int64
-		Status string
+		ID           int64
+		Status       string
+		Type         string
+		PayableCents *int64
 	}
 	e := a.store.db.Table("orders").
-		Select("id, status").
+		Select("id, status, type, payable_cents").
 		Where("id=? AND tenant_id=? AND deleted_at IS NULL", id, sc.Tenant).
 		Take(&order).Error
 	if e != nil {
 		fail(c, 404, "订单不存在")
+		return
+	}
+	if order.PayableCents != nil && transition != "cancelled" {
+		fail(c, 409, "订阅订单必须通过可核验支付与履约流程处理，禁止手动标记支付、延长租期或整单退款")
 		return
 	}
 	// 校验状态流转合法性
@@ -295,6 +323,41 @@ func (a *App) transitionOrder(c *gin.Context) {
 		}
 	}
 	e = a.store.db.Transaction(func(tx *gorm.DB) error {
+		if transition == "completed" && (operationMode && order.Type == "purchase" || in.AssetID != nil) {
+			var locked struct {
+				Status  string
+				Type    string
+				AssetID *int64
+			}
+			if err := tx.Table("orders").Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("id=? AND tenant_id=? AND deleted_at IS NULL", id, sc.Tenant).Take(&locked).Error; err != nil {
+				return err
+			}
+			if locked.Status != "processing" || locked.Type != "purchase" {
+				return fmt.Errorf("仅处理中购买订单可以交付资产")
+			}
+			assetID := locked.AssetID
+			if in.AssetID != nil {
+				assetID = in.AssetID
+			}
+			if assetID == nil || *assetID <= 0 {
+				return fmt.Errorf("购买订单完成前必须绑定资产")
+			}
+			var asset struct{ ID int64 }
+			if err := tx.Table("assets").Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL", *assetID, sc.Tenant, sc.Project).
+				Take(&asset).Error; err != nil {
+				return fmt.Errorf("交付资产必须属于当前租户和项目且未删除")
+			}
+			var count int64
+			if err := tx.Table("orders").Where("asset_id=? AND id<>? AND type='purchase' AND status='completed' AND deleted_at IS NULL", *assetID, id).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return fmt.Errorf("资产已由其他购买订单交付")
+			}
+			updates["asset_id"] = *assetID
+		}
 		res := tx.Table("orders").
 			Where("id=? AND tenant_id=? AND status=? AND deleted_at IS NULL", id, sc.Tenant, order.Status).
 			Updates(updates)

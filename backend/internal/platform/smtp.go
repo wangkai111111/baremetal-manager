@@ -102,6 +102,10 @@ func (a *App) smtpTest(c *gin.Context) {
 }
 
 func sendSMTPTest(parent context.Context, in smtpTestRequest) error {
+	return sendSMTPMessage(parent, in, "[TEST] SMTP configuration test", "This is a test message from the baremetal management platform.")
+}
+
+func sendSMTPMessage(parent context.Context, in smtpTestRequest, subject, body string) error {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	conn, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(in.Host, strconv.Itoa(in.Port)))
@@ -155,7 +159,7 @@ func sendSMTPTest(parent context.Context, in smtpTestRequest) error {
 	if err != nil {
 		return errors.New("SMTP data rejected")
 	}
-	message := "From: " + in.From + "\r\nTo: " + in.To + "\r\nSubject: SMTP configuration test\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nThis is a test message from the baremetal management platform.\r\n"
+	message := "From: " + in.From + "\r\nTo: " + in.To + "\r\nSubject: " + subject + "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + body + "\r\n"
 	if _, err := io.WriteString(writer, message); err != nil {
 		return errors.New("SMTP message write failed")
 	}

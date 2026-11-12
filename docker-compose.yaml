@@ -23,8 +23,6 @@ x-backend-common: &backend-common
     JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to at least 32 random characters}
     BMC_ENCRYPTION_KEY: ${BMC_ENCRYPTION_KEY:?Set BMC_ENCRYPTION_KEY to a 32-byte key}
     SOL_ALLOWED_ORIGIN: ${SOL_ALLOWED_ORIGIN:-http://localhost:8080}
-    BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
-    BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD}
     MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
     MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-bmm-minio}
     MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
@@ -122,8 +120,6 @@ services:
       DATABASE_URL: ${DATABASE_MIGRATION_URL:?Set DATABASE_MIGRATION_URL using the database owner}
       DATABASE_APP_USER: ${DATABASE_APP_USER:-bmm_app}
       DATABASE_APP_PASSWORD: ${DATABASE_APP_PASSWORD:?Set DATABASE_APP_PASSWORD}
-      BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
-      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
@@ -144,7 +140,7 @@ services:
       - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
       - ./deploy/postgres/healthcheck.sh:/usr/local/bin/bmm-pg-healthcheck:ro
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+      - "0.0.0.0:${POSTGRES_PORT:-15432}:5432"
     healthcheck:
       test: ["CMD", "/usr/local/bin/bmm-pg-healthcheck"]
       interval: 10s
@@ -199,9 +195,9 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
     volumes:
       - minio-data:/data
-    expose:
-      - "9000"
-      - "9001"
+    ports:
+      - "0.0.0.0:${MINIO_PORT:-19000}:9000"
+      - "0.0.0.0:${MINIO_CONSOLE_PORT:-19001}:9001"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
       interval: 10s

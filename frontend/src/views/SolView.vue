@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, nextTick, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NModal, useMessage } from 'naive-ui'
+import { NButton, NModal, NInput, useMessage } from 'naive-ui'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -35,9 +35,42 @@ const isFullscreen = ref(false)
 
 // === 快捷键提示弹窗 ===
 const showShortcuts = ref(false)
+const showPaste = ref(false)
+const pasteText = ref('')
+const selectedText = ref('')
+
+async function copySelection() {
+  const text = terminal.getSelection()
+  if (!text) return message.info('请先选中终端中的文字')
+  try {
+    await navigator.clipboard.writeText(text)
+    message.success('已复制选中文字')
+  } catch {
+    message.warning('浏览器不允许访问剪贴板，请使用 Ctrl + Shift + C 或浏览器复制菜单')
+  }
+}
+
+async function openPaste() {
+  pasteText.value = ''
+  showPaste.value = true
+  try {
+    pasteText.value = await navigator.clipboard.readText()
+  } catch {
+    // 非安全上下文可通过弹窗手动粘贴。
+  }
+}
+
+function sendPaste() {
+  if (socket?.readyState !== WebSocket.OPEN) return message.warning('会话尚未连接')
+  terminal.paste(pasteText.value)
+  showPaste.value = false
+  terminal.focus()
+}
 
 // === 快捷键列表 ===
 const shortcuts = [
+  { keys: 'Ctrl + Shift + C', desc: '复制选中的终端文字' },
+  { keys: 'Ctrl + Shift + V', desc: '打开粘贴确认窗口' },
   { keys: 'Ctrl + C', desc: '发送中断信号（SIGINT）' },
   { keys: 'Ctrl + D', desc: '发送 EOF 信号' },
   { keys: 'Ctrl + Z', desc: '挂起当前进程' },
@@ -206,6 +239,18 @@ onMounted(async () => {
   terminal.loadAddon(fit)
   terminal.open(container.value!)
   fit.fit()
+  terminal.onSelectionChange(() => { selectedText.value = terminal.getSelection() })
+  terminal.attachCustomKeyEventHandler(event => {
+    if (event.ctrlKey && event.shiftKey && ['C', 'V'].includes(event.key.toUpperCase())) {
+      if (event.type === 'keydown') {
+        event.preventDefault()
+        if (event.key.toUpperCase() === 'C') void copySelection()
+        else void openPaste()
+      }
+      return false
+    }
+    return true
+  })
 
   connectSocket()
 
@@ -242,7 +287,7 @@ onUnmounted(() => {
     </div>
 
     <!-- SOL 工具栏 -->
-    <div class="sol-toolbar" :style="isFullscreen ? 'position: absolute; top: 8px; right: 8px; z-index: 10; background: rgba(16,28,43,0.9); padding: 8px 12px; border-radius: 4px;' : ''">
+    <div class="sol-toolbar">
       <!-- 会话倒计时 -->
       <div :class="['sol-timer', { warning: showSessionWarning }]">
         剩余时间：{{ sessionTimerText }}
@@ -257,6 +302,9 @@ onUnmounted(() => {
       <n-button size="small" @click="toggleFullscreen">
         {{ isFullscreen ? '退出全屏' : '全屏' }}
       </n-button>
+
+      <n-button size="small" :disabled="!selectedText" @click="copySelection">复制选中</n-button>
+      <n-button size="small" @click="openPaste">粘贴</n-button>
 
       <!-- 导出日志按钮 -->
       <n-button size="small" @click="exportLog">
@@ -283,6 +331,17 @@ onUnmounted(() => {
       <div ref="container" class="terminal-body" :style="isFullscreen ? 'height: calc(100vh - 50px);' : ''"></div>
     </div>
 
+    <n-modal v-model:show="showPaste" preset="card" title="粘贴到 SOL 会话" style="width: min(560px, 94vw)">
+      <p>内容将直接发送到目标服务器，换行可能执行命令，请确认后发送。</p>
+      <n-input v-model:value="pasteText" type="textarea" placeholder="在此粘贴内容（Ctrl + V）" :autosize="{ minRows: 4, maxRows: 12 }" />
+      <template #footer>
+        <div style="display: flex; justify-content: flex-end; gap: 8px">
+          <n-button @click="showPaste = false">取消</n-button>
+          <n-button type="primary" :disabled="!pasteText" @click="sendPaste">确认发送</n-button>
+        </div>
+      </template>
+    </n-modal>
+
     <!-- 快捷键弹窗 -->
     <n-modal
       v-model:show="showShortcuts"
@@ -305,3 +364,30 @@ onUnmounted(() => {
     </n-modal>
   </div>
 </template>
+
+<style scoped>
+.terminal-fullscreen {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  box-sizing: border-box;
+}
+.terminal-fullscreen .sol-toolbar {
+  flex: none;
+  padding: 10px 12px;
+  background: var(--color-surface);
+  border-radius: 6px;
+}
+.terminal-fullscreen .terminal-frame {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+}
+.terminal-fullscreen .terminal-body {
+  flex: 1;
+  min-height: 0;
+  height: auto !important;
+}
+</style>

@@ -35,6 +35,82 @@ func testTarget(t *testing.T, server *httptest.Server, verify bool) *targetBMC {
 	return target
 }
 
+func TestCollectionSummaryWhitelist(t *testing.T) {
+	raw := json.RawMessage(`{"Name":"System","Manufacturer":" Vendor ","Model":"Server","SerialNumber":"SN","BiosVersion":"v1","ProcessorSummary":{"Count":2,"Model":"CPU","Secret":"hidden"},"MemorySummary":{"TotalSystemMemoryGiB":128,"Secret":"hidden"},"BMCPassword":"hidden","Actions":{"Secret":"hidden"}}`)
+	now := time.Now()
+	dto := collectionSummary(collectionRow{BMCProtocol: "redfish", RedfishSnapshot: raw, CollectedAt: &now, CollectionError: "hidden credentials"})
+	if !dto.Supported || dto.ComponentDetailsSupported || dto.CPUCount != 2 || dto.CPUModel != "CPU" || dto.MemoryGiB != 128 || dto.BIOSVersion != "v1" || dto.SerialNumber != "SN" || dto.CollectedAt != &now || dto.CollectionError == "" {
+		t.Fatalf("incorrect summary: %#v", dto)
+	}
+	encoded, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"hidden", "Secret", "Password", "snapshot", "Actions"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("leaked %s", forbidden)
+		}
+	}
+	updates, err := collectionAssetUpdates(raw)
+	if err != nil || updates["manufacturer"] != "Vendor" || updates["model"] != "Server" || updates["serial_number"] != "SN" {
+		t.Fatalf("updates: %#v, %v", updates, err)
+	}
+	updates, err = collectionAssetUpdates(json.RawMessage(`{"Name":"System","Manufacturer":"  "}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"manufacturer", "model", "serial_number"} {
+		if _, ok := updates[key]; ok {
+			t.Fatalf("empty %s would overwrite identity", key)
+		}
+	}
+	for _, value := range []string{"", "{}", "null", "{", `{"PowerState":"On"}`, `{"ProcessorSummary":{},"MemorySummary":{}}`} {
+		dto := collectionSummary(collectionRow{BMCProtocol: "ipmi", RedfishSnapshot: json.RawMessage(value)})
+		if dto.Supported || dto.CPUCount != 0 || dto.MemoryGiB != 0 || dto.Name != "" || dto.CollectedAt != nil {
+			t.Fatalf("nonempty DTO for %q", value)
+		}
+		if _, err := parseComputerSystemSummary(json.RawMessage(value)); err == nil {
+			t.Fatalf("accepted empty summary %q", value)
+		}
+	}
+}
+
+func TestCollectionSummaryStatus(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		row  collectionRow
+		want string
+	}{
+		{collectionRow{BMCProtocol: "redfish"}, "not_collected"},
+		{collectionRow{BMCProtocol: "ipmi"}, "unsupported"},
+		{collectionRow{BMCProtocol: "redfish", RedfishSnapshot: json.RawMessage(`{}`), CollectedAt: &now}, "not_collected"},
+		{collectionRow{BMCProtocol: "redfish", RedfishSnapshot: json.RawMessage(`{"Model":"Server"}`), CollectedAt: &now}, "succeeded"},
+		{collectionRow{BMCProtocol: "redfish", RedfishSnapshot: json.RawMessage(`{"Model":"Server"}`), CollectedAt: &now, CollectionError: "unsafe secret"}, "failed"},
+	} {
+		dto := collectionSummary(tc.row)
+		if dto.Status != tc.want {
+			t.Fatalf("status = %q, want %q", dto.Status, tc.want)
+		}
+		if tc.want == "not_collected" && dto.CollectedAt != nil {
+			t.Fatal("empty legacy snapshot presented as successful collection")
+		}
+	}
+}
+
+func TestTargetCollectEmptySystem(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redfish/v1/Systems" {
+			fmt.Fprint(w, `{"Members":[{"@odata.id":"/redfish/v1/Systems/1"}]}`)
+		} else {
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	defer server.Close()
+	if _, err := testTarget(t, server, false).collect(context.Background()); err == nil {
+		t.Fatal("empty system must not succeed")
+	}
+}
+
 func TestTargetCollectTLS(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -49,6 +125,8 @@ func TestTargetCollectTLS(t *testing.T) {
 			fmt.Fprint(w, `{"Members":[{"@odata.id":"/redfish/v1/Systems/Server.1"}]}`)
 		case "/redfish/v1/Systems/Server.1":
 			fmt.Fprint(w, `{"Manufacturer":"Real vendor","Model":"Hardware","SerialNumber":"123","PowerState":"On","BiosVersion":"1.2","ProcessorSummary":{"Count":2,"Model":"CPU"},"MemorySummary":{"TotalSystemMemoryGiB":128},"OEMSecret":"not persisted"}`)
+		case "/redfish/v1/Managers", "/redfish/v1/UpdateService", "/redfish/v1/Chassis":
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 			http.NotFound(w, r)

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 // 登录页 — 展示平台品牌并校验账号密码
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NInput, NForm, NFormItem, useMessage } from 'naive-ui'
 import { useAuth } from '../stores/auth'
 import { errorText } from '../api'
-import { loadBrand, loginNotice, platformLogo, platformName } from '../stores/brand'
+import { loadBrand, loginNotice, platformLogo, platformName, registrationEnabled } from '../stores/brand'
 
 const username = ref('')
 const password = ref('')
@@ -14,9 +14,16 @@ const auth = useAuth()
 const router = useRouter()
 const message = useMessage()
 
-onMounted(() => {
+// 注册入口只在“对外运营模式 + 管理员已开放注册”时出现，自用模式不暴露该入口。
+const showRegister = computed(
+  () => auth.systemMode === 'external_operation' && registrationEnabled.value
+)
+
+onMounted(async () => {
   // 读取管理员配置的平台名称与 Logo
-  loadBrand()
+  await loadBrand()
+  // 公开路由守卫不会拉取部署模式，此处补齐（供注册入口判断）
+  if (!auth.systemMode) await auth.checkSetupStatus()
 })
 
 async function submit() {
@@ -103,9 +110,34 @@ async function submit() {
           </n-button>
         </n-form>
         <div class="login-note">
-          <span class="status-dot"></span> 安全连接 · 操作全程审计
+          <span class="login-note-main"><span class="status-dot"></span> 安全连接 · 操作全程审计</span>
+          <router-link v-if="showRegister" class="login-register" to="/register">注册账号 →</router-link>
         </div>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.login-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 16px;
+}
+
+/* 注册入口有意做得低调：仅在运营模式且开放注册时出现的一行辅助文字 */
+.login-register {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.02em;
+  border-bottom: 1px dashed transparent;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.login-register:hover {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary-light);
+}
+</style>

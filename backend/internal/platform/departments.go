@@ -40,7 +40,7 @@ func (a *App) listDepartments(c *gin.Context) {
 
 // buildDepartmentTree 递归构建部门树
 func buildDepartmentTree(rows []map[string]any, parentID int64) []map[string]any {
-	var result []map[string]any
+	result := make([]map[string]any, 0)
 	for _, row := range rows {
 		pid := toInt64(row["parent_id"])
 		if pid == parentID {

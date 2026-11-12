@@ -65,6 +65,10 @@ export interface User {
   roles?: (string | { name: string; permissions?: string[] })[]
 }
 
+// 系统部署模式：与后端 GET /api/v1/setup/status 的 mode 字段一一对应。
+// 空串表示后端 system_modes 表尚无记录（未初始化）。
+export type SystemMode = 'self_use' | 'external_operation' | ''
+
 export const useAuth = defineStore('auth', () => {
   const token = ref(sessionStorage.getItem('bmm_token') || '')
   const user = ref<User | null>(null)
@@ -74,37 +78,39 @@ export const useAuth = defineStore('auth', () => {
   const projects = ref<RecordData[]>([])
   const contextReady = ref(false)
   const contextError = ref('')
-  const systemMode = ref<'self_use' | 'external_operation' | 'uninitialized'>('uninitialized')
+  // 模式判定的唯一来源（'self_use' | 'external_operation' | ''）
+  const systemMode = ref<SystemMode>('')
   const setupStatus = ref<{ initialized: boolean; mode: string; locked: boolean } | null>(null)
 
   // === 系统初始化状态检查 ===
   async function checkSetupStatus() {
     try {
       const data = unwrap<RecordData>(await setupApi.getStatus())
+      // 未初始化时后端返回 mode: ""，与 model.GetSystemMode 的契约保持一致
+      const mode = String(data.mode ?? '')
       setupStatus.value = {
         initialized: data.initialized === true,
-        mode: String(data.mode || 'uninitialized'),
+        mode,
         locked: data.locked === true
       }
-      if (data.initialized && data.mode) {
-        systemMode.value = data.mode === 'external_operation' ? 'external_operation' : 'self_use'
+      if (data.initialized && mode) {
+        systemMode.value = mode === 'external_operation' ? 'external_operation' : 'self_use'
       } else {
-        systemMode.value = 'uninitialized'
+        systemMode.value = ''
       }
     } catch {
-      // 检查初始化状态失败，默认为未初始化
+      // 检查初始化状态失败，模式置为未确定
       setupStatus.value = null
-      systemMode.value = 'uninitialized'
+      systemMode.value = ''
     }
   }
 
   function canAccessMode(mode: string): boolean {
-    if (systemMode.value === 'uninitialized') return false
-    if (systemMode.value === 'self_use' && mode === 'self_use') return true
-    if (systemMode.value === 'external_operation' && mode === 'external_operation') return true
-    // 自用模式下也可以访问部分通用功能
+    // 模式尚未确定（未初始化或状态接口不可用）时不放行任何模式化路由
+    if (!systemMode.value) return false
+    // 两种模式通用的功能（如工单）不受限制
     if (mode === 'both') return true
-    return false
+    return systemMode.value === mode
   }
 
   async function loadContext() {

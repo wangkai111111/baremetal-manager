@@ -24,6 +24,7 @@ const auth = useAuth()
 
 // === 渠道类型选项 ===
 const channelTypes = [
+  { label: '飞书 / Lark', value: 'lark' },
   { label: '企业微信', value: 'wechat' },
   { label: '钉钉', value: 'dingtalk' },
   { label: 'Webhook', value: 'webhook' },
@@ -53,7 +54,7 @@ const currentId = ref<string | number | null>(null)
 const form = ref<RecordData>({})
 
 // === 权限控制 ===
-const canManage = computed(() => auth.can('alerts:manage'))
+const canManage = computed(() => auth.can('alerts:write'))
 
 // === 表格列定义 ===
 const columns = computed<DataTableColumns<RecordData>>(() => [
@@ -63,19 +64,19 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
     minWidth: 160,
     render: (row: RecordData) =>
       h('span', {}, [
-        h('span', { style: 'margin-right: 6px' }, typeIcons[String(row.type)] || '📢'),
+        h('span', { style: 'margin-right: 6px' }, typeIcons[String(row.kind)] || '📢'),
         String(row.name || '—')
       ])
   },
   {
     title: '类型',
-    key: 'type',
+    key: 'kind',
     minWidth: 100,
     render: (row: RecordData) =>
       h(
         NTag,
         { size: 'small', bordered: false },
-        { default: () => String(row.type || '—') }
+        { default: () => String(row.kind || '—') }
       )
   },
   {
@@ -94,6 +95,9 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
             { default: () => (row.enabled ? '已启用' : '已禁用') }
           )
   },
+  { title: '最近测试', key: 'last_test_status', minWidth: 110 },
+  { title: '测试时间', key: 'last_test_at', minWidth: 150 },
+  { title: '测试结果', key: 'last_test_message', minWidth: 240 },
   { title: '创建时间', key: 'created_at', minWidth: 150 },
   ...(canManage.value
     ? [
@@ -155,14 +159,14 @@ watch(
 // === 打开新建/编辑弹窗 ===
 function openEdit(row?: RecordData) {
   currentId.value = row?.id ?? null
-  form.value = row ? { ...row } : { type: 'wechat', enabled: true }
+  form.value = row ? { ...row, config: JSON.stringify(row.config || {}, null, 2), secret: '' } : { kind: 'email', enabled: true, config: JSON.stringify({ host: 'smtp.example.com', port: 587, username: '', from: '', to: '', tls: true }, null, 2), secret: '' }
   editing.value = true
 }
 
 // === 切换启用/禁用 ===
 async function toggleEnabled(row: RecordData, val: boolean) {
   try {
-    await resource.update('/alert-channels', row.id!, { enabled: val })
+    await resource.update('/alert-channels', row.id!, { name: row.name, enabled: val })
     message.success(val ? '渠道已启用' : '渠道已禁用')
     load()
   } catch (e) {
@@ -174,18 +178,19 @@ async function toggleEnabled(row: RecordData, val: boolean) {
 async function testChannel(row: RecordData) {
   testing.value = true
   try {
-    await api.post(`/alert-channels/${row.id}/test`)
-    message.success('测试消息已发送')
+    const result = await api.post(`/alert-channels/${row.id}/test`)
+    message.success(result.data?.data?.message || '服务端已接受测试消息，不保证实际收信；未创建真实告警')
   } catch (e) {
     message.error(errorText(e))
   } finally {
     testing.value = false
+    load()
   }
 }
 
 // === 保存推送渠道 ===
 async function save() {
-  if (!form.value.name || !form.value.type || !form.value.config) {
+  if (!form.value.name || !form.value.kind || !form.value.config) {
     message.warning('请填写必填字段')
     return
   }
@@ -200,8 +205,9 @@ async function save() {
   try {
     const payload = {
       name: form.value.name,
-      type: form.value.type,
-      config: form.value.config,
+      kind: form.value.kind,
+      config: JSON.parse(String(form.value.config)),
+      ...(form.value.secret ? { secret: form.value.secret } : {}),
       enabled: form.value.enabled ?? true
     }
     if (currentId.value != null) {
@@ -285,17 +291,21 @@ async function remove(row: RecordData) {
             <n-input v-model:value="(form.name as string)" placeholder="请输入渠道名称" />
           </n-form-item>
           <n-form-item label="渠道类型" required>
-            <n-select v-model:value="(form.type as string)" :options="channelTypes" placeholder="请选择类型" />
+            <n-select v-model:value="(form.kind as string)" :options="channelTypes" placeholder="请选择类型" />
           </n-form-item>
           <n-form-item label="配置 (JSON)" required class="form-item-wide">
             <n-input
               v-model:value="(form.config as string)"
               type="textarea"
               :rows="6"
-              placeholder='请输入 JSON 配置，例如：{"webhook_url": "https://..."}'
+              placeholder='邮件配置 host/port/username/from/to/tls；Webhook 与飞书填写 {}，完整地址填写在下方密钥栏'
             />
           </n-form-item>
+          <n-form-item label="SMTP 密码或 Webhook 完整地址（加密保存，编辑留空保留）" class="form-item-wide">
+            <n-input v-model:value="(form.secret as string)" type="password" show-password-on="click" autocomplete="new-password" />
+          </n-form-item>
         </div>
+        <p>测试消息明确标记 TEST，不创建真实告警。Webhook 仅支持公网 HTTPS，禁止重定向。告警通知需在当前项目的规则中关联渠道。</p>
         <div class="modal-actions">
           <n-button @click="editing = false">取消</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>

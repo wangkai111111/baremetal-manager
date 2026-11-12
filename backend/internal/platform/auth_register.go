@@ -29,6 +29,22 @@ var (
 // registerTenant 租户自助注册
 // 支持手机号或邮箱注册，自动创建租户、账户、默认项目和用户
 func (a *App) registerTenant(c *gin.Context) {
+	// 前置检查 1：自助注册是对外运营模式专属能力，自用模式没有多租户售卖场景。
+	// 部署模式唯一权威源是 system_modes 表（见 mode.go GetSystemMode）。
+	mode, err := GetSystemMode(a.store.db)
+	if err != nil {
+		fail(c, 500, "查询部署模式失败")
+		return
+	}
+	if mode != ModeExternalOperation {
+		fail(c, 403, "当前部署模式不支持自助注册")
+		return
+	}
+	// 前置检查 2：运营模式仍需管理员显式打开注册开关，未配置视为关闭。
+	if !a.registrationEnabled() {
+		fail(c, 403, "注册功能已关闭")
+		return
+	}
 	var in struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -46,8 +62,8 @@ func (a *App) registerTenant(c *gin.Context) {
 		fail(c, 400, "用户名不能为空且长度不超过255")
 		return
 	}
-	if len(in.Password) < 12 || len(in.Password) > 72 {
-		fail(c, 400, "密码长度必须在12到72字节之间")
+	if len(in.Password) < 6 || len(in.Password) > 72 {
+		fail(c, 400, "密码长度必须在6到72字节之间")
 		return
 	}
 	// 至少提供一种联系方式
@@ -119,7 +135,6 @@ func (a *App) registerTenant(c *gin.Context) {
 			"password_hash":     string(hash),
 			"name":              in.Name,
 			"email":             in.Email,
-			"role":              "admin",
 			"status":            "active",
 			"is_platform_admin": false,
 		}
@@ -228,6 +243,19 @@ func (a *App) registerTenant(c *gin.Context) {
 		"username":  in.Username,
 		"message":   "注册成功",
 	})
+}
+
+// registrationEnabled 读取 system_settings 中 registration.enabled 开关的生效值。
+// 该 key 默认不存在（brandDefaults 里为 false），读取失败或未配置一律按“关闭”处理，
+// 与 sol.go updateSettings 中“仅运营模式可启用注册”的约束互为闭环。
+func (a *App) registrationEnabled() bool {
+	var rows []struct{ Value string }
+	if err := a.store.db.Table("system_settings").Select("value::text").
+		Where("deleted_at IS NULL AND key = ?", "registration.enabled").Limit(1).Scan(&rows).Error; err != nil || len(rows) == 0 {
+		return false
+	}
+	// value 为 jsonb，::text 后布尔值形如 true，字符串值形如 "true"
+	return strings.EqualFold(strings.Trim(rows[0].Value, `"`), "true")
 }
 
 // generateTenantCode 基于用户名生成唯一租户编码

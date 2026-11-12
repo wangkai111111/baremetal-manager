@@ -416,43 +416,6 @@ CREATE INDEX ix_datacenters_create_by ON datacenters (create_by) WHERE create_by
 CREATE INDEX ix_datacenters_update_by ON datacenters (update_by) WHERE update_by IS NOT NULL;
 CREATE TRIGGER trg_datacenters_updated BEFORE UPDATE ON datacenters FOR EACH ROW EXECUTE FUNCTION bmm_touch_updated_at();
 
-CREATE TABLE racks (
-    id bigserial PRIMARY KEY,
-    tenant_id bigint NOT NULL REFERENCES tenants(id),
-    project_id bigint NOT NULL,
-    datacenter_id bigint NOT NULL,
-    name text NOT NULL,
-    height_u integer NOT NULL DEFAULT 42 CHECK (height_u > 0),
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    deleted_at timestamptz,
-    create_by bigint REFERENCES users(id),
-    update_by bigint REFERENCES users(id),
-    UNIQUE (tenant_id, project_id, id),
-    FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, id),
-    FOREIGN KEY (tenant_id, project_id, datacenter_id) REFERENCES datacenters(tenant_id, project_id, id),
-    UNIQUE (tenant_id, project_id, id, datacenter_id)
-);
-COMMENT ON TABLE racks IS '机柜；U 位重叠由服务层加锁校验';
-COMMENT ON COLUMN racks.id IS '行主键';
-COMMENT ON COLUMN racks.tenant_id IS '所属租户';
-COMMENT ON COLUMN racks.project_id IS '所属项目';
-COMMENT ON COLUMN racks.datacenter_id IS '所属机房';
-COMMENT ON COLUMN racks.name IS '机柜名称';
-COMMENT ON COLUMN racks.height_u IS '机柜总 U 数';
-COMMENT ON COLUMN racks.created_at IS '创建时间';
-COMMENT ON COLUMN racks.updated_at IS '更新时间；触发器自动维护';
-COMMENT ON COLUMN racks.deleted_at IS '软删除时间；空表示未删除';
-COMMENT ON COLUMN racks.create_by IS '创建用户；系统任务为空';
-COMMENT ON COLUMN racks.update_by IS '最后修改用户；系统任务为空';
-CREATE UNIQUE INDEX uq_racks_1 ON racks (tenant_id, project_id, datacenter_id, name) WHERE deleted_at IS NULL;
-CREATE INDEX ix_racks_scope ON racks (tenant_id, project_id, created_at DESC) WHERE deleted_at IS NULL;
-CREATE INDEX ix_racks_deleted ON racks (deleted_at) WHERE deleted_at IS NOT NULL;
-CREATE INDEX ix_racks_datacenter_id ON racks (tenant_id, project_id, datacenter_id);
-CREATE INDEX ix_racks_create_by ON racks (create_by) WHERE create_by IS NOT NULL;
-CREATE INDEX ix_racks_update_by ON racks (update_by) WHERE update_by IS NOT NULL;
-CREATE TRIGGER trg_racks_updated BEFORE UPDATE ON racks FOR EACH ROW EXECUTE FUNCTION bmm_touch_updated_at();
-
 CREATE TABLE tags (
     id bigserial PRIMARY KEY,
     tenant_id bigint NOT NULL REFERENCES tenants(id),
@@ -493,16 +456,14 @@ CREATE TABLE assets (
     serial_number text,
     manufacturer text,
     model text,
-    rack_id bigint,
-    rack_u_position integer CHECK (rack_u_position > 0),
-    height_u integer NOT NULL DEFAULT 1 CHECK (height_u > 0),
+    datacenter_id bigint,
     bmc_address inet NOT NULL CHECK (masklen(bmc_address) = CASE family(bmc_address) WHEN 4 THEN 32 ELSE 128 END),
     bmc_protocol text NOT NULL DEFAULT 'redfish' CHECK (bmc_protocol IN ('redfish','ipmi')),
     bmc_port integer NOT NULL DEFAULT 443 CHECK (bmc_port BETWEEN 1 AND 65535),
     bmc_user text NOT NULL,
     bmc_secret_ciphertext bytea NOT NULL,
     bmc_secret_key_id text NOT NULL,
-    bmc_tls_verify boolean NOT NULL DEFAULT true,
+    bmc_tls_verify boolean NOT NULL DEFAULT false,
     management_ip inet,
     mac_address macaddr,
     status text NOT NULL DEFAULT 'unknown' CHECK (status IN ('unknown','online','offline','maintenance','retired')),
@@ -520,8 +481,7 @@ CREATE TABLE assets (
     update_by bigint REFERENCES users(id),
     UNIQUE (tenant_id, project_id, id),
     FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, id),
-    CHECK ((rack_id IS NULL AND rack_u_position IS NULL) OR (rack_id IS NOT NULL AND rack_u_position IS NOT NULL)),
-    FOREIGN KEY (tenant_id, project_id, rack_id) REFERENCES racks(tenant_id, project_id, id)
+    CONSTRAINT fk_assets_datacenter FOREIGN KEY (tenant_id, project_id, datacenter_id) REFERENCES datacenters(tenant_id, project_id, id)
 );
 COMMENT ON TABLE assets IS '裸金属设备；仅提供 BMC 管理与 SOL，不提供虚拟机或 noVNC';
 COMMENT ON COLUMN assets.id IS '行主键';
@@ -531,16 +491,14 @@ COMMENT ON COLUMN assets.name IS '设备名称';
 COMMENT ON COLUMN assets.serial_number IS '整机序列号';
 COMMENT ON COLUMN assets.manufacturer IS '制造商';
 COMMENT ON COLUMN assets.model IS '设备型号';
-COMMENT ON COLUMN assets.rack_id IS '所属机柜；机房通过机柜推导';
-COMMENT ON COLUMN assets.rack_u_position IS '起始 U 位';
-COMMENT ON COLUMN assets.height_u IS '占用 U 数';
+COMMENT ON COLUMN assets.datacenter_id IS '所属机房；空表示未分配';
 COMMENT ON COLUMN assets.bmc_address IS 'BMC 主机地址';
 COMMENT ON COLUMN assets.bmc_protocol IS 'BMC 管理协议';
 COMMENT ON COLUMN assets.bmc_port IS 'BMC 端口；IPMI 通常为 623，服务端按协议填充';
 COMMENT ON COLUMN assets.bmc_user IS 'BMC 用户名';
 COMMENT ON COLUMN assets.bmc_secret_ciphertext IS '认证加密后的 BMC 密码；密文含随机数及认证标签';
 COMMENT ON COLUMN assets.bmc_secret_key_id IS '服务端密钥版本；主密钥不入库';
-COMMENT ON COLUMN assets.bmc_tls_verify IS '是否校验证书；禁用需审计';
+COMMENT ON COLUMN assets.bmc_tls_verify IS '是否校验证书；平台默认不校验，逐机器开启需审计';
 COMMENT ON COLUMN assets.management_ip IS '业务管理地址';
 COMMENT ON COLUMN assets.mac_address IS '主网卡 MAC';
 COMMENT ON COLUMN assets.status IS '设备可达与管理状态';
@@ -560,7 +518,7 @@ CREATE UNIQUE INDEX uq_assets_1 ON assets (tenant_id, project_id, bmc_address, b
 CREATE UNIQUE INDEX uq_assets_2 ON assets (tenant_id, project_id, serial_number) WHERE deleted_at IS NULL;
 CREATE INDEX ix_assets_scope ON assets (tenant_id, project_id, created_at DESC) WHERE deleted_at IS NULL;
 CREATE INDEX ix_assets_deleted ON assets (deleted_at) WHERE deleted_at IS NOT NULL;
-CREATE INDEX ix_assets_rack_id ON assets (tenant_id, project_id, rack_id);
+CREATE INDEX ix_assets_datacenter_id ON assets (tenant_id, project_id, datacenter_id);
 CREATE INDEX ix_assets_create_by ON assets (create_by) WHERE create_by IS NOT NULL;
 CREATE INDEX ix_assets_update_by ON assets (update_by) WHERE update_by IS NOT NULL;
 CREATE TRIGGER trg_assets_updated BEFORE UPDATE ON assets FOR EACH ROW EXECUTE FUNCTION bmm_touch_updated_at();
@@ -600,42 +558,6 @@ CREATE INDEX ix_asset_tags_tag_id ON asset_tags (tenant_id, project_id, tag_id);
 CREATE INDEX ix_asset_tags_create_by ON asset_tags (create_by) WHERE create_by IS NOT NULL;
 CREATE INDEX ix_asset_tags_update_by ON asset_tags (update_by) WHERE update_by IS NOT NULL;
 CREATE TRIGGER trg_asset_tags_updated BEFORE UPDATE ON asset_tags FOR EACH ROW EXECUTE FUNCTION bmm_touch_updated_at();
-
-CREATE TABLE rack_labels (
-    id bigserial PRIMARY KEY,
-    tenant_id bigint NOT NULL REFERENCES tenants(id),
-    project_id bigint NOT NULL,
-    rack_id bigint NOT NULL,
-    key text NOT NULL,
-    value text NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    deleted_at timestamptz,
-    create_by bigint REFERENCES users(id),
-    update_by bigint REFERENCES users(id),
-    UNIQUE (tenant_id, project_id, id),
-    FOREIGN KEY (tenant_id, project_id) REFERENCES projects(tenant_id, id),
-    FOREIGN KEY (tenant_id, project_id, rack_id) REFERENCES racks(tenant_id, project_id, id)
-);
-COMMENT ON TABLE rack_labels IS '机柜附加键值标签';
-COMMENT ON COLUMN rack_labels.id IS '行主键';
-COMMENT ON COLUMN rack_labels.tenant_id IS '所属租户';
-COMMENT ON COLUMN rack_labels.project_id IS '所属项目';
-COMMENT ON COLUMN rack_labels.rack_id IS '机柜';
-COMMENT ON COLUMN rack_labels.key IS '标签键';
-COMMENT ON COLUMN rack_labels.value IS '标签值';
-COMMENT ON COLUMN rack_labels.created_at IS '创建时间';
-COMMENT ON COLUMN rack_labels.updated_at IS '更新时间；触发器自动维护';
-COMMENT ON COLUMN rack_labels.deleted_at IS '软删除时间；空表示未删除';
-COMMENT ON COLUMN rack_labels.create_by IS '创建用户；系统任务为空';
-COMMENT ON COLUMN rack_labels.update_by IS '最后修改用户；系统任务为空';
-CREATE UNIQUE INDEX uq_rack_labels_1 ON rack_labels (tenant_id, project_id, rack_id, key) WHERE deleted_at IS NULL;
-CREATE INDEX ix_rack_labels_scope ON rack_labels (tenant_id, project_id, created_at DESC) WHERE deleted_at IS NULL;
-CREATE INDEX ix_rack_labels_deleted ON rack_labels (deleted_at) WHERE deleted_at IS NOT NULL;
-CREATE INDEX ix_rack_labels_rack_id ON rack_labels (tenant_id, project_id, rack_id);
-CREATE INDEX ix_rack_labels_create_by ON rack_labels (create_by) WHERE create_by IS NOT NULL;
-CREATE INDEX ix_rack_labels_update_by ON rack_labels (update_by) WHERE update_by IS NOT NULL;
-CREATE TRIGGER trg_rack_labels_updated BEFORE UPDATE ON rack_labels FOR EACH ROW EXECUTE FUNCTION bmm_touch_updated_at();
 
 CREATE TABLE asset_hardwares (
     id bigserial PRIMARY KEY,

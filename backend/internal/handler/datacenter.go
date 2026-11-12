@@ -14,10 +14,10 @@ import (
 func RegisterDatacenterRoutes(rg *gin.RouterGroup, store *repository.Store) {
 	dc := rg.Group("/datacenters")
 	{
-		dc.GET("", listDatacenters(store))       // 机房列表（支持分页）
-		dc.POST("", createDatacenter(store))      // 创建机房
-		dc.GET("/:id", getDatacenter(store))      // 机房详情
-		dc.PUT("/:id", updateDatacenter(store))   // 更新机房
+		dc.GET("", listDatacenters(store))         // 机房列表（支持分页）
+		dc.POST("", createDatacenter(store))       // 创建机房
+		dc.GET("/:id", getDatacenter(store))       // 机房详情
+		dc.PUT("/:id", updateDatacenter(store))    // 更新机房
 		dc.DELETE("/:id", deleteDatacenter(store)) // 删除机房（软删除）
 	}
 }
@@ -155,7 +155,6 @@ func updateDatacenter(store *repository.Store) gin.HandlerFunc {
 			Location    string `json:"location"`
 			Description string `json:"description"`
 			Contact     string `json:"contact"`
-			Capacity    int    `json:"capacity"`
 		}
 		if err := c.ShouldBindJSON(&input); err != nil {
 			Fail(c, http.StatusBadRequest, "INVALID_REQUEST", "请求参数错误")
@@ -169,7 +168,6 @@ func updateDatacenter(store *repository.Store) gin.HandlerFunc {
 			"location":    input.Location,
 			"description": input.Description,
 			"contact":     input.Contact,
-			"capacity":    input.Capacity,
 		}
 		userID := c.GetUint("userID")
 		updates["update_by"] = userID

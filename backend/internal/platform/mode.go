@@ -8,13 +8,17 @@ import (
 	"gorm.io/gorm"
 )
 
-// 系统部署模式常量
+// 系统部署模式常量。system_modes.mode 字段取值即为这两个字符串，
+// 与旧版 system_settings['platform.operation_mode']（"self_hosted" / "external"）的
+// 映射关系见 app.go setupConfig 与 sol.go brand。
 const (
-	ModeSelfUse          = "self_use"          // 自用模式
-	ModeExternalOperation = "external_operation" // 运营模式
+	ModeSelfUse           = "self_use"
+	ModeExternalOperation = "external_operation"
 )
 
-// GetSystemMode 从 system_modes 表读取当前系统部署模式。
+// GetSystemMode 从 system_modes 表读取当前系统部署模式，是部署模式的唯一权威源。
+// 其它任何存储（如 system_settings 中的 platform.operation_mode）只是冗余缓存，
+// 不得作为判断依据。
 // 返回模式字符串（"self_use"、"external_operation"）或空字符串（未初始化）。
 func GetSystemMode(db *gorm.DB) (string, error) {
 	var mode string
@@ -48,6 +52,14 @@ func InitializeMode(db *gorm.DB, mode string) error {
 	}).Error
 }
 
+// LockMode 锁定最近一次初始化的模式记录，锁定后部署模式不可再变更。
+// 由 setupConfig 在 InitializeMode 成功后调用。
+func LockMode(db *gorm.DB) error {
+	return db.Exec(
+		"UPDATE system_modes SET locked = true WHERE id = (SELECT MAX(id) FROM system_modes)",
+	).Error
+}
+
 // IsModeLocked 检查系统模式是否已锁定（锁定后不可变更）。
 func IsModeLocked(db *gorm.DB) (bool, error) {
 	var locked bool
@@ -62,23 +74,24 @@ func IsModeLocked(db *gorm.DB) (bool, error) {
 }
 
 // GetAvailableFeatures 根据系统模式返回可用功能列表。
+// baseFeatures 是两种模式共有的基础功能（工单 work_orders 属于此列表，
+// 任何按模式收敛的入口都必须保持它在自用与运营模式下同时可用）。
 func GetAvailableFeatures(mode string) []string {
 	baseFeatures := []string{
-		"assets",        // 资产管理
-		"datacenters",   // 机房管理
-		"racks",         // 机柜管理
-		"networks",      // 网络管理
-		"images",        // 镜像管理
-		"alerts",        // 告警管理
-		"sol",           // 串口访问
-		"work_orders",   // 工单系统
-		"audit_logs",    // 审计日志
+		"assets",      // 资产管理
+		"datacenters", // 机房管理
+		"networks",    // 网络管理
+		"images",      // 镜像管理
+		"alerts",      // 告警管理
+		"sol",         // 串口访问
+		"work_orders", // 工单系统（两种模式通用，不属于模式专有功能）
+		"audit_logs",  // 审计日志
 	}
 	switch mode {
 	case ModeSelfUse:
 		// 自用模式额外功能
 		return append(baseFeatures,
-			"departments",       // 部门管理
+			"departments",        // 部门管理
 			"asset_depreciation", // 资产折旧
 		)
 	case ModeExternalOperation:
@@ -115,10 +128,17 @@ var modeCache struct {
 
 // getCachedSystemMode 从缓存或数据库获取当前系统部署模式
 func (a *App) getCachedSystemMode() string {
+	return currentSystemMode(a.store.db)
+}
+
+// currentSystemMode 返回当前系统模式（优先缓存，回退数据库），是包级辅助函数，
+// 供 queryScope 等非方法函数在不持有 *App 时也能高效判断部署模式。
+func currentSystemMode(db *gorm.DB) string {
 	modeCache.mu.RLock()
 	if modeCache.value != "" {
-		defer modeCache.mu.RUnlock()
-		return modeCache.value
+		v := modeCache.value
+		modeCache.mu.RUnlock()
+		return v
 	}
 	modeCache.mu.RUnlock()
 
@@ -130,13 +150,12 @@ func (a *App) getCachedSystemMode() string {
 		return modeCache.value
 	}
 
-	mode, err := GetSystemMode(a.store.db)
+	mode, err := GetSystemMode(db)
 	if err != nil || mode == "" {
-		// 默认自用模式
-		modeCache.value = ModeSelfUse
-	} else {
-		modeCache.value = mode
+		// 未初始化或查询失败时返回默认值但不缓存，等待真正设置后自动拉取新值
+		return ModeSelfUse
 	}
+	modeCache.value = mode
 	return modeCache.value
 }
 

@@ -156,6 +156,22 @@ func (a *App) openSOL(c *gin.Context, sc scope, id int64) {
 	ws.SetReadLimit(4096)
 	go func() { <-ctx.Done(); _ = ws.Close() }()
 	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				var count int64
+				if err := queryScope(a.store.db.WithContext(ctx), resource{table: "assets"}, sc).Where("id=? AND COALESCE(subscription_state,'legacy') <> 'reclaim_pending'", id).Count(&count).Error; err != nil || count == 0 {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	go func() {
 		defer cancel()
 		for {
 			_, data, e := ws.ReadMessage()
@@ -186,7 +202,7 @@ func (a *App) openSOL(c *gin.Context, sc scope, id int64) {
 }
 
 // 只公开品牌与运营白名单设置，不把敏感设置或任意数据库字段投射到前端。
-var brandDefaults = map[string]any{"brand.platform_name": "METALOPS", "brand.platform_tagline": "BAREMETAL CONTROL PLANE", "brand.logo_url": "", "theme.nav_bg": "#101e2b", "theme.nav_text": "#a9bbc7", "app.footer_text": "控制平面在线", "app.footer_visible": true, "app.login_notice": "", "platform.operation_mode": "self_hosted", "registration.enabled": false, "registration.email_verification": false, "billing.enabled": false, "billing.model_prices": []any{}}
+var brandDefaults = map[string]any{"brand.platform_name": "METALOPS", "brand.platform_tagline": "BAREMETAL CONTROL PLANE", "brand.logo_url": "", "theme.nav_bg": "#101e2b", "theme.nav_text": "#ffffff", "app.footer_text": "控制平面在线", "app.footer_visible": true, "app.login_notice": "", "platform.operation_mode": "self_hosted", "registration.enabled": false, "registration.email_verification": false, "billing.enabled": false, "billing.model_prices": []any{}}
 
 var smtpDefaults = map[string]any{"smtp.host": "", "smtp.port": 587, "smtp.username": "", "smtp.password": "", "smtp.from": "", "smtp.tls": true}
 
@@ -199,6 +215,16 @@ func allSettingDefaults() map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// legacyKeyMapping maps unprefixed bootstrap seed keys to their prefixed equivalents.
+var legacyKeyMapping = map[string]string{
+	"platform_name":  "brand.platform_name",
+	"logo_url":       "brand.logo_url",
+	"nav_color":      "theme.nav_bg",
+	"sidebar_color":  "theme.nav_text",
+	"sidebar_footer": "app.footer_text",
+	"login_notice":   "app.login_notice",
 }
 
 func (a *App) publicSettings() map[string]any {
@@ -215,14 +241,28 @@ func (a *App) publicSettings() map[string]any {
 		Key   string
 		Value string
 	}
-	a.store.db.Table("system_settings").Select("key,value::text").Where("deleted_at IS NULL AND key IN ?", settingKeys()).Scan(&rows)
+	// 查询所有已知前缀 key + 旧版无前缀 key
+	allKeys := settingKeys()
+	legacyKeys := make([]string, 0, len(legacyKeyMapping))
+	for k := range legacyKeyMapping {
+		legacyKeys = append(legacyKeys, k)
+	}
+	queryKeys := append(allKeys, legacyKeys...)
+	a.store.db.Table("system_settings").Select("key,value::text").Where("deleted_at IS NULL AND key IN ?", queryKeys).Scan(&rows)
 	for _, r := range rows {
 		if r.Key == "smtp.password" {
 			continue
 		}
 		var value any
-		if json.Unmarshal([]byte(r.Value), &value) == nil && validSetting(r.Key, value) {
-			out[r.Key] = value
+		if json.Unmarshal([]byte(r.Value), &value) == nil {
+			// 映射旧版无前缀 key 到前缀 key
+			effectiveKey := r.Key
+			if mapped, isLegacy := legacyKeyMapping[r.Key]; isLegacy {
+				effectiveKey = mapped
+			}
+			if validSetting(effectiveKey, value) {
+				out[effectiveKey] = value
+			}
 		}
 	}
 	var smtpConfigured int64
@@ -241,7 +281,17 @@ func settingKeys() []string {
 }
 func (a *App) brand(c *gin.Context) {
 	s := a.publicSettings()
-	ok(c, gin.H{"platform_name": s["brand.platform_name"], "platform_tagline": s["brand.platform_tagline"], "logo_url": s["brand.logo_url"], "nav_bg_color": s["theme.nav_bg"], "nav_text_color": s["theme.nav_text"], "footer_text": s["app.footer_text"], "footer_visible": s["app.footer_visible"], "login_notice": s["app.login_notice"], "operation_mode": s["platform.operation_mode"], "feature_flags": gin.H{"registration_enabled": s["registration.enabled"], "email_verification": s["registration.email_verification"], "billing_enabled": s["billing.enabled"]}, "model_prices": s["billing.model_prices"]})
+	// 用权威源 system_modes 表读取 operation_mode
+	operationMode := s["platform.operation_mode"]
+	if mode, err := GetSystemMode(a.store.db); err == nil && mode != "" {
+		switch mode {
+		case ModeExternalOperation:
+			operationMode = "external"
+		case ModeSelfUse:
+			operationMode = "self_hosted"
+		}
+	}
+	ok(c, gin.H{"platform_name": s["brand.platform_name"], "platform_tagline": s["brand.platform_tagline"], "logo_url": s["brand.logo_url"], "nav_bg_color": s["theme.nav_bg"], "nav_text_color": s["theme.nav_text"], "footer_text": s["app.footer_text"], "footer_visible": s["app.footer_visible"], "login_notice": s["app.login_notice"], "operation_mode": operationMode, "feature_flags": gin.H{"registration_enabled": s["registration.enabled"], "email_verification": s["registration.email_verification"], "billing_enabled": s["billing.enabled"]}, "model_prices": s["billing.model_prices"]})
 }
 func (a *App) settings(c *gin.Context) {
 	if !current(c).IsPlatformAdmin {
@@ -282,6 +332,33 @@ func (a *App) updateSettings(c *gin.Context) {
 			return
 		}
 	}
+	// 部署模式的唯一权威源是 system_modes 表；system_settings 里的 platform.operation_mode
+	// 只是冗余缓存，初始化锁定后禁止通过设置接口改写。
+	if _, exists := in["platform.operation_mode"]; exists {
+		locked, e := IsModeLocked(a.store.db)
+		if e != nil {
+			fail(c, 500, "查询部署模式锁定状态失败")
+			return
+		}
+		if locked {
+			fail(c, 403, "部署模式初始化后不可更改，如需变更请联系运维人员执行数据迁移")
+			return
+		}
+	}
+	// 租户自助注册只在对外运营模式下可用（同样以 system_modes 为判断依据）。
+	if want, exists := in["registration.enabled"]; exists {
+		if enabled, isBool := want.(bool); isBool && enabled {
+			mode, e := GetSystemMode(a.store.db)
+			if e != nil {
+				fail(c, 500, "查询部署模式失败")
+				return
+			}
+			if mode != ModeExternalOperation {
+				fail(c, 403, "租户自助注册仅在对外运营模式（external_operation）下可启用")
+				return
+			}
+		}
+	}
 	if enabled, ok := in["registration.email_verification"].(bool); ok && enabled && !a.smtpReady(in) {
 		fail(c, 400, "SMTP settings are required before enabling email verification")
 		return
@@ -308,8 +385,8 @@ func (a *App) updateSettings(c *gin.Context) {
 		fail(c, 500, "settings update failed")
 		return
 	}
-	// 如果更新了运行模式设置，清除模式缓存
-	if _, ok := in["platform.operation_mode"]; ok {
+	// 兜底清理：未锁定状态下允许写入运行模式缓存，写入后清除模式缓存
+	if _, exists := in["platform.operation_mode"]; exists {
 		InvalidateModeCache()
 	}
 	ok(c, a.publicSettings())

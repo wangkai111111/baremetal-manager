@@ -156,8 +156,8 @@ async function saveNewUser() {
     message.warning('请输入用户名')
     return
   }
-  if (newUser.value.password.length < 12) {
-    message.warning('密码长度不能少于 12 位')
+  if (newUser.value.password.length < 6) {
+    message.warning('密码长度不能少于 6 位')
     return
   }
   saving.value = true

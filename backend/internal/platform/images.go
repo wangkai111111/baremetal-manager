@@ -122,6 +122,12 @@ func (a *App) openAPI(c *gin.Context) {
 func (a *App) alertTransition(c *gin.Context) {
 	sc := contextScope(c)
 	status := c.Param("transition")
+	// 认领（claim）只登记处理人，不推进 firing/acknowledged/resolved 状态机，
+	// 实现与幂等语义见 alert_governance.go。
+	if status == "claim" {
+		a.claimAlert(c, sc)
+		return
+	}
 	if status != "resolve" && status != "acknowledge" {
 		fail(c, 400, "invalid alert transition")
 		return

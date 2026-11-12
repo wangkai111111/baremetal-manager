@@ -24,8 +24,6 @@ func TestTargetMigrationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	t.Setenv("BOOTSTRAP_ADMIN_USER", "integration-admin")
-	t.Setenv("BOOTSTRAP_ADMIN_PASSWORD", "test-only-password-2026")
 	if err := Apply(db); err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +32,18 @@ func TestTargetMigrationIntegration(t *testing.T) {
 	}
 	if err := Verify(db); err != nil {
 		t.Fatal(err)
+	}
+	var obsolete int64
+	if err := db.Raw(`SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='assets' AND column_name IN ('rack_id','rack_u_position','height_u')`).Scan(&obsolete).Error; err != nil || obsolete != 0 {
+		t.Fatalf("obsolete asset columns: %d %v", obsolete, err)
+	}
+	for _, table := range []string{"racks", "rack_labels"} {
+		if db.Migrator().HasTable(table) {
+			t.Fatalf("obsolete table %s remains", table)
+		}
+	}
+	if !db.Migrator().HasColumn("assets", "datacenter_id") {
+		t.Fatal("asset datacenter missing")
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec("UPDATE schema_migrations SET checksum = 'invalid' WHERE version = ?", TargetVersion).Error; err != nil {
@@ -54,8 +64,8 @@ func TestTargetMigrationIntegration(t *testing.T) {
 	}
 	var count int64
 	db.Table("users").Count(&count)
-	if count != 1 {
-		t.Fatalf("bootstrap users: %d", count)
+	if count != 0 {
+		t.Fatalf("bootstrap must not create users: %d", count)
 	}
 	db.Table("role_permissions").Count(&count)
 	if count == 0 {

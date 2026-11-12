@@ -61,10 +61,7 @@ components:
         bmc_ip: {type: string}
         bmc_user: {type: string}
         status: {type: string, enum: [online, offline, error, provisioning, decommissioned]}
-        rack_id: {type: integer}
-        rack_position: {type: integer}
-        rack_height: {type: integer}
-        datacenter_id: {type: integer}
+        datacenter_id: {type: integer, nullable: true, description: 直接关联本租户本项目机房；空表示未分配}
         tags: {type: array, items: {type: string}}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
@@ -94,20 +91,6 @@ components:
         location: {type: string}
         contact: {type: string}
         description: {type: string}
-        created_at: {type: string, format: date-time}
-        updated_at: {type: string, format: date-time}
-    # ==================== 机柜管理 ====================
-    Rack:
-      type: object
-      properties:
-        id: {type: integer}
-        datacenter_id: {type: integer}
-        name: {type: string}
-        location: {type: string}
-        total_u: {type: integer, description: 总 U 数}
-        used_u: {type: integer, description: 已用 U 数}
-        power_capacity: {type: string, description: 电力容量}
-        status: {type: string, enum: [active, maintenance, decommissioned]}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
     # ==================== 标签管理 ====================
@@ -383,7 +366,15 @@ paths:
   /projects/{projectId}/assets:
     parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
     get:
-      responses: {'200': {description: Assets}}
+      parameters:
+        - {name: datacenter_id, in: query, schema: {type: integer, minimum: 1}, description: 按直属机房筛选}
+        - {name: search_field, in: query, schema: {type: string, default: auto, enum: [auto, id, name, bmc_address, management_ip, serial_number, manufacturer, model, datacenter]}, description: 搜索字段；auto 跨字段匹配}
+        - {name: search, in: query, schema: {type: string}, description: 搜索内容，不区分大小写}
+        - {name: tags, in: query, schema: {type: string}, description: 逗号分隔的标签名称，匹配任一标签}
+        - {name: status, in: query, schema: {type: string, enum: [pending_management, managing, collecting, in_use, starting, stopping, stopped, running, restarting, reinstalling, upgrading, queued, maintenance, retired, offline, error, unknown]}, description: 按统一展示状态筛选}
+      responses:
+        '200': {description: '分页资产列表；每项附 display_status 统一展示状态，原始 status 和 power_state 保持不变。in_use 表示已开机且存在已完成购买交付关系；进行中状态依据真实活动任务，不代表新增重装执行能力。'}
+        '400': {description: Invalid search_field}
     post:
       responses: {'201': {description: Created asset}}
   /projects/{projectId}/assets/{assetId}:
@@ -518,70 +509,6 @@ paths:
     delete:
       summary: 删除机房
       tags: [机房管理]
-      responses:
-        '204':
-          description: 删除成功
-
-  # ==================== 机柜管理 ====================
-  /projects/{projectId}/racks:
-    parameters:
-      - {name: projectId, in: path, required: true, schema: {type: integer}}
-    get:
-      summary: 获取机柜列表
-      tags: [机柜管理]
-      responses:
-        '200':
-          description: 机柜列表
-          content:
-            application/json:
-              schema:
-                type: array
-                items: {$ref: '#/components/schemas/Rack'}
-    post:
-      summary: 创建机柜
-      tags: [机柜管理]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/Rack'}
-      responses:
-        '201':
-          description: 创建成功
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Rack'}
-
-  /projects/{projectId}/racks/{id}:
-    parameters:
-      - {name: projectId, in: path, required: true, schema: {type: integer}}
-      - {name: id, in: path, required: true, schema: {type: integer}}
-    get:
-      summary: 获取机柜详情
-      tags: [机柜管理]
-      responses:
-        '200':
-          description: 机柜详情
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Rack'}
-    put:
-      summary: 更新机柜
-      tags: [机柜管理]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/Rack'}
-      responses:
-        '200':
-          description: 更新成功
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Rack'}
-    delete:
-      summary: 删除机柜
-      tags: [机柜管理]
       responses:
         '204':
           description: 删除成功
@@ -1343,7 +1270,6 @@ paths:
         - {name: search, in: query, schema: {type: string}, description: 搜索关键字}
         - {name: status, in: query, schema: {type: string}, description: 状态筛选}
         - {name: datacenter_id, in: query, schema: {type: integer}, description: 机房筛选}
-        - {name: rack_id, in: query, schema: {type: integer}, description: 机柜筛选}
         - {name: tag, in: query, schema: {type: string}, description: 标签筛选}
       responses:
         '200':

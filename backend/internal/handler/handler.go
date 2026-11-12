@@ -151,9 +151,6 @@ func (h *Handler) Router() *gin.Engine {
 	// === 机房管理路由 ===
 	RegisterDatacenterRoutes(p, h.S.Store)
 
-	// === 机柜管理路由 ===
-	RegisterRackRoutes(p, h.S.Store)
-
 	// === 标签管理路由 ===
 	RegisterTagRoutes(p, h.S.Store)
 
@@ -278,7 +275,11 @@ func (h *Handler) CreateProject(c *gin.Context) {
 // Assets 列出当前项目的设备。
 func (h *Handler) Assets(c *gin.Context) {
 	var a []model.Asset
-	h.S.Store.DB.Where("project_id = ?", pid(c)).Order("id desc").Find(&a)
+	q := h.S.Store.DB.Where("project_id = ?", pid(c))
+	if dc := c.Query("datacenter_id"); dc != "" {
+		q = q.Where("datacenter_id = ?", dc)
+	}
+	q.Order("id desc").Find(&a)
 	c.JSON(200, a)
 }
 
@@ -314,7 +315,7 @@ func (h *Handler) CreateAsset(c *gin.Context) {
 			return
 		}
 	}
-	if h.S.Store.DB.Create(&a).Error != nil {
+	if h.S.Store.SaveAsset(&a, nil) != nil {
 		fail(c, 500, "create failed")
 		return
 	}
@@ -330,12 +331,13 @@ func (h *Handler) UpdateAsset(c *gin.Context) {
 		return
 	}
 	var input struct {
-		Name       string `json:"name"`
-		BMCAddress string `json:"bmc_address"`
-		BMCUser    string `json:"bmc_user"`
-		BMCSecret  string `json:"bmc_secret"`
-		IPAddress  string `json:"ip_address"`
-		MACAddress string `json:"mac_address"`
+		Name         string          `json:"name"`
+		BMCAddress   string          `json:"bmc_address"`
+		BMCUser      string          `json:"bmc_user"`
+		BMCSecret    string          `json:"bmc_secret"`
+		IPAddress    string          `json:"ip_address"`
+		MACAddress   string          `json:"mac_address"`
+		DatacenterID json.RawMessage `json:"datacenter_id"`
 	}
 	if c.ShouldBindJSON(&input) != nil {
 		fail(c, 400, "invalid request")
@@ -354,7 +356,17 @@ func (h *Handler) UpdateAsset(c *gin.Context) {
 		fail(c, 400, "invalid asset")
 		return
 	}
-	h.S.Store.DB.Model(&a).Updates(changes)
+	if len(input.DatacenterID) > 0 {
+		if json.Unmarshal(input.DatacenterID, &a.DatacenterID) != nil || (a.DatacenterID != nil && *a.DatacenterID == 0) {
+			fail(c, 400, "invalid datacenter")
+			return
+		}
+		changes["datacenter_id"] = a.DatacenterID
+	}
+	if h.S.Store.SaveAsset(&a, changes) != nil {
+		fail(c, 409, "invalid asset relation")
+		return
+	}
 	h.S.Store.Audit(uid(c), pid(c), "asset.update", fmt.Sprint(a.ID))
 	c.JSON(200, a)
 }

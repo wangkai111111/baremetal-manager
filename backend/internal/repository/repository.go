@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"time"
@@ -9,48 +10,20 @@ import (
 	"baremetal-manager/backend/migrations"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Store 封装数据库连接及项目权限和审计操作。
 type Store struct{ DB *gorm.DB }
 
-// Open 连接 PostgreSQL，串行迁移数据模型并写入中文表字段注释。
+// Open 连接 PostgreSQL 并验证已完成显式迁移。
 func Open(dsn string) (*Store, error) {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, err
 	}
-	err = db.Transaction(func(tx *gorm.DB) error {
-		// 事务级咨询锁防止多个 API、worker 与 scheduler 同时修改表结构。
-		if e := tx.Exec("SELECT pg_advisory_xact_lock(684219731)").Error; e != nil {
-			return e
-		}
-		// 早期 GORM 将 CIDR 命名为 c_id_r，先重命名以保留已有网络数据。
-		for _, table := range []string{"networks", "ip_pools"} {
-			if tx.Migrator().HasColumn(table, "c_id_r") && !tx.Migrator().HasColumn(table, "cidr") {
-				if e := tx.Migrator().RenameColumn(table, "c_id_r", "cidr"); e != nil {
-					return e
-				}
-			}
-		}
-		if e := tx.AutoMigrate(
-			&model.User{}, &model.Project{}, &model.Membership{}, &model.Asset{},
-			&model.AssetHardware{}, &model.FirmwareInventory{},
-			&model.SOLSession{}, &model.Operation{}, &model.Image{}, &model.Alert{},
-			&model.Audit{}, &model.Network{}, &model.IPAllocation{},
-			// 002_expansion 新增模型
-			&model.Datacenter{}, &model.Rack{}, &model.Tag{}, &model.AssetTag{},
-			&model.SensorRecord{}, &model.AlertRule{}, &model.AlertChannel{},
-			&model.APIKey{}, &model.SystemSetting{}, &model.KickstartTemplate{},
-		); e != nil {
-			return e
-		}
-		if e := tx.Exec(migrations.InitialSQL).Error; e != nil {
-			return e
-		}
-		// 执行 002 扩展迁移（新增机房、机柜、标签等表）
-		return tx.Exec(migrations.ExpansionSQL).Error
-	})
+	// 结构变更统一由显式迁移执行，旧入口不得重放历史表结构。
+	err = migrations.Verify(db)
 	if err != nil {
 		return nil, err
 	}
@@ -307,48 +280,37 @@ func (s *Store) UpdateDatacenter(dc *model.Datacenter) error {
 	return s.DB.Save(dc).Error
 }
 
+func (s *Store) SaveAsset(asset *model.Asset, changes map[string]any) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		if asset.DatacenterID != nil {
+			var dc model.Datacenter
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND project_id = ?", *asset.DatacenterID, asset.ProjectID).First(&dc).Error; err != nil {
+				return err
+			}
+		}
+		if changes == nil {
+			return tx.Create(asset).Error
+		}
+		return tx.Model(asset).Updates(changes).Error
+	})
+}
+
 // DeleteDatacenter 软删除机房记录
 func (s *Store) DeleteDatacenter(id uint) error {
-	return s.DB.Where("id = ?", id).Delete(&model.Datacenter{}).Error
-}
-
-// ============================================================
-// Rack CRUD
-// ============================================================
-
-// ListRacks 分页列出项目下的机柜列表，可按机房筛选
-func (s *Store) ListRacks(projectID, datacenterID uint, page, pageSize int) (*PageResult, error) {
-	var items []model.Rack
-	query := s.DB.Where("project_id = ? AND deleted_at IS NULL", projectID)
-	if datacenterID > 0 {
-		query = query.Where("datacenter_id = ?", datacenterID)
-	}
-	query = query.Order("id desc")
-	return s.Paginate(query, page, pageSize, &items)
-}
-
-// GetRack 根据 ID 获取机柜详情
-func (s *Store) GetRack(id uint) (*model.Rack, error) {
-	var rack model.Rack
-	if err := s.DB.Where("id = ? AND deleted_at IS NULL", id).First(&rack).Error; err != nil {
-		return nil, err
-	}
-	return &rack, nil
-}
-
-// CreateRack 创建机柜记录
-func (s *Store) CreateRack(rack *model.Rack) error {
-	return s.DB.Create(rack).Error
-}
-
-// UpdateRack 更新机柜信息
-func (s *Store) UpdateRack(rack *model.Rack) error {
-	return s.DB.Save(rack).Error
-}
-
-// DeleteRack 软删除机柜记录
-func (s *Store) DeleteRack(id uint) error {
-	return s.DB.Where("id = ?", id).Delete(&model.Rack{}).Error
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var dc model.Datacenter
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&dc, id).Error; err != nil {
+			return err
+		}
+		var n int64
+		if err := tx.Model(&model.Asset{}).Where("project_id = ? AND datacenter_id = ?", dc.ProjectID, id).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return errors.New("datacenter still has assets")
+		}
+		return tx.Delete(&dc).Error
+	})
 }
 
 // ============================================================

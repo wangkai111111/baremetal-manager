@@ -337,6 +337,7 @@ func (a *App) generateBills(c *gin.Context) {
 		a.store.db.Table("orders").
 			Where("tenant_id=? AND status IN ('paid','completed') AND paid_at >= ? AND paid_at < ? AND deleted_at IS NULL",
 				acct.TenantID, periodStart, periodEnd).
+			Where("payable_cents IS NULL AND NOT EXISTS (SELECT 1 FROM subscription_payments sp WHERE sp.order_id=orders.id) AND NOT EXISTS (SELECT 1 FROM subscription_terms st WHERE st.order_id=orders.id)").
 			Select("COALESCE(SUM(final_amount),0)").
 			Scan(&totalAmount)
 		if totalAmount <= 0 {
@@ -404,11 +405,11 @@ func (a *App) listInvoices(c *gin.Context) {
 func (a *App) createInvoice(c *gin.Context) {
 	sc := contextScope(c)
 	var in struct {
-		BillID     *int64  `json:"bill_id"`
-		Type       string  `json:"type"`
-		Title      string  `json:"title"`
-		TaxNumber  string  `json:"tax_number"`
-		Amount     float64 `json:"amount"`
+		BillID    *int64  `json:"bill_id"`
+		Type      string  `json:"type"`
+		Title     string  `json:"title"`
+		TaxNumber string  `json:"tax_number"`
+		Amount    float64 `json:"amount"`
 	}
 	if c.ShouldBindJSON(&in) != nil || strings.TrimSpace(in.Title) == "" || in.Amount <= 0 {
 		fail(c, 400, "发票抬头和金额为必填项")

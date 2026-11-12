@@ -4,24 +4,26 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NButton, NIcon, NDropdown, NBadge, NDrawer, NDrawerContent,
   NModal, NForm, NFormItem, NInput, NTag, NDescriptions,
-  NDescriptionsItem, NSelect, NAvatar, useMessage
+  NDescriptionsItem, NSelect, NAvatar, NMenu, useMessage
 } from 'naive-ui'
-import type { MenuOption } from 'naive-ui'
+import type { MenuOption, MenuProps } from 'naive-ui'
 import {
-  GridOutline, ServerOutline, LayersOutline, BusinessOutline,
-  CubeOutline, DiscOutline, FlashOutline, GitNetworkOutline,
+  GridOutline, ServerOutline, BusinessOutline,
+  DiscOutline, FlashOutline, GitNetworkOutline,
   WarningOutline, HardwareChipOutline, PeopleOutline, SettingsOutline,
   ListOutline, ReceiptOutline, MenuOutline, ChevronDownOutline,
   NotificationsOutline, ChevronBackOutline, ChevronForwardOutline,
   SearchOutline, SunnyOutline, MoonOutline,
   PersonOutline, AnalyticsOutline,
   PricetagsOutline, CardOutline, WalletOutline, DocumentTextOutline,
-  TicketOutline, CubeOutline as CubeAltOutline
+  TicketOutline, CubeOutline as CubeAltOutline,
+  CashOutline, CartOutline,
+  GitBranchOutline, CalculatorOutline, ShieldCheckmarkOutline
 } from '@vicons/ionicons5'
 import { useAuth } from '../stores/auth'
 import {
   footerText, footerVisible, loadBrand, navBackground,
-  navTextColor, operationMode, platformLogo, platformName, platformTagline
+  navTextColor, platformLogo, platformName, platformTagline
 } from '../stores/brand'
 import { resource, rows, api, errorText, type RecordData } from '../api'
 
@@ -33,7 +35,7 @@ const auth = useAuth()
 // === 响应式状态 ===
 const mobileOpen = ref(false)
 const collapsed = ref(localStorage.getItem('sidebar_collapsed') === 'true')
-const menuSearch = ref('')
+const expandedMenuKeys = ref<string[]>([])
 const notificationOpen = ref(false)
 const notifications = ref<RecordData[]>([])
 const unreadCount = ref(0)
@@ -56,11 +58,43 @@ const toggleDarkMode = () => {
 
 // === 计算属性 ===
 const projects = computed(() => auth.projects)
-const isExternalMode = computed(() => operationMode.value === 'external')
+// 模式判定的唯一来源：auth.systemMode 由 GET /setup/status 返回的 mode 字段决定。
+// brand.operationMode 属历史遗留字段（仅供其他页面兼容读取），不再参与模式判断。
+const isExternalMode = computed(() => auth.systemMode === 'external_operation')
+
+const sidebarTextColor = computed(() => navTextColor.value)
 
 const navStyle = computed<Record<string, string>>(() => ({
-  '--nav-bg': navBackground.value,
-  '--nav-text': navTextColor.value
+  '--color-nav-bg': navBackground.value,
+  '--color-nav-text': sidebarTextColor.value
+}))
+
+const menuThemeOverrides = computed<NonNullable<MenuProps['themeOverrides']>>(() => ({
+  color: 'transparent',
+  groupTextColor: sidebarTextColor.value,
+  itemTextColor: sidebarTextColor.value,
+  itemIconColor: sidebarTextColor.value,
+  itemIconColorCollapsed: sidebarTextColor.value,
+  arrowColor: sidebarTextColor.value,
+  arrowColorHover: '#ffffff',
+  arrowColorActive: '#4d8eff',
+  arrowColorActiveHover: '#4d8eff',
+  arrowColorChildActive: '#4d8eff',
+  arrowColorChildActiveHover: '#4d8eff',
+  itemTextColorChildActive: '#4d8eff',
+  itemTextColorChildActiveHover: '#4d8eff',
+  itemIconColorChildActive: '#4d8eff',
+  itemIconColorChildActiveHover: '#4d8eff',
+  itemTextColorHover: '#ffffff',
+  itemIconColorHover: '#ffffff',
+  itemColorHover: 'rgba(255, 255, 255, 0.08)',
+  itemColorActive: 'rgba(22, 93, 255, 0.12)',
+  itemColorActiveHover: 'rgba(22, 93, 255, 0.20)',
+  itemColorActiveCollapsed: 'rgba(22, 93, 255, 0.12)',
+  itemTextColorActive: '#4d8eff',
+  itemTextColorActiveHover: '#4d8eff',
+  itemIconColorActive: '#4d8eff',
+  itemIconColorActiveHover: '#4d8eff'
 }))
 
 const projectOptions = computed(() =>
@@ -84,62 +118,32 @@ const userMenuOptions = computed(() => [
 // === 图标渲染工具 ===
 const icon = (c: typeof GridOutline) => () => h(NIcon, null, { default: () => h(c) })
 
-// === 菜单权限映射 ===
-function permission(path: string) {
-  return ({
-    projects: 'projects:read',
-    datacenters: 'datacenters:read',
-    racks: 'racks:read',
-    assets: 'assets:read',
-    tags: 'assets:write',
-    images: 'images:read',
-    'kickstart-templates': 'images:write',
-    installations: 'tasks:read',
-    'install-plans': 'tasks:read',
-    subnets: 'network:read',
-    'ip-addresses': 'network:read',
-    'ip-pools': 'network:write',
-    'pxe-config': 'network:read',
-    pxe: 'network:read',
-    alerts: 'alerts:read',
-    'alert-rules': 'alerts:manage',
-    'alert-channels': 'alerts:manage',
-    firmware: 'firmware:read',
-    tasks: 'tasks:read',
-    'audit-logs': 'audit:read',
-    'work-orders': 'tasks:read',
-    'operations-dashboard': 'alerts:read',
-    'user-management': 'iam:read',
-    users: 'iam:read',
-    'role-management': 'iam:read',
-    roles: 'iam:read',
-    'api-keys': 'iam:read',
-    'system-settings': 'settings:read',
-    settings: 'settings:read',
-    products: 'projects:read',
-    orders: 'projects:read',
-    bills: 'projects:read',
-    accounts: 'projects:read',
-    invoices: 'projects:read',
-    coupons: 'projects:read',
-    departments: 'projects:read',
-    'project-members': 'projects:write',
-    'tenant-console': 'projects:read'
-  } as Record<string, string>)[path.slice(1)]
-}
-
-function canAccess(path: string) {
-  const perm = permission(path)
-  if (!perm) return true
-  // 平台管理专属页面
-  if (['/users', '/user-management', '/roles', '/role-management', '/api-keys', '/settings', '/system-settings'].includes(path)) {
-    return auth.user?.is_platform_admin === true
-  }
-  return auth.can(perm)
-}
-
 // === 菜单组定义 ===
+// 两种模式通用的菜单分组：工单系统在后端 self_use / external_operation 下均开放，
+// 因此菜单也必须在两种模式中可见，仅文案随模式切换。
+const commonMenuGroups = computed(() => [
+  {
+    label: '运维工具',
+    items: [
+      {
+        label: isExternalMode.value ? '工单工作台' : '工单管理',
+        path: '/work-orders',
+        icon: DocumentTextOutline
+      }
+    ]
+  }
+])
+
+// 将通用分组插入到「系统设置」之前，保证两种模式的侧边栏都包含工单入口
+function withCommonGroups<T extends { label: string }>(groups: T[]) {
+  const settingsIndex = groups.findIndex(group => group.label === '系统设置')
+  const insertAt = settingsIndex >= 0 ? settingsIndex : groups.length
+  return [...groups.slice(0, insertAt), ...commonMenuGroups.value, ...groups.slice(insertAt)]
+}
+
 const allMenuGroups = computed(() => {
+  // 自用管理模式：围绕“自有资产生命周期”组织菜单，不出现任何对外运营入口
+  // （租户控制台 / 产品 / 订单 / 账单 / 账户 / 支付 / 发票 / 优惠券 / 运营大盘）。
   const selfHosted = [
     {
       label: '工作台',
@@ -151,15 +155,10 @@ const allMenuGroups = computed(() => {
       label: '资产管理',
       items: [
         { label: '服务器管理', path: '/assets', icon: ServerOutline },
-        { label: '部门管理', path: '/departments', icon: LayersOutline },
-        { label: '标签管理', path: '/tags', icon: PricetagsOutline }
-      ]
-    },
-    {
-      label: '基础设施',
-      items: [
+        { label: '部门管理', path: '/departments', icon: GitBranchOutline },
         { label: '机房管理', path: '/datacenters', icon: BusinessOutline },
-        { label: '机柜管理', path: '/racks', icon: CubeOutline }
+        { label: '资产折旧', path: '/asset-depreciation', icon: CalculatorOutline },
+        { label: '维保告警', path: '/warranty-alerts', icon: ShieldCheckmarkOutline }
       ]
     },
     {
@@ -182,7 +181,6 @@ const allMenuGroups = computed(() => {
         { label: '推送渠道', path: '/alert-channels', icon: WarningOutline },
         { label: '固件升级', path: '/firmware', icon: HardwareChipOutline },
         { label: '任务中心', path: '/tasks', icon: ListOutline },
-        { label: '工单管理', path: '/work-orders', icon: DocumentTextOutline },
         { label: '审计日志', path: '/audit-logs', icon: ReceiptOutline }
       ]
     },
@@ -197,10 +195,44 @@ const allMenuGroups = computed(() => {
     }
   ]
 
-  if (!isExternalMode.value) return selfHosted
+  // 自用模式分组固定为「工作台 / 资产管理 / 交付与网络 / 运维治理 / 系统设置」，
+  // 工单（两种模式共有的基础功能）在自用模式下并入「运维治理」而不另起分组；
+  // 运营模式仍由 withCommonGroups 在「系统设置」前插入「运维工具」，不受本次调整影响。
+  if (!isExternalMode.value) {
+    const governance = selfHosted.find(group => group.label === '运维治理')
+    if (governance) governance.items.unshift(...commonMenuGroups.value.flatMap(group => group.items))
+    return selfHosted
+  }
 
-  // 对外运营模式：追加额外菜单
-  return [
+  // 对外运营模式下必须区分“平台管理员”与“租户自助用户”两种视角：
+  // 管理员拥有全局运营权限，展示完整运营菜单；新注册租户即便拿到 manager 全量权限，
+  // 也只能看到与自身消费相关的精简菜单，否则会误见机房/产品/系统设置等平台运营入口。
+  if (!auth.user?.is_platform_admin) {
+    return [
+      {
+        label: '我的服务',
+        items: [
+          { label: '服务器管理', path: '/tenant-console', icon: ServerOutline }
+        ]
+      },
+      {
+        label: '购买与费用',
+        items: [
+          { label: '购买服务器', path: '/purchase', icon: CubeAltOutline },
+          { label: '费用中心', path: '/billing', icon: WalletOutline }
+        ]
+      },
+      {
+        label: '支持',
+        items: [
+          { label: '提交工单', path: '/work-orders', icon: DocumentTextOutline }
+        ]
+      }
+    ]
+  }
+
+  // 对外运营模式：在通用分组之外追加运营专属菜单
+  return withCommonGroups([
     {
       label: '工作台',
       items: [{ label: '运行总览', path: '/', icon: GridOutline }]
@@ -210,15 +242,13 @@ const allMenuGroups = computed(() => {
       items: [
         { label: '服务器管理', path: '/assets', icon: ServerOutline },
         { label: '产品管理', path: '/products', icon: CubeAltOutline },
-        { label: '部门管理', path: '/departments', icon: LayersOutline },
         { label: '标签管理', path: '/tags', icon: PricetagsOutline }
       ]
     },
     {
       label: '基础设施',
       items: [
-        { label: '机房管理', path: '/datacenters', icon: BusinessOutline },
-        { label: '机柜管理', path: '/racks', icon: CubeOutline }
+        { label: '机房管理', path: '/datacenters', icon: BusinessOutline }
       ]
     },
     {
@@ -235,10 +265,14 @@ const allMenuGroups = computed(() => {
     },
     {
       label: '计费中心',
+      // 运营侧财务入口：下单 / 订单 / 账单 / 账户 / 支付流水 / 发票 / 优惠券逐一对应后端路由，
+      // 每项仅出现一次（账单走 BillingView，/bills 只读台账不另设入口）。
       items: [
+        { label: '采购下单', path: '/purchase', icon: CartOutline },
         { label: '订单管理', path: '/orders', icon: CardOutline },
-        { label: '账单管理', path: '/bills', icon: WalletOutline },
+        { label: '账单管理', path: '/billing', icon: WalletOutline },
         { label: '账户管理', path: '/accounts', icon: PersonOutline },
+        { label: '支付记录', path: '/payments', icon: CashOutline },
         { label: '发票管理', path: '/invoices', icon: DocumentTextOutline },
         { label: '优惠券', path: '/coupons', icon: TicketOutline }
       ]
@@ -252,7 +286,6 @@ const allMenuGroups = computed(() => {
         { label: '推送渠道', path: '/alert-channels', icon: WarningOutline },
         { label: '固件升级', path: '/firmware', icon: HardwareChipOutline },
         { label: '任务中心', path: '/tasks', icon: ListOutline },
-        { label: '工单管理', path: '/work-orders', icon: DocumentTextOutline },
         { label: '审计日志', path: '/audit-logs', icon: ReceiptOutline }
       ]
     },
@@ -271,42 +304,15 @@ const allMenuGroups = computed(() => {
         { label: '系统设置', path: '/system-settings', icon: SettingsOutline }
       ]
     }
-  ]
+  ])
 })
 
-// === 菜单搜索过滤 ===
-function filterMenuItems(items: any[], search: string): any[] {
-  if (!search) return items
-  const lower = search.toLowerCase()
-  return items.filter(item =>
-    item.label.toLowerCase().includes(lower)
-  )
-}
-
-const filteredMenuGroups = computed(() => {
-  const groups = allMenuGroups.value
-    .map(group => ({
-      ...group,
-      items: group.items.filter(item => canAccess(item.path))
-    }))
-    .filter(group => group.items.length > 0)
-
-  if (!menuSearch.value) return groups
-
-  return groups
-    .map(group => ({
-      ...group,
-      items: filterMenuItems(group.items, menuSearch.value)
-    }))
-    .filter(group => group.items.length > 0)
-})
-
-// === NMenu 选项（用于 NMenu 组件渲染）===
+// === 可展开的目录菜单 ===
 const menuOptions = computed<MenuOption[]>(() =>
-  filteredMenuGroups.value.map(group => ({
-    type: 'group' as const,
+  allMenuGroups.value.map(group => ({
     label: group.label,
     key: group.label,
+    icon: icon(group.items[0].icon),
     children: group.items.map(item => ({
       label: item.label,
       key: item.path,
@@ -335,6 +341,7 @@ let notifTimer: ReturnType<typeof setInterval> | undefined
 let resizeHandler: (() => void) | undefined
 
 onMounted(async () => {
+  await auth.checkSetupStatus()
   await auth.loadContext()
   loadNotifications()
   loadBrand()
@@ -403,8 +410,8 @@ async function changePassword() {
     message.warning('两次输入的密码不一致')
     return
   }
-  if (passwordForm.value.newPassword.length < 12) {
-    message.warning('新密码长度不能少于 12 位')
+  if (passwordForm.value.newPassword.length < 6) {
+    message.warning('新密码长度不能少于 6 位')
     return
   }
   passwordSaving.value = true
@@ -423,15 +430,6 @@ async function changePassword() {
 }
 
 // === 项目/租户切换 ===
-function onProjectChange(event: Event) {
-  const target = event.target as HTMLSelectElement
-  auth.selectProject(target.value)
-  notifications.value = []
-  unreadCount.value = 0
-  router.push('/')
-  loadNotifications()
-}
-
 function onSettingsProjectChange(value: string) {
   auth.selectProject(value)
   notifications.value = []
@@ -444,10 +442,6 @@ function openPasswordModal() {
   settingsModal.value = false
   passwordForm.value = { oldPassword: '', newPassword: '', confirmPassword: '' }
   passwordModal.value = true
-}
-
-function goProjectMembers() {
-  router.push('/project-members')
 }
 
 // === NMenu 更新选中值 ===
@@ -489,60 +483,18 @@ function handleMenuSelect(key: string) {
         <span v-if="!collapsed" style="margin-left: 6px; font-size: 11px;">折叠菜单</span>
       </button>
 
-      <!-- 工作空间选择器 -->
-      <template v-if="!collapsed">
-        <div class="workspace-label">
-          工作空间 <span>PRODUCTION</span>
-        </div>
-        <select
-          class="project-picker"
-          aria-label="选择租户"
-          :value="auth.tenantId"
-          @change="auth.selectTenant(($event.target as HTMLSelectElement).value); notifications = []; unreadCount = 0; router.push('/')"
-        >
-          <option value="" disabled>请选择租户</option>
-          <option v-for="t in auth.tenants" :key="String(t.id)" :value="String(t.id)">{{ t.name }}</option>
-        </select>
-        <select
-          v-if="projects.length"
-          class="project-picker"
-          aria-label="选择项目"
-          :value="auth.projectId"
-          @change="onProjectChange"
-        >
-          <option v-for="p in projects" :key="String(p.id)" :value="String(p.id)">{{ p.name }}</option>
-        </select>
-
-        <!-- 项目成员入口 -->
-        <div v-if="auth.can('projects:write')" style="padding: 0 22px 8px;">
-          <span class="member-link" @click="goProjectMembers">成员管理 →</span>
-        </div>
-
-        <!-- 菜单搜索 -->
-        <div style="padding: 4px 14px 8px;">
-          <n-input
-            v-model:value="menuSearch"
-            placeholder="搜索菜单..."
-            size="small"
-            clearable
-          >
-            <template #prefix>
-              <n-icon :component="SearchOutline" />
-            </template>
-          </n-input>
-        </div>
-      </template>
-
       <!-- 导航菜单 -->
       <nav aria-label="主导航">
         <n-menu
+          v-model:expanded-keys="expandedMenuKeys"
           :options="menuOptions"
+          :theme-overrides="menuThemeOverrides"
           :collapsed
           :collapsed-width="64"
           :collapsed-icon-size="20"
           :value="activeMenuPath"
           @update:value="handleMenuSelect"
-          indent="18"
+          :indent="18"
         />
       </nav>
 
@@ -695,7 +647,7 @@ function handleMenuSelect(key: string) {
           <n-input v-model:value="passwordForm.oldPassword" type="password" placeholder="请输入当前密码" :show-password-on="'click'" />
         </n-form-item>
         <n-form-item label="新密码">
-          <n-input v-model:value="passwordForm.newPassword" type="password" placeholder="请输入新密码（至少12位）" :show-password-on="'click'" />
+          <n-input v-model:value="passwordForm.newPassword" type="password" placeholder="请输入新密码（至少6位）" :show-password-on="'click'" />
         </n-form-item>
         <n-form-item label="确认新密码">
           <n-input v-model:value="passwordForm.confirmPassword" type="password" placeholder="请再次输入新密码" :show-password-on="'click'" />

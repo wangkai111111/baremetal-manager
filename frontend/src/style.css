@@ -339,6 +339,18 @@ a:hover {
   flex: 1;
 }
 
+.sidebar .n-menu-item-content:not(.n-menu-item-content--selected):not(:hover) .n-menu-item-content-header,
+.sidebar .n-menu-item-content:not(.n-menu-item-content--selected):not(:hover) .n-menu-item-content__icon,
+.sidebar .n-menu-item-group-title,
+.sidebar .n-input__input-el {
+  color: var(--color-nav-text);
+}
+
+.sidebar .n-input__placeholder {
+  color: var(--color-nav-text);
+  opacity: 0.85;
+}
+
 .sidebar nav::-webkit-scrollbar {
   width: 4px;
 }

@@ -12,15 +12,15 @@ import (
 // RegisterEnhancedAssetListRoutes 注册增强资产列表路由
 // 注意：不覆盖现有的 GET /assets 路由，而是在同一路由组下添加筛选能力
 func RegisterEnhancedAssetListRoutes(rg *gin.RouterGroup, store *repository.Store) {
-	// 增强列表（支持标签/状态/机房/机柜筛选）
-	// 筛选参数通过 query string 传递: ?tag_id=1&status=online&datacenter_id=2&rack_id=3&search=keyword&page=1&page_size=20
+	// 增强列表（支持标签/状态/机房筛选）
+	// 筛选参数通过 query string 传递: ?tag_id=1&status=online&datacenter_id=2&search=keyword&page=1&page_size=20
 	rg.GET("/assets/enhanced", func(c *gin.Context) {
 		EnhancedListAssets(c, store)
 	})
 }
 
 // EnhancedListAssets 增强版资产列表查询
-// 支持按标签、状态、机房、机柜筛选，支持关键字搜索和分页
+// 支持按标签、状态、机房筛选，支持关键字搜索和分页
 func EnhancedListAssets(c *gin.Context, store *repository.Store) {
 	projectID, _ := c.Get("projectID")
 	if projectID == nil {
@@ -37,7 +37,6 @@ func EnhancedListAssets(c *gin.Context, store *repository.Store) {
 	tagIDStr := c.Query("tag_id")
 	status := c.Query("status")
 	datacenterIDStr := c.Query("datacenter_id")
-	rackIDStr := c.Query("rack_id")
 	search := c.Query("search")
 	pageStr := c.DefaultQuery("page", "1")
 	pageSizeStr := c.DefaultQuery("page_size", "20")
@@ -64,14 +63,6 @@ func EnhancedListAssets(c *gin.Context, store *repository.Store) {
 		dcID, err := strconv.ParseUint(datacenterIDStr, 10, 64)
 		if err == nil {
 			query = query.Where("datacenter_id = ?", uint(dcID))
-		}
-	}
-
-	// 按机柜筛选
-	if rackIDStr != "" {
-		rackID, err := strconv.ParseUint(rackIDStr, 10, 64)
-		if err == nil {
-			query = query.Where("rack_id = ?", uint(rackID))
 		}
 	}
 

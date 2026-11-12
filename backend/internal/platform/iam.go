@@ -261,8 +261,8 @@ func (a *App) iamWriteUser(c *gin.Context) {
 			return
 		}
 		if create || in.Password != "" {
-			if len(in.Password) < 12 || len(in.Password) > 72 {
-				fail(c, 400, "password must contain 12 to 72 bytes")
+			if len(in.Password) < 6 || len(in.Password) > 72 {
+				fail(c, 400, "password must contain 6 to 72 bytes")
 				return
 			}
 			hash, e := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)

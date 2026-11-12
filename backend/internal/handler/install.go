@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"baremetal-manager/backend/internal/model"
@@ -51,9 +52,11 @@ func listKickstartTemplates(store *repository.Store) gin.HandlerFunc {
 // createKickstartTemplate 创建 Kickstart 模板
 func createKickstartTemplate(store *repository.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// 接受 JSON: {name, format, content, os_type, partition_scheme, variables, post_script}
 		var input struct {
 			Name            string `json:"name"`
-			TemplateContent string `json:"template_content"`
+			Format          string `json:"format"`
+			Content         string `json:"content"`
 			Variables       string `json:"variables"`
 			OSType          string `json:"os_type"`
 			PartitionScheme string `json:"partition_scheme"`
@@ -63,11 +66,16 @@ func createKickstartTemplate(store *repository.Store) gin.HandlerFunc {
 			Fail(c, 400, "invalid_request", "模板名称不能为空")
 			return
 		}
+		if !service.IsValidInstallFormat(input.Format) {
+			Fail(c, 400, "invalid_format", "应答文件格式必须为 kickstart/autoinstall/preseed/unattend")
+			return
+		}
 
 		userID := uid(c)
 		tpl := model.KickstartTemplate{
 			Name:            input.Name,
-			TemplateContent: input.TemplateContent,
+			Format:          strings.ToLower(strings.TrimSpace(input.Format)),
+			TemplateContent: input.Content,
 			Variables:       input.Variables,
 			OSType:          input.OSType,
 			PartitionScheme: input.PartitionScheme,
@@ -107,9 +115,11 @@ func updateKickstartTemplate(store *repository.Store) gin.HandlerFunc {
 			return
 		}
 
+		// 接受 JSON: {name, format, content, os_type, partition_scheme, variables, post_script}
 		var input struct {
 			Name            string `json:"name"`
-			TemplateContent string `json:"template_content"`
+			Format          string `json:"format"`
+			Content         string `json:"content"`
 			Variables       string `json:"variables"`
 			OSType          string `json:"os_type"`
 			PartitionScheme string `json:"partition_scheme"`
@@ -119,21 +129,30 @@ func updateKickstartTemplate(store *repository.Store) gin.HandlerFunc {
 			Fail(c, 400, "invalid_request", "请求参数错误")
 			return
 		}
+		if !service.IsValidInstallFormat(input.Format) {
+			Fail(c, 400, "invalid_format", "应答文件格式必须为 kickstart/autoinstall/preseed/unattend")
+			return
+		}
 
+		// 仅更新数据库中真实存在的列（name/format/content）；
+		// os_type/partition_scheme/variables/post_script 在目标库中无对应列，
+		// 只在内存结构上回显，供前端与渲染引擎使用。
 		changes := map[string]interface{}{
-			"name":             input.Name,
-			"template_content": input.TemplateContent,
-			"variables":        input.Variables,
-			"os_type":          input.OSType,
-			"partition_scheme": input.PartitionScheme,
-			"post_script":      input.PostScript,
+			"name":    input.Name,
+			"format":  strings.ToLower(strings.TrimSpace(input.Format)),
+			"content": input.Content,
 		}
 		if err := store.DB.Model(&tpl).Updates(changes).Error; err != nil {
 			Fail(c, 500, "update_failed", "更新模板失败")
 			return
 		}
+		// 同步内存中的非持久化字段，以便重新查询后回显最新值。
+		tpl.Variables = input.Variables
+		tpl.OSType = input.OSType
+		tpl.PartitionScheme = input.PartitionScheme
+		tpl.PostScript = input.PostScript
 		store.Audit(uid(c), pid(c), "kickstart_template.update", fmt.Sprint(tpl.ID))
-		// 重新查询返回最新数据
+		// 重新查询返回最新数据（仅刷新映射列，不覆盖 gorm:"-" 内存字段）
 		store.DB.Where("id = ?", tpl.ID).First(&tpl)
 		OK(c, tpl)
 	}

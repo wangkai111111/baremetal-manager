@@ -2,6 +2,7 @@ package platform
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +15,29 @@ import (
 // 待注册路由（routes.go）：
 // GET /api/v1/projects/:projectId/assets/:id/depreciation    → getAssetDepreciation  → assets:read
 // GET /api/v1/projects/:projectId/assets/warranty-alerts     → listWarrantyAlerts    → assets:read
+
+// listAssetDepreciation 通过所属资产限定租户与项目，折旧表本身没有 project_id。
+func (a *App) listAssetDepreciation(c *gin.Context) {
+	sc := contextScope(c)
+	q := a.store.db.Table("asset_depreciation AS d").
+		Joins("JOIN assets AS a ON a.id=d.asset_id AND a.tenant_id=d.tenant_id").
+		Where("d.tenant_id=? AND a.project_id=? AND d.deleted_at IS NULL AND a.deleted_at IS NULL", sc.Tenant, sc.Project)
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		q = q.Where("a.name ILIKE ?", "%"+search+"%")
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		fail(c, 500, "depreciation query failed")
+		return
+	}
+	p, n := page(c)
+	items := make([]map[string]any, 0)
+	if err := q.Select("d.*, a.name AS asset_name").Order("d.id DESC").Limit(n).Offset((p - 1) * n).Find(&items).Error; err != nil {
+		fail(c, 500, "depreciation query failed")
+		return
+	}
+	ok(c, gin.H{"items": items, "total": total, "page": p, "page_size": n})
+}
 
 // getAssetDepreciation 返回指定资产的折旧信息
 // 使用直线法计算：月折旧额 = (原值 - 残值) / 使用月数
@@ -43,16 +67,16 @@ func (a *App) getAssetDepreciation(c *gin.Context) {
 	if e != nil {
 		// 无折旧记录时，返回空数据
 		ok(c, gin.H{
-			"asset_id":               assetID,
-			"has_depreciation":       false,
-			"purchase_cost":          nil,
-			"salvage_value":          nil,
-			"useful_life_months":     nil,
-			"monthly_depreciation":   nil,
+			"asset_id":                 assetID,
+			"has_depreciation":         false,
+			"purchase_cost":            nil,
+			"salvage_value":            nil,
+			"useful_life_months":       nil,
+			"monthly_depreciation":     nil,
 			"accumulated_depreciation": nil,
-			"net_value":              nil,
-			"start_date":             nil,
-			"status":                 nil,
+			"net_value":                nil,
+			"start_date":               nil,
+			"status":                   nil,
 		})
 		return
 	}
@@ -82,18 +106,18 @@ func (a *App) getAssetDepreciation(c *gin.Context) {
 	}
 
 	ok(c, gin.H{
-		"asset_id":               assetID,
-		"has_depreciation":       true,
-		"depreciation_method":    dep["depreciation_method"],
-		"purchase_cost":          purchaseCost,
-		"salvage_value":          salvageValue,
-		"useful_life_months":     usefulLifeMonths,
-		"monthly_depreciation":   monthlyDepreciation,
+		"asset_id":                 assetID,
+		"has_depreciation":         true,
+		"depreciation_method":      dep["depreciation_method"],
+		"purchase_cost":            purchaseCost,
+		"salvage_value":            salvageValue,
+		"useful_life_months":       usefulLifeMonths,
+		"monthly_depreciation":     monthlyDepreciation,
 		"accumulated_depreciation": accumulatedDepreciation,
-		"net_value":              netValue,
-		"start_date":             startDate,
-		"status":                 dep["status"],
-		"updated_at":             dep["updated_at"],
+		"net_value":                netValue,
+		"start_date":               startDate,
+		"status":                   dep["status"],
+		"updated_at":               dep["updated_at"],
 	})
 }
 
@@ -174,11 +198,11 @@ func (a *App) listWarrantyAlerts(c *gin.Context) {
 	e := a.store.db.Table("assets").
 		Select(`id, name, serial_number, manufacturer, model, status, warranty_expiry,
 				CEIL(EXTRACT(EPOCH FROM (warranty_expiry - NOW())) / 86400) AS days_remaining`).
-		Where(`project_id=? AND deleted_at IS NULL
+		Where(`tenant_id=? AND project_id=? AND deleted_at IS NULL
 			   AND warranty_expiry IS NOT NULL
 			   AND warranty_expiry <= ?
 			   AND warranty_expiry > NOW()`,
-			sc.Project, alertDeadline).
+			sc.Tenant, sc.Project, alertDeadline).
 		Order("warranty_expiry ASC").
 		Find(&rows).Error
 	if e != nil {
@@ -187,14 +211,14 @@ func (a *App) listWarrantyAlerts(c *gin.Context) {
 	}
 	// 格式化输出
 	type warrantyAlert struct {
-		AssetID       int64  `json:"asset_id"`
-		Name          string `json:"name"`
-		SerialNumber  string `json:"serial_number"`
-		Manufacturer  string `json:"manufacturer"`
-		Model         string `json:"model"`
-		Status        string `json:"status"`
+		AssetID        int64  `json:"asset_id"`
+		Name           string `json:"name"`
+		SerialNumber   string `json:"serial_number"`
+		Manufacturer   string `json:"manufacturer"`
+		Model          string `json:"model"`
+		Status         string `json:"status"`
 		WarrantyExpiry string `json:"warranty_expiry"`
-		DaysRemaining int64  `json:"days_remaining"`
+		DaysRemaining  int64  `json:"days_remaining"`
 	}
 	alerts := make([]warrantyAlert, 0, len(rows))
 	for _, row := range rows {

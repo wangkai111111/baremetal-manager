@@ -33,7 +33,13 @@ func lockScope(tx *gorm.DB, sc scope) error {
 	var n int64
 	return tx.Raw("SELECT id FROM projects WHERE tenant_id=? AND id=? AND deleted_at IS NULL AND status='active' FOR UPDATE", sc.Tenant, sc.Project).Scan(&n).Error
 }
+
+var errAssetProvisioningForbidden = errors.New("运营租户不能新增或删除平台资产")
+
 func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64, in map[string]any, create bool, out *int64) error {
+	if create && r.table == "assets" && !sc.Admin && currentSystemMode(s.db) == ModeExternalOperation {
+		return errAssetProvisioningForbidden
+	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := lockScope(tx, sc); e != nil {
 			return e
@@ -45,7 +51,7 @@ func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64
 			}
 			for k, v := range old {
 				if _, ok := in[k]; !ok {
-					if _, ref := references[k]; ref || k == "rack_u_position" || k == "height_u" || k == "start_address" || k == "end_address" || k == "address" {
+					if _, ref := references[k]; ref || k == "start_address" || k == "end_address" || k == "address" {
 						in[k] = v
 					}
 				}
@@ -60,16 +66,15 @@ func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64
 			}
 		}
 		if r.table == "assets" {
-			if e := validateRack(tx, sc, id, in); e != nil {
-				return e
-			}
 			var n int64
 			tx.Table("device_leases").Where("tenant_id=? AND project_id=? AND asset_id=? AND expires_at>now()", sc.Tenant, sc.Project, id).Count(&n)
 			if n > 0 {
 				return errors.New("asset busy")
 			}
 			if create {
-				in["bmc_tls_verify"] = true
+				if _, ok := in["bmc_tls_verify"]; !ok {
+					in["bmc_tls_verify"] = false
+				}
 			}
 		}
 		if r.table == "ip_pools" || r.table == "ip_allocations" {
@@ -106,6 +111,11 @@ func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64
 				return e
 			}
 			id = asInt(in["id"])
+			if r.table == "assets" && (in["bmc_protocol"] == nil || in["bmc_protocol"] == "redfish") && in["status"] != "retired" {
+				if err := enqueueAutomaticCollection(tx, sc, id); err != nil {
+					return err
+				}
+			}
 		} else {
 			res := queryScope(tx, r, sc).Where("id=?", id).Updates(in)
 			if res.Error != nil {
@@ -131,37 +141,10 @@ func asInt(v any) int64 {
 		return number(fmt.Sprint(v))
 	}
 }
-func validateRack(tx *gorm.DB, sc scope, id int64, in map[string]any) error {
-	rack := asInt(in["rack_id"])
-	position := asInt(in["rack_u_position"])
-	height := asInt(in["height_u"])
-	if height == 0 {
-		height = 1
-	}
-	if rack == 0 {
-		if position != 0 {
-			return errors.New("rack required")
-		}
-		return nil
-	}
-	var max int64
-	if e := queryScope(tx, resource{table: "racks"}, sc).Select("height_u").Where("id=?", rack).Scan(&max).Error; e != nil {
-		return e
-	}
-	if position < 1 || position+height-1 > max {
-		return errors.New("invalid rack position")
-	}
-	var n int64
-	// 机架占位是项目级约束，不能因读取隔离而忽略其他用户的设备。
-	rackScope := sc
-	rackScope.Admin = true
-	queryScope(tx, resource{table: "assets"}, rackScope).Where("rack_id=? AND id<>? AND rack_u_position < ? AND rack_u_position+height_u > ?", rack, id, position+height, position).Count(&n)
-	if n > 0 {
-		return errors.New("rack position occupied")
-	}
-	return nil
-}
 func (s *store) deleteResource(ctx context.Context, r resource, sc scope, id int64) error {
+	if r.table == "assets" && !sc.Admin && currentSystemMode(s.db) == ModeExternalOperation {
+		return errAssetProvisioningForbidden
+	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := lockScope(tx, sc); e != nil {
 			return e
@@ -182,7 +165,10 @@ func (s *store) deleteResource(ctx context.Context, r resource, sc scope, id int
 					continue
 				}
 				var n int64
-				if e := queryScope(tx, child, sc).Where(field+"=?", id).Count(&n).Error; e != nil {
+				// 引用约束属于整个项目，不能遗漏运营模式下其他用户的资产。
+				childScope := sc
+				childScope.Admin = true
+				if e := queryScope(tx, child, childScope).Where(field+"=?", id).Count(&n).Error; e != nil {
 					return e
 				}
 				if n > 0 {

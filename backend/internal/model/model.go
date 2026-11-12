@@ -57,8 +57,6 @@ type Asset struct {
 	Manufacturer       string         `json:"manufacturer" gorm:"size:200;comment:制造商"`
 	Model              string         `json:"model" gorm:"size:200;comment:型号"`
 	DatacenterID       *uint          `json:"datacenter_id,omitempty" gorm:"index;comment:所属机房"`
-	RackID             *uint          `json:"rack_id,omitempty" gorm:"index;comment:所属机柜"`
-	RackUPosition      *int           `json:"rack_u_position,omitempty" gorm:"comment:U位位置"`
 	PurchaseDate       *time.Time     `json:"purchase_date,omitempty" gorm:"comment:采购日期"`
 	WarrantyExpiry     *time.Time     `json:"warranty_expiry,omitempty" gorm:"comment:维保到期日期"`
 	Vendor             string         `json:"vendor" gorm:"size:200;comment:供应商"`
@@ -175,20 +173,6 @@ type IPAllocation struct {
 	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
-// RackLabel 表示项目中附加到机架或机柜的标签。
-type RackLabel struct {
-	ID        uint           `json:"id" gorm:"primaryKey"`
-	ProjectID uint           `json:"project_id" gorm:"index;not null"`
-	RackName  string         `json:"rack_name" gorm:"not null"`
-	Key       string         `json:"key" gorm:"not null"`
-	Value     string         `json:"value" gorm:"not null"`
-	CreateBy  uint           `json:"create_by" gorm:"index;not null"`
-	UpdateBy  uint           `json:"update_by" gorm:"index;not null"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
-}
-
 // AssetHardware 记录设备上报的规范化硬件信息。
 type AssetHardware struct {
 	ID           uint           `json:"id" gorm:"primaryKey"`
@@ -287,28 +271,11 @@ type Datacenter struct {
 	Description string         `json:"description" gorm:"type:text;comment:描述"`
 	ProjectID   uint           `json:"project_id" gorm:"index;not null;comment:所属项目"`
 	Contact     string         `json:"contact" gorm:"size:200;comment:联系人"`
-	Capacity    int            `json:"capacity" gorm:"default:0;comment:容量(机柜数)"`
 	CreateBy    *uint          `json:"create_by,omitempty" gorm:"comment:创建人"`
 	UpdateBy    *uint          `json:"update_by,omitempty" gorm:"comment:更新人"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
 	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index;comment:软删除"`
-}
-
-// Rack 机柜信息表
-type Rack struct {
-	ID            uint           `json:"id" gorm:"primaryKey"`
-	Name          string         `json:"name" gorm:"size:200;not null;comment:机柜名称"`
-	DatacenterID  uint           `json:"datacenter_id" gorm:"index;not null;comment:所属机房"`
-	ProjectID     uint           `json:"project_id" gorm:"index;not null;comment:所属项目"`
-	HeightU       int            `json:"height_u" gorm:"default:42;comment:U位高度"`
-	Location      string         `json:"location" gorm:"size:500;comment:机柜位置"`
-	PowerCapacity string         `json:"power_capacity" gorm:"size:100;comment:供电容量"`
-	CreateBy      *uint          `json:"create_by,omitempty" gorm:"comment:创建人"`
-	UpdateBy      *uint          `json:"update_by,omitempty" gorm:"comment:更新人"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index;comment:软删除"`
 }
 
 // Tag 标签定义表
@@ -421,21 +388,21 @@ type Department struct {
 
 // AssetDepreciation 资产折旧记录
 type AssetDepreciation struct {
-	ID                    uint           `json:"id" gorm:"primaryKey"`
-	TenantID              int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
-	AssetID               uint           `json:"asset_id" gorm:"column:asset_id;not null;index"`
-	DepreciationMethod    string         `json:"depreciation_method" gorm:"column:depreciation_method;size:32"`
-	PurchaseCost          float64        `json:"purchase_cost" gorm:"column:purchase_cost"`
-	SalvageValue          float64        `json:"salvage_value" gorm:"column:salvage_value"`
-	UsefulLifeMonths      int            `json:"useful_life_months" gorm:"column:useful_life_months"`
-	MonthlyDepreciation   float64        `json:"monthly_depreciation" gorm:"column:monthly_depreciation"`
-	AccumulatedDepreciation float64      `json:"accumulated_depreciation" gorm:"column:accumulated_depreciation"`
-	NetValue              float64        `json:"net_value" gorm:"column:net_value"`
-	StartDate             *time.Time     `json:"start_date,omitempty" gorm:"column:start_date"`
-	Status                string         `json:"status" gorm:"column:status;size:16"`
-	CreatedAt             time.Time      `json:"created_at"`
-	UpdatedAt             time.Time      `json:"updated_at"`
-	DeletedAt             gorm.DeletedAt `json:"-" gorm:"index"`
+	ID                      uint           `json:"id" gorm:"primaryKey"`
+	TenantID                int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	AssetID                 uint           `json:"asset_id" gorm:"column:asset_id;not null;index"`
+	DepreciationMethod      string         `json:"depreciation_method" gorm:"column:depreciation_method;size:32"`
+	PurchaseCost            float64        `json:"purchase_cost" gorm:"column:purchase_cost"`
+	SalvageValue            float64        `json:"salvage_value" gorm:"column:salvage_value"`
+	UsefulLifeMonths        int            `json:"useful_life_months" gorm:"column:useful_life_months"`
+	MonthlyDepreciation     float64        `json:"monthly_depreciation" gorm:"column:monthly_depreciation"`
+	AccumulatedDepreciation float64        `json:"accumulated_depreciation" gorm:"column:accumulated_depreciation"`
+	NetValue                float64        `json:"net_value" gorm:"column:net_value"`
+	StartDate               *time.Time     `json:"start_date,omitempty" gorm:"column:start_date"`
+	Status                  string         `json:"status" gorm:"column:status;size:16"`
+	CreatedAt               time.Time      `json:"created_at"`
+	UpdatedAt               time.Time      `json:"updated_at"`
+	DeletedAt               gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 // TenantProfile 租户扩展档案（运营模式）
@@ -457,17 +424,17 @@ type TenantProfile struct {
 
 // Product 产品/型号上架表（运营模式）
 type Product struct {
-	ID            uint           `json:"id" gorm:"primaryKey"`
-	TenantID      int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
-	Name          string         `json:"name" gorm:"column:name;size:128;not null"`
-	Description   string         `json:"description" gorm:"column:description;type:text"`
-	SpecJSON      string         `json:"spec_json" gorm:"column:spec_json;type:jsonb"`
-	PricingJSON   string         `json:"pricing_json" gorm:"column:pricing_json;type:jsonb"`
-	BillingCycle  string         `json:"billing_cycle" gorm:"column:billing_cycle;size:16"`
-	Status        string         `json:"status" gorm:"column:status;size:16;not null;default:active"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index"`
+	ID           uint           `json:"id" gorm:"primaryKey"`
+	TenantID     int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	Name         string         `json:"name" gorm:"column:name;size:128;not null"`
+	Description  string         `json:"description" gorm:"column:description;type:text"`
+	SpecJSON     string         `json:"spec_json" gorm:"column:spec_json;type:jsonb"`
+	PricingJSON  string         `json:"pricing_json" gorm:"column:pricing_json;type:jsonb"`
+	BillingCycle string         `json:"billing_cycle" gorm:"column:billing_cycle;size:16"`
+	Status       string         `json:"status" gorm:"column:status;size:16;not null;default:active"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 // Order 订单记录（运营模式）
@@ -506,14 +473,14 @@ type Bill struct {
 
 // Account 租户账户余额（运营模式）
 type Account struct {
-	ID            uint           `json:"id" gorm:"primaryKey"`
-	TenantID      int64          `json:"tenant_id" gorm:"column:tenant_id;not null;uniqueIndex"`
-	Balance       float64        `json:"balance" gorm:"column:balance;not null;default:0"`
-	FrozenAmount  float64        `json:"frozen_amount" gorm:"column:frozen_amount;not null;default:0"`
-	CreditLimit   float64        `json:"credit_limit" gorm:"column:credit_limit;not null;default:0"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	DeletedAt     gorm.DeletedAt `json:"-" gorm:"index"`
+	ID           uint           `json:"id" gorm:"primaryKey"`
+	TenantID     int64          `json:"tenant_id" gorm:"column:tenant_id;not null;uniqueIndex"`
+	Balance      float64        `json:"balance" gorm:"column:balance;not null;default:0"`
+	FrozenAmount float64        `json:"frozen_amount" gorm:"column:frozen_amount;not null;default:0"`
+	CreditLimit  float64        `json:"credit_limit" gorm:"column:credit_limit;not null;default:0"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 // Payment 支付记录（运营模式）
@@ -532,18 +499,18 @@ type Payment struct {
 
 // Invoice 发票记录（运营模式）
 type Invoice struct {
-	ID         uint           `json:"id" gorm:"primaryKey"`
-	TenantID   int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
-	BillID     *int64         `json:"bill_id,omitempty" gorm:"column:bill_id;index"`
-	Type       string         `json:"type" gorm:"column:type;size:16"`
-	Title      string         `json:"title" gorm:"column:title;size:256"`
-	TaxNumber  string         `json:"tax_number" gorm:"column:tax_number;size:64"`
-	Amount     float64        `json:"amount" gorm:"column:amount"`
-	Status     string         `json:"status" gorm:"column:status;size:16;not null;default:requested"`
-	IssuedAt   *time.Time     `json:"issued_at,omitempty" gorm:"column:issued_at"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
-	DeletedAt  gorm.DeletedAt `json:"-" gorm:"index"`
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	TenantID  int64          `json:"tenant_id" gorm:"column:tenant_id;not null;index"`
+	BillID    *int64         `json:"bill_id,omitempty" gorm:"column:bill_id;index"`
+	Type      string         `json:"type" gorm:"column:type;size:16"`
+	Title     string         `json:"title" gorm:"column:title;size:256"`
+	TaxNumber string         `json:"tax_number" gorm:"column:tax_number;size:64"`
+	Amount    float64        `json:"amount" gorm:"column:amount"`
+	Status    string         `json:"status" gorm:"column:status;size:16;not null;default:requested"`
+	IssuedAt  *time.Time     `json:"issued_at,omitempty" gorm:"column:issued_at"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 // Coupon 优惠券（运营模式）
@@ -602,15 +569,23 @@ type OperationAuditLog struct {
 
 func (OperationAuditLog) TableName() string { return "operation_audit_logs" }
 
-// KickstartTemplate 装机应答模板表
+// KickstartTemplate 装机应答模板表。
+// 说明：目标库 kickstart_templates 表（见 003_target_schema.sql）仅包含
+// name / format / content / revision 等列，并不存在 template_content、
+// variables、os_type、partition_scheme、post_script 列。为兼容既有代码与前端 JSON，
+// 这里将 TemplateContent 映射到数据库 content 列，Format/Revision 对齐数据库；
+// 其余富字段以 gorm:"-" 标注（不落到数据库列，避免查询不存在的列导致 SQL 报错），
+// 供前端展示与渲染引擎在内存中使用。
 type KickstartTemplate struct {
 	ID              uint           `json:"id" gorm:"primaryKey"`
 	Name            string         `json:"name" gorm:"size:200;not null;comment:模板名称"`
-	TemplateContent string         `json:"template_content" gorm:"type:text;comment:模板内容"`
-	Variables       string         `json:"variables" gorm:"type:jsonb;comment:变量定义(JSON)"`
-	OSType          string         `json:"os_type" gorm:"size:50;comment:操作系统类型"`
-	PartitionScheme string         `json:"partition_scheme" gorm:"type:text;comment:分区方案"`
-	PostScript      string         `json:"post_script" gorm:"type:text;comment:装机后执行脚本"`
+	Format          string         `json:"format" gorm:"column:format;size:20;comment:应答文件格式(kickstart/autoinstall/preseed/unattend)"`
+	TemplateContent string         `json:"template_content" gorm:"column:content;type:text;comment:模板正文"`
+	Revision        int            `json:"revision" gorm:"column:revision;default:1;comment:模板修订号"`
+	Variables       string         `json:"variables" gorm:"-;comment:变量定义(JSON)"`
+	OSType          string         `json:"os_type" gorm:"-;comment:操作系统类型"`
+	PartitionScheme string         `json:"partition_scheme" gorm:"-;comment:分区方案"`
+	PostScript      string         `json:"post_script" gorm:"-;comment:装机后执行脚本"`
 	ProjectID       uint           `json:"project_id" gorm:"index;not null;comment:所属项目"`
 	CreateBy        *uint          `json:"create_by,omitempty" gorm:"comment:创建人"`
 	CreatedAt       time.Time      `json:"created_at"`

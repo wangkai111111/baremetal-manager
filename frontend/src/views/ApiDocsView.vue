@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // API 文档页面 — 解析 OpenAPI 规范并按标签分组展示接口
 import { computed, onMounted, ref } from 'vue'
-import { NEmpty, NInput, NTag } from 'naive-ui'
+import { NButton, NEmpty, NInput, NTag } from 'naive-ui'
 
 const METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const
 

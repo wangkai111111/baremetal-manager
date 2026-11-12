@@ -85,11 +85,11 @@ func (a *App) calculateRevenueTrend(tenantID int64, days int) []dailyRevenue {
 
 // orderStatsResult 订单统计结果
 type orderStatsResult struct {
-	TotalOrders    int64   `json:"total_orders"`
-	PendingOrders  int64   `json:"pending_orders"`
-	CompletedOrders int64  `json:"completed_orders"`
-	TotalRevenue   float64 `json:"total_revenue"`
-	ConversionRate float64 `json:"conversion_rate"`
+	TotalOrders     int64   `json:"total_orders"`
+	PendingOrders   int64   `json:"pending_orders"`
+	CompletedOrders int64   `json:"completed_orders"`
+	TotalRevenue    float64 `json:"total_revenue"`
+	ConversionRate  float64 `json:"conversion_rate"`
 }
 
 // calculateOrderStats 计算订单统计数据
@@ -121,11 +121,11 @@ func (a *App) calculateOrderStats(tenantID int64) orderStatsResult {
 
 // userGrowthResult 用户增长结果
 type userGrowthResult struct {
-	TotalUsers     int64 `json:"total_users"`
-	ActiveUsers    int64 `json:"active_users"`
-	NewUsersToday  int64 `json:"new_users_today"`
-	NewUsersWeek   int64 `json:"new_users_week"`
-	NewUsersMonth  int64 `json:"new_users_month"`
+	TotalUsers    int64 `json:"total_users"`
+	ActiveUsers   int64 `json:"active_users"`
+	NewUsersToday int64 `json:"new_users_today"`
+	NewUsersWeek  int64 `json:"new_users_week"`
+	NewUsersMonth int64 `json:"new_users_month"`
 }
 
 // calculateUserGrowth 计算用户增长统计
@@ -166,9 +166,9 @@ func (a *App) calculateUserGrowth(tenantID int64) userGrowthResult {
 
 // resourceUtilResult 资源利用率
 type resourceUtilResult struct {
-	TotalAssets    int64   `json:"total_assets"`
-	OnlineAssets   int64   `json:"online_assets"`
-	OfflineAssets  int64   `json:"offline_assets"`
+	TotalAssets     int64   `json:"total_assets"`
+	OnlineAssets    int64   `json:"online_assets"`
+	OfflineAssets   int64   `json:"offline_assets"`
 	UtilizationRate float64 `json:"utilization_rate"`
 }
 
@@ -192,9 +192,9 @@ func (a *App) calculateResourceUtilization(sc scope) resourceUtilResult {
 
 // accountOverviewResult 账户总览
 type accountOverviewResult struct {
-	Balance      float64 `json:"balance"`
-	FrozenAmount float64 `json:"frozen_amount"`
-	CreditLimit  float64 `json:"credit_limit"`
+	Balance       float64 `json:"balance"`
+	FrozenAmount  float64 `json:"frozen_amount"`
+	CreditLimit   float64 `json:"credit_limit"`
 	TotalPayments float64 `json:"total_payments"`
 }
 

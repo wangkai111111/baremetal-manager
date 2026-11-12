@@ -61,11 +61,20 @@ func newTargetBMC(d device, secret string) (*targetBMC, error) {
 // Only root-relative resource paths are accepted; device-provided URLs never select an origin.
 func (t *targetBMC) resource(path string) (*url.URL, error) {
 	u, err := url.Parse(path)
-	if err != nil || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "\\\r\n") || u.IsAbs() || u.Host != "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "\\\r\n") || u.IsAbs() || u.Host != "" || u.User != nil || u.Fragment != "" {
 		return nil, errors.New("Redfish resource must be a same-origin path")
 	}
 	if !strings.HasPrefix(u.Path, "/redfish/v1/") || strings.HasPrefix(u.Path, "//") {
 		return nil, errors.New("invalid Redfish resource path")
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return nil, errors.New("invalid Redfish pagination")
+	}
+	for key, values := range query {
+		if (key != "$skip" && key != "$top" && key != "$skiptoken") || len(values) != 1 || len(values[0]) > 256 {
+			return nil, errors.New("unsupported Redfish pagination")
+		}
 	}
 	u.Scheme, u.Host = t.base.Scheme, t.base.Host
 	return u, nil
@@ -144,29 +153,60 @@ func (t *targetBMC) system(ctx context.Context) (string, json.RawMessage, error)
 	return path, raw, err
 }
 
+type computerSystemSummary struct {
+	hardwareDetails
+	Name             string
+	Manufacturer     string
+	Model            string
+	SerialNumber     string
+	PowerState       string
+	BiosVersion      string
+	Status           *struct{ Health, HealthRollup string } `json:",omitempty"`
+	ProcessorSummary *struct {
+		Count int
+		Model string
+	} `json:",omitempty"`
+	MemorySummary *struct{ TotalSystemMemoryGiB float64 } `json:",omitempty"`
+}
+
+func parseComputerSystemSummary(raw json.RawMessage) (computerSystemSummary, error) {
+	var s computerSystemSummary
+	if json.Unmarshal(raw, &s) != nil {
+		return s, errors.New("invalid Redfish computer system response")
+	}
+	if strings.TrimSpace(s.Name+s.Manufacturer+s.Model+s.SerialNumber+s.BiosVersion) == "" &&
+		(s.ProcessorSummary == nil || (s.ProcessorSummary.Count <= 0 && strings.TrimSpace(s.ProcessorSummary.Model) == "")) &&
+		(s.MemorySummary == nil || s.MemorySummary.TotalSystemMemoryGiB <= 0) {
+		return s, errors.New("Redfish computer system summary is empty")
+	}
+	s.Name, s.Manufacturer, s.Model = safeInventoryText(s.Name), safeInventoryText(s.Manufacturer), safeInventoryText(s.Model)
+	s.SerialNumber, s.BiosVersion = safeInventoryText(s.SerialNumber), safeInventoryText(s.BiosVersion)
+	s.PowerState = safeInventoryText(s.PowerState)
+	if s.Status != nil {
+		s.Status.Health, s.Status.HealthRollup = safeInventoryText(s.Status.Health), safeInventoryText(s.Status.HealthRollup)
+	}
+	if s.ProcessorSummary != nil {
+		s.ProcessorSummary.Model = safeInventoryText(s.ProcessorSummary.Model)
+	}
+	s.hardwareDetails = sanitizeHardwareDetails(s.hardwareDetails)
+	return s, nil
+}
+
 func (t *targetBMC) collect(ctx context.Context) (json.RawMessage, error) {
 	if t.device.BMCProtocol != "redfish" {
 		return nil, errors.New("hardware collection requires Redfish protocol")
 	}
+	ctx, cancel := context.WithTimeout(ctx, collectionDeadline)
+	defer cancel()
 	_, raw, err := t.system(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var snapshot struct {
-		Manufacturer     string
-		Model            string
-		SerialNumber     string
-		PowerState       string
-		BiosVersion      string
-		ProcessorSummary *struct {
-			Count int
-			Model string
-		} `json:",omitempty"`
-		MemorySummary *struct{ TotalSystemMemoryGiB float64 } `json:",omitempty"`
+	snapshot, err := parseComputerSystemSummary(raw)
+	if err != nil {
+		return nil, err
 	}
-	if json.Unmarshal(raw, &snapshot) != nil || string(raw) == "null" {
-		return nil, errors.New("invalid Redfish computer system response")
-	}
+	snapshot.hardwareDetails = t.collectDetails(ctx, raw)
 	return json.Marshal(snapshot)
 }
 

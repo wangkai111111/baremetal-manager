@@ -22,3 +22,26 @@ var TargetSQL string
 //
 //go:embed 004_mode_system.sql
 var ModeSystemSQL string
+
+//go:embed 005_asset_datacenter.sql
+var AssetDatacenterSQL string
+
+//go:embed 006_bmc_tls_verify_default.sql
+var BMCTLSVerifyDefaultSQL string
+
+//go:embed 007_redfish_monitoring.sql
+var RedfishMonitoringSQL string
+
+//go:embed 008_asset_subscriptions.sql
+var AssetSubscriptionsSQL string
+
+//go:embed 009_subscription_safety.sql
+var SubscriptionSafetySQL string
+
+//go:embed 010_subscription_balance_payment.sql
+var SubscriptionBalancePaymentSQL string
+
+// GovernanceSQL 是第 11 阶段迁移：租户审核状态机、告警四级分级与屏蔽、工单回复、批量运维任务框架。
+//
+//go:embed 011_governance_phase56.sql
+var GovernanceSQL string

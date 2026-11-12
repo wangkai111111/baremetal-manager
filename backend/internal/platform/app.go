@@ -2,6 +2,8 @@ package platform
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -53,8 +55,48 @@ func New(db *gorm.DB) (*App, error) {
 	if complete, err := IsSetupComplete(db); err == nil {
 		a.setupComplete = complete
 	}
+	// 历史数据兼容：部署模式一经初始化即视为锁定，补齐早期版本未写入的 locked 标记，
+	// 否则已初始化的存量系统仍能通过 /settings 改写 platform.operation_mode。
+	if a.setupComplete {
+		if locked, err := IsModeLocked(db); err == nil && !locked {
+			if err := LockMode(db); err == nil {
+				InvalidateModeCache()
+			}
+		}
+	}
+	// 为存量数据库补齐新增权限条目（幂等，不影响已有数据）
+	seedPermissions(db)
 	a.router = a.routes()
 	return a, nil
+}
+
+// seedPermissions 确保新增资源权限条目存在于 permissions 表中。
+// 仅对存量数据库有效（全新安装由 bootstrap 负责）；使用 INSERT ... WHERE NOT EXISTS 保证幂等。
+func seedPermissions(db *gorm.DB) {
+	newResources := []string{"work_orders", "products", "orders", "billing", "finance", "marketing", "departments"}
+	actions := []string{"read", "write", "operate", "access", "manage"}
+	for _, res := range newResources {
+		for _, act := range actions {
+			code := res + ":" + act
+			db.Exec(
+				"INSERT INTO permissions(code,name,resource,action,create_by,update_by) SELECT ?,?,?,?,0,0 WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE code=? AND deleted_at IS NULL)",
+				code, code, res, act, code,
+			)
+		}
+	}
+	// 将新增权限自动授予 manager 角色（若存在），保证管理员功能不受影响
+	var managerRole struct{ ID, TenantID int64 }
+	if err := db.Table("roles").Select("id, tenant_id").Where("code=? AND deleted_at IS NULL", "manager").Limit(1).Scan(&managerRole).Error; err == nil && managerRole.ID > 0 {
+		for _, res := range newResources {
+			for _, act := range actions {
+				code := res + ":" + act
+				db.Exec(
+					"INSERT INTO role_permissions(tenant_id,role_id,permission_id,create_by,update_by) SELECT r.tenant_id, r.id, p.id, 0, 0 FROM roles r JOIN permissions p ON p.code=? AND p.deleted_at IS NULL WHERE r.id=? AND r.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.deleted_at IS NULL)",
+					code, managerRole.ID,
+				)
+			}
+		}
+	}
 }
 func (a *App) Router() *gin.Engine { return a.router }
 func ok(c *gin.Context, data any)  { c.JSON(200, gin.H{"code": 0, "data": data, "message": "success"}) }
@@ -162,15 +204,133 @@ func (a *App) login(c *gin.Context) {
 		return
 	}
 	a.store.db.Table("users").Where("id=?", u.ID).Update("last_login_at", now)
-	ok(c, gin.H{"token": token, "user": u})
+	// 登录响应携带完整上下文（权限/项目/角色），供前端菜单与路由守卫使用；
+	// 若仅返回裸 user 行，非平台管理员（租户用户）会因拿不到 permissions 而看到空侧边栏。
+	ok(c, gin.H{"token": token, "user": a.buildUserContext(u, 0)})
+}
+
+// authMe 返回当前用户身份 + 前端渲染权限化导航所需的全部上下文：
+// 可访问项目、当前项目的有效权限码、角色。历史实现只回传裸 user 行，
+// 导致运营模式下的新注册租户拿不到任何 permissions，侧边栏被权限过滤清空。
+func (a *App) authMe(c *gin.Context) {
+	u := current(c)
+	projectID := number(c.Query("project_id"))
+	if projectID == 0 {
+		projectID = number(c.GetHeader("X-Project-ID"))
+	}
+	ok(c, a.buildUserContext(u, projectID))
+}
+
+// buildUserContext 组装用户上下文。平台管理员短路：前端把 is_platform_admin 视为
+// “拥有全部权限”，因此无需展开成员/权限联表；其余用户按成员关系解析实际权限。
+func (a *App) buildUserContext(u user, projectID int64) gin.H {
+	out := gin.H{
+		"id":                u.ID,
+		"username":          u.Username,
+		"name":              u.Name,
+		"email":             u.Email,
+		"is_platform_admin": u.IsPlatformAdmin,
+		"role":              "user",
+		"project_ids":       []int64{},
+		"permissions":       []string{},
+		"memberships":       []gin.H{},
+	}
+	if u.IsPlatformAdmin {
+		out["role"] = "admin"
+		return out
+	}
+
+	// 租户归属：自助注册的租户用户通常仅属于一个租户，取最早的一条作为默认作用域。
+	var tenant struct{ ID int64 }
+	if a.store.db.Table("tenant_memberships").Select("tenant_id AS id").
+		Where("user_id=? AND status='active' AND deleted_at IS NULL", u.ID).
+		Order("tenant_id").Limit(1).Scan(&tenant).Error == nil && tenant.ID > 0 {
+		out["tenant_id"] = tenant.ID
+	}
+
+	// 可访问项目 + 每项目的角色码，过滤条件与 projects() 的成员判定保持一致。
+	type projRow struct {
+		ProjectID int64  `gorm:"column:project_id"`
+		TenantID  int64  `gorm:"column:tenant_id"`
+		Role      string `gorm:"column:role"`
+	}
+	var projects []projRow
+	a.store.db.Raw(`
+		SELECT DISTINCT m.project_id, p.tenant_id, r.code AS role
+		FROM memberships m
+		JOIN projects p ON p.id=m.project_id AND p.tenant_id=m.tenant_id AND p.status='active' AND p.deleted_at IS NULL
+		JOIN tenants t ON t.id=p.tenant_id AND t.status='active' AND t.deleted_at IS NULL
+		JOIN roles r ON r.id=m.role_id AND r.tenant_id=m.tenant_id AND r.deleted_at IS NULL
+		JOIN tenant_memberships tm ON tm.tenant_id=p.tenant_id AND tm.user_id=m.user_id AND tm.status='active' AND tm.deleted_at IS NULL
+		WHERE m.user_id=? AND m.deleted_at IS NULL
+		ORDER BY m.project_id`, u.ID).Scan(&projects)
+
+	ids := make([]int64, 0, len(projects))
+	memberships := make([]gin.H, 0, len(projects))
+	for _, pr := range projects {
+		ids = append(ids, pr.ProjectID)
+		memberships = append(memberships, gin.H{
+			"user_id":     u.ID,
+			"project_id":  pr.ProjectID,
+			"role":        pr.Role,
+			"permissions": a.effectivePermissions(pr.TenantID, pr.ProjectID, u.ID),
+		})
+	}
+	out["project_ids"] = ids
+	out["memberships"] = memberships
+
+	// 解析当前作用域项目：优先使用请求指定的可访问项目，否则回退首个可访问项目。
+	target, targetTenant, role := projectID, int64(0), ""
+	if target != 0 {
+		for _, pr := range projects {
+			if pr.ProjectID == target {
+				targetTenant, role = pr.TenantID, pr.Role
+				break
+			}
+		}
+		if targetTenant == 0 {
+			target = 0 // 请求的项目不可访问，视为未选择
+		}
+	}
+	if target == 0 && len(projects) > 0 {
+		target, targetTenant, role = projects[0].ProjectID, projects[0].TenantID, projects[0].Role
+	}
+	if role != "" {
+		out["role"] = role
+	}
+	out["permissions"] = a.effectivePermissions(targetTenant, target, u.ID)
+	return out
+}
+
+// effectivePermissions 计算某成员在指定 (tenant, project) 下的有效权限码集合。
+func (a *App) effectivePermissions(tenant, project, userID int64) []string {
+	codes := []string{}
+	if tenant == 0 || project == 0 {
+		return codes
+	}
+	var rows []struct {
+		Code string `gorm:"column:code"`
+	}
+	a.store.db.Raw(`
+		SELECT DISTINCT p.code
+		FROM memberships m
+		JOIN roles r ON r.id=m.role_id AND r.tenant_id=m.tenant_id AND r.deleted_at IS NULL
+		JOIN role_permissions rp ON rp.role_id=r.id AND rp.tenant_id=r.tenant_id AND rp.deleted_at IS NULL
+		JOIN permissions p ON p.id=rp.permission_id AND p.deleted_at IS NULL
+		WHERE m.tenant_id=? AND m.project_id=? AND m.user_id=? AND m.deleted_at IS NULL`,
+		tenant, project, userID).Scan(&rows)
+	for _, r := range rows {
+		codes = append(codes, r.Code)
+	}
+	return codes
 }
 func (a *App) password(c *gin.Context) {
 	var in struct {
 		OldPassword string `json:"old_password"`
 		NewPassword string `json:"new_password"`
 	}
-	if c.ShouldBindJSON(&in) != nil || len(in.NewPassword) < 12 || len(in.NewPassword) > 72 {
-		fail(c, 400, "password must contain 12 to 72 bytes")
+	if c.ShouldBindJSON(&in) != nil || len(in.NewPassword) < 6 || len(in.NewPassword) > 72 {
+		fail(c, 400, "password must contain 6 to 72 bytes")
 		return
 	}
 	u := current(c)
@@ -219,118 +379,123 @@ func (a *App) setupStatus(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{
-		"initialized": a.setupComplete,
+		"initialized": mode != "",
 		"mode":        mode,
 		"locked":      locked,
 	})
 }
 
-// setupMode 设置系统部署模式（需要管理员权限）。
-// POST /api/v1/setup/mode
-func (a *App) setupMode(c *gin.Context) {
-	if !current(c).IsPlatformAdmin {
-		fail(c, 403, "需要平台管理员权限")
-		return
+func setupCredentials(username, password string) (string, string, bool, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = "admin"
 	}
-	if a.setupComplete {
-		fail(c, 400, "系统模式已初始化，不可重复设置")
-		return
+	if len(username) < 3 {
+		return "", "", false, errors.New("用户名至少 3 个字符")
 	}
-	var in struct {
-		Mode string `json:"mode"`
+	if password != "" {
+		if len(password) < 6 || len(password) > 72 {
+			return "", "", false, errors.New("密码必须为 6 到 72 字节")
+		}
+		return username, password, false, nil
 	}
-	if c.ShouldBindJSON(&in) != nil || in.Mode == "" {
-		fail(c, 400, "请提供有效的系统模式")
-		return
+	var random [24]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", "", false, errors.New("安全随机密码生成失败")
 	}
-	if err := InitializeMode(a.store.db, in.Mode); err != nil {
-		fail(c, 400, err.Error())
-		return
-	}
-	a.setupComplete = true
-	ok(c, gin.H{
-		"mode":     in.Mode,
-		"features": GetAvailableFeatures(in.Mode),
-	})
+	return username, base64.RawURLEncoding.EncodeToString(random[:]), true, nil
 }
 
-// setupConfig 完成系统初始化配置（需要管理员权限）。
-// POST /api/v1/setup/config
-// 请求体: {admin_username, admin_password, admin_email, bmc_network, datacenter_name}
+// setupConfig 原子创建首个管理员并锁定模式；仅未初始化时开放。
 func (a *App) setupConfig(c *gin.Context) {
-	if !current(c).IsPlatformAdmin {
-		fail(c, 403, "需要平台管理员权限")
-		return
-	}
+	c.Header("Cache-Control", "no-store")
 	var in struct {
-		AdminUsername   string `json:"admin_username"`
-		AdminPassword   string `json:"admin_password"`
-		AdminEmail      string `json:"admin_email"`
-		BMCNetwork      string `json:"bmc_network"`
-		DatacenterName  string `json:"datacenter_name"`
+		Mode           string `json:"mode"`
+		AdminUsername  string `json:"admin_username"`
+		AdminPassword  string `json:"admin_password"`
+		AdminEmail     string `json:"admin_email"`
+		BMCNetwork     string `json:"bmc_network"`
+		DatacenterName string `json:"datacenter_name"`
 	}
 	if c.ShouldBindJSON(&in) != nil {
 		fail(c, 400, "请求参数无效")
 		return
 	}
-	// 验证必填字段
-	if in.AdminUsername == "" || in.AdminPassword == "" {
-		fail(c, 400, "管理员用户名和密码为必填项")
+	if in.Mode != ModeSelfUse && in.Mode != ModeExternalOperation {
+		fail(c, 400, "请选择有效的系统模式")
 		return
 	}
-	if len(in.AdminPassword) < 12 || len(in.AdminPassword) > 72 {
-		fail(c, 400, "密码长度必须在12到72字节之间")
+	username, password, generated, err := setupCredentials(in.AdminUsername, in.AdminPassword)
+	if err != nil {
+		fail(c, 400, err.Error())
 		return
 	}
 
-	err := a.store.db.Transaction(func(tx *gorm.DB) error {
-		// 1. 创建或更新超级管理员用户
-		if in.AdminUsername != "" {
-			hash, e := bcrypt.GenerateFromPassword([]byte(in.AdminPassword), bcrypt.DefaultCost)
-			if e != nil {
-				return errors.New("密码加密失败")
-			}
-			var existingUser struct{ ID int64 }
-			e = tx.Table("users").Select("id").Where("lower(username)=lower(?) AND deleted_at IS NULL", in.AdminUsername).Scan(&existingUser.ID).Error
-			if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
-				return e
-			}
-			if existingUser.ID > 0 {
-				// 更新现有管理员密码
-				updates := map[string]any{"password_hash": string(hash), "status": "active"}
-				if in.AdminEmail != "" {
-					updates["email"] = in.AdminEmail
-				}
-				if e := tx.Table("users").Where("id=?", existingUser.ID).Updates(updates).Error; e != nil {
-					return e
-				}
-			} else {
-				// 创建新的超级管理员
-				email := in.AdminEmail
-				if email == "" {
-					email = in.AdminUsername + "@localhost"
-				}
-				userRow := map[string]any{
-					"username":          in.AdminUsername,
-					"password_hash":     string(hash),
-					"name":              in.AdminUsername,
-					"email":             email,
-					"role":              "admin",
-					"status":            "active",
-					"is_platform_admin": true,
-				}
-				if e := tx.Table("users").Create(&userRow).Error; e != nil {
-					return e
-				}
-			}
+	var adminID int64
+	errSetupClosed := errors.New("系统已初始化或已有管理员，不可重复初始化")
+	err = a.store.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(684219733)").Error; err != nil {
+			return err
+		}
+		complete, err := IsSetupComplete(tx)
+		if err != nil {
+			return err
+		}
+		var admins int64
+		if err := tx.Table("users").Where("is_platform_admin = true").Count(&admins).Error; err != nil {
+			return err
+		}
+		if complete || admins > 0 {
+			return errSetupClosed
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return err
+		}
+		email := in.AdminEmail
+		if email == "" {
+			email = username + "@localhost"
+		}
+		if err := tx.Raw("INSERT INTO users(username,password_hash,name,email,is_platform_admin) VALUES (?,?,?,?,true) RETURNING id", username, string(hash), username, email).Scan(&adminID).Error; err != nil {
+			return err
+		}
+		var project struct{ ID, TenantID int64 }
+		if err := tx.Table("projects").Select("id,tenant_id").Where("deleted_at IS NULL AND status='active'").Order("id").Take(&project).Error; err != nil {
+			return err
+		}
+		var roleID int64
+		if err := tx.Table("roles").Select("id").Where("tenant_id=? AND code='manager' AND deleted_at IS NULL", project.TenantID).Take(&roleID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("INSERT INTO tenant_memberships(tenant_id,user_id,create_by,update_by) VALUES (?,?,?,?)", project.TenantID, adminID, adminID, adminID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("INSERT INTO memberships(tenant_id,project_id,user_id,role_id,create_by,update_by) VALUES (?,?,?,?,?,?)", project.TenantID, project.ID, adminID, roleID, adminID, adminID).Error; err != nil {
+			return err
+		}
+		if err := tx.Table("projects").Where("id=?", project.ID).Update("owner_id", adminID).Error; err != nil {
+			return err
+		}
+		if err := InitializeMode(tx, in.Mode); err != nil {
+			return err
+		}
+		if err := LockMode(tx); err != nil {
+			return err
+		}
+		settingMode := "self_hosted"
+		if in.Mode == ModeExternalOperation {
+			settingMode = "external"
+		}
+		if err := tx.Exec("INSERT INTO system_settings(key,value,create_by) VALUES ('platform.operation_mode',to_jsonb(?::text),?) ON CONFLICT (key) WHERE deleted_at IS NULL DO UPDATE SET value=EXCLUDED.value", settingMode, adminID).Error; err != nil {
+			return err
 		}
 
 		// 2. 存储 BMC 网络配置到 system_settings
 		if in.BMCNetwork != "" {
 			data, _ := json.Marshal(in.BMCNetwork)
 			if e := tx.Exec(
-				"INSERT INTO system_settings(key,value,create_by) VALUES (? (?),?) ON CONFLICT (key) WHERE deleted_at IS NULL DO UPDATE SET value=EXCLUDED.value",
-				"bmc.default_network", string(data), current(c).ID,
+				"INSERT INTO system_settings(key,value,create_by) VALUES (?,?::jsonb,?) ON CONFLICT (key) WHERE deleted_at IS NULL DO UPDATE SET value=EXCLUDED.value",
+				"bmc.default_network", string(data), adminID,
 			).Error; e != nil {
 				return e
 			}
@@ -344,8 +509,9 @@ func (a *App) setupConfig(c *gin.Context) {
 			if e == nil {
 				dcRow := map[string]any{
 					"name":       in.DatacenterName,
+					"tenant_id":  project.TenantID,
 					"project_id": project.ID,
-					"create_by":  current(c).ID,
+					"create_by":  adminID,
 				}
 				if e := tx.Table("datacenters").Create(&dcRow).Error; e != nil {
 					return e
@@ -356,10 +522,19 @@ func (a *App) setupConfig(c *gin.Context) {
 		return nil
 	})
 	if err != nil {
-		fail(c, 500, "系统配置初始化失败: "+err.Error())
+		if errors.Is(err, errSetupClosed) {
+			fail(c, 409, errSetupClosed.Error())
+		} else {
+			fail(c, 500, "系统配置初始化失败")
+		}
 		return
 	}
-	ok(c, gin.H{"message": "系统配置初始化完成"})
+	InvalidateModeCache()
+	out := gin.H{"message": "系统配置初始化完成", "admin_username": username}
+	if generated {
+		out["generated_password"] = password
+	}
+	ok(c, out)
 }
 
 // requireSetup 中间件：检查系统是否已完成初始化设置。

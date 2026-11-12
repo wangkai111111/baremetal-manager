@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 机房管理页面 — 管理物理站点与容量信息
+// 机房管理页面 — 管理物理站点与联系信息
 import { computed, ref, watch } from 'vue'
 import {
   NButton,
@@ -8,7 +8,6 @@ import {
   NModal,
   NForm,
   NFormItem,
-  NInputNumber,
   NPopconfirm,
   useMessage
 } from 'naive-ui'
@@ -34,18 +33,14 @@ const saving = ref(false)
 const currentId = ref<string | number | null>(null)
 const form = ref<RecordData>({})
 
-// === 权限控制：仅 assets:write 可操作 ===
-const canWrite = computed(() => auth.can('assets:write'))
+// === 权限控制：仅 datacenters:write 可操作 ===
+const canWrite = computed(() => auth.can('datacenters:write'))
 
 // === 表格列定义 ===
 const columns = computed<DataTableColumns<RecordData>>(() => [
   { title: '机房名称', key: 'name', minWidth: 140 },
-  { title: '编码', key: 'code', minWidth: 100 },
   { title: '位置', key: 'location', minWidth: 140 },
   { title: '联系人', key: 'contact', minWidth: 120 },
-  { title: '容量', key: 'capacity', minWidth: 80 },
-  { title: '描述', key: 'description', minWidth: 180, ellipsis: { tooltip: true } },
-  { title: '创建时间', key: 'created_at', minWidth: 150 },
   ...(canWrite.value
     ? [
         {
@@ -117,11 +112,8 @@ async function save() {
   try {
     const payload = {
       name: form.value.name,
-      code: form.value.code || '',
       location: form.value.location || '',
-      description: form.value.description || '',
-      contact: form.value.contact || '',
-      capacity: form.value.capacity || 0
+      contact: form.value.contact || ''
     }
     if (currentId.value != null) {
       await resource.update('/datacenters', currentId.value, payload)
@@ -156,7 +148,7 @@ async function remove(row: RecordData) {
       <div>
         <div class="eyebrow dark">INFRASTRUCTURE / DATACENTERS</div>
         <h1>机房管理</h1>
-        <p>管理物理站点与机房容量信息</p>
+        <p>管理物理站点与联系信息</p>
       </div>
       <div class="head-actions">
         <n-button v-if="canWrite" type="primary" @click="openEdit()">+ 新建机房</n-button>
@@ -212,20 +204,11 @@ async function remove(row: RecordData) {
           <n-form-item label="机房名称" required>
             <n-input v-model:value="(form.name as string)" placeholder="请输入机房名称" />
           </n-form-item>
-          <n-form-item label="编码">
-            <n-input v-model:value="(form.code as string)" placeholder="请输入机房编码" />
-          </n-form-item>
           <n-form-item label="位置">
             <n-input v-model:value="(form.location as string)" placeholder="请输入机房位置" />
           </n-form-item>
           <n-form-item label="联系人">
             <n-input v-model:value="(form.contact as string)" placeholder="请输入联系人" />
-          </n-form-item>
-          <n-form-item label="容量（机柜数）">
-            <n-input-number v-model:value="(form.capacity as number)" :min="0" style="width: 100%" placeholder="请输入容量" />
-          </n-form-item>
-          <n-form-item label="描述" class="form-item-wide">
-            <n-input v-model:value="(form.description as string)" type="textarea" placeholder="请输入描述信息" />
           </n-form-item>
         </div>
         <div class="modal-actions">

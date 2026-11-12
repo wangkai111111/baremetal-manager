@@ -347,11 +347,11 @@ func (a *App) redeemCoupon(c *gin.Context) {
 		Name       string
 		Type       string
 		Value      float64
-		MinAmount  float64 `gorm:"column:min_amount"`
+		MinAmount  float64    `gorm:"column:min_amount"`
 		ValidFrom  *time.Time `gorm:"column:valid_from"`
 		ValidUntil *time.Time `gorm:"column:valid_until"`
-		UsageLimit *int  `gorm:"column:usage_limit"`
-		UsedCount  int   `gorm:"column:used_count"`
+		UsageLimit *int       `gorm:"column:usage_limit"`
+		UsedCount  int        `gorm:"column:used_count"`
 		Status     string
 	}
 	e := a.store.db.Table("coupons").

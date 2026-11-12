@@ -27,8 +27,6 @@ func permissionResource(table string) string {
 		return "audit"
 	case "asset_tags", "asset_hardwares", "discovery_candidates":
 		return "assets"
-	case "rack_labels":
-		return "racks"
 	// 双模式新增表权限映射
 	case "departments":
 		return "departments"
@@ -37,10 +35,8 @@ func permissionResource(table string) string {
 	case "orders":
 		return "orders"
 	case "bills":
-		return "finance"
-	case "accounts", "payments":
 		return "billing"
-	case "invoices":
+	case "accounts", "payments", "invoices":
 		return "finance"
 	case "coupons":
 		return "marketing"
@@ -51,7 +47,8 @@ func permissionResource(table string) string {
 }
 
 // resourceMode 返回资源所需的访问模式
-// 返回空字符串表示两种模式都可访问
+// 返回空字符串表示两种模式都可访问。
+// 注意：工单 work_orders 是两种模式共有的基础功能，不得在此登记为模式专有资源。
 func resourceMode(table string) string {
 	switch table {
 	case "departments":
@@ -73,14 +70,26 @@ func (a *App) routes() *gin.Engine {
 	v.GET("/docs/openapi.json", a.openAPI)
 	// 系统初始化设置状态接口（公开访问）
 	v.GET("/setup/status", a.setupStatus)
+	v.POST("/setup/config", a.setupConfig)
 	// 租户自助注册接口（公开访问，无需认证）
 	v.POST("/auth/register", a.registerTenant)
+	// ============================================================
+	// PXE 交付接口：正在网络引导的机器不持有任何凭据，必须在 auth guard 之前公开注册。
+	// 磁盘侧文件位于 {cfg.PXE.TFTPRoot}，下发范围由处理器限定在 netboot/iso/nocloud 三个子目录。
+	// ============================================================
+	prov := v.Group("/provision")
+	prov.GET("/netboot/*filepath", a.serveNetbootFile)
+	prov.GET("/iso/*filepath", a.serveISOFile)
+	prov.GET("/nocloud/:mac/:file", a.serveAutoinstall)
+	prov.POST("/install-callback/:token", a.installCallback)
+	// 共享路径契约要求这些文件同时可直接以 {cfg.PXE.HTTPBase}/netboot|iso|nocloud 访问，
+	// 因此在不加任何中间件的引擎根上再挂一组等价别名（iPXE 脚本里写死的就是这些短路径）。
+	r.GET("/netboot/*filepath", a.serveNetbootFile)
+	r.GET("/iso/*filepath", a.serveISOFile)
+	r.GET("/nocloud/:mac/:file", a.serveAutoinstall)
 	auth := v.Group("")
 	auth.Use(a.guard)
-	// 系统初始化设置接口（需要管理员认证）
-	auth.POST("/setup/mode", a.setupMode)
-	auth.POST("/setup/config", a.setupConfig)
-	auth.GET("/auth/me", func(c *gin.Context) { ok(c, current(c)) })
+	auth.GET("/auth/me", a.authMe)
 	auth.PUT("/auth/password", a.password)
 	auth.GET("/tenants", a.tenants)
 	auth.POST("/tenants", a.createTenant)
@@ -102,12 +111,19 @@ func (a *App) routes() *gin.Engine {
 		p.GET("/"+res.path, append(modeMiddleware, a.require(code+":read"), a.listResource(resource))...)
 		p.GET("/"+res.path+"/:id", append(modeMiddleware, a.require(code+":read"), a.getResource(resource))...)
 		if !res.readonly {
-			if res.table == "images" {
+			if res.table == "alert_channels" {
+				p.POST("/"+res.path, a.require("alerts:write"), a.writeChannel(true))
+			} else if res.table == "images" {
 				p.POST("/"+res.path, append(modeMiddleware, a.require("images:write"), a.createImage)...)
 			} else {
 				p.POST("/"+res.path, append(modeMiddleware, a.require(code+":write"), a.writeResource(resource, true))...)
 			}
-			p.PUT("/"+res.path+"/:id", append(modeMiddleware, a.require(code+":write"), a.writeResource(resource, false))...)
+			if res.table == "alert_channels" {
+				p.PUT("/"+res.path+"/:id", a.require("alerts:write"), a.writeChannel(false))
+				p.POST("/"+res.path+"/:id/test", a.require("alerts:write"), a.testChannel)
+			} else {
+				p.PUT("/"+res.path+"/:id", append(modeMiddleware, a.require(code+":write"), a.writeResource(resource, false))...)
+			}
 			p.DELETE("/"+res.path+"/:id", append(modeMiddleware, a.require(code+":write"), a.deleteResource(resource))...)
 		}
 	}
@@ -116,11 +132,16 @@ func (a *App) routes() *gin.Engine {
 	// 部门管理自定义路由（自用模式）
 	// ============================================================
 	deptSelfUse := []gin.HandlerFunc{a.requireSelfUse()}
+	p.GET("/departments", append(deptSelfUse, a.require("departments:read"), a.listDepartments)...)
+	p.POST("/departments", append(deptSelfUse, a.require("departments:write"), a.createDepartment)...)
+	p.PUT("/departments/:id", append(deptSelfUse, a.require("departments:write"), a.updateDepartment)...)
+	p.DELETE("/departments/:id", append(deptSelfUse, a.require("departments:write"), a.deleteDepartment)...)
 	p.GET("/departments/:id/stats", append(deptSelfUse, a.require("departments:read"), a.getDepartmentStats)...)
 
 	// ============================================================
 	// 资产折旧与维保告警路由（自用模式）
 	// ============================================================
+	p.GET("/assets/depreciation", append(deptSelfUse, a.require("assets:read"), a.listAssetDepreciation)...)
 	p.GET("/assets/:id/depreciation", append(deptSelfUse, a.require("assets:read"), a.getAssetDepreciation)...)
 	p.GET("/assets/warranty-alerts", append(deptSelfUse, a.require("assets:read"), a.listWarrantyAlerts)...)
 
@@ -182,7 +203,7 @@ func (a *App) routes() *gin.Engine {
 	p.POST("/coupons/:code/redeem", append(externalOp, a.require("orders:write"), a.redeemCoupon)...)
 
 	// ============================================================
-	// 工单管理路由（两种模式通用）
+	// 工单管理路由（两种模式通用：只保留认证 + 权限中间件，不加任何模式门禁）
 	// ============================================================
 	p.GET("/work-orders", a.require("work_orders:read"), a.listWorkOrders)
 	p.POST("/work-orders", a.require("work_orders:write"), a.createWorkOrder)
@@ -198,7 +219,14 @@ func (a *App) routes() *gin.Engine {
 	p.GET("/images/:id/download", a.require("images:read"), a.downloadImage)
 	p.POST("/alerts/:id/:transition", a.require("alerts:write"), a.alertTransition)
 	p.POST("/assets/:id/actions", a.action)
+	p.POST("/assets/batch-actions", a.batchActions)
+	p.GET("/assets/:id/subscription/preview", append(externalOp, a.require("orders:read"), a.subscriptionPreview)...)
+	p.POST("/assets/:id/subscription/unsubscribe", append(externalOp, a.require("orders:write"), a.require("finance:write"), a.unsubscribeAsset)...)
+	p.POST("/orders/:id/pay-balance", append(externalOp, a.require("orders:write"), a.require("finance:write"), a.paySubscriptionOrder)...)
+	p.POST("/assets/subscription/batch-renew", append(externalOp, a.require("orders:write"), a.batchRenewSubscriptions)...)
+	p.POST("/assets/subscription/batch-unsubscribe", append(externalOp, a.require("orders:write"), a.require("finance:write"), a.batchUnsubscribeSubscriptions)...)
 	p.POST("/assets/:id/collect", a.require("assets:operate"), a.collect)
+	p.GET("/assets/:id/collection", a.require("assets:read"), a.collection)
 	p.GET("/assets/:id/sol", a.require("sol:access"), a.sol)
 	p.POST("/assets/:id/sol-ticket", a.require("sol:access"), a.solTicket)
 	p.POST("/assets/:id/install", a.require("install:operate"), unsupported)

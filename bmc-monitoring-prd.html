@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BMC 自动采集与告警｜产品需求</title>
+<style>
+:root{color-scheme:light;font:16px/1.65 system-ui,sans-serif;color:#142332;background:#eef2f5}*{box-sizing:border-box}main{max-width:960px;margin:auto;padding:48px 24px 64px}header{border-bottom:3px solid #126e62;padding-bottom:24px}h1{font-size:clamp(1.85rem,5vw,3rem);line-height:1.2;margin:.25em 0}h2{margin-top:2em}h3{margin-bottom:0}p{margin:.45em 0 1em}.label{color:#126e62;font-weight:750}.note{background:#fff;border-left:4px solid #126e62;padding:12px 16px}.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;background:#fff}th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid #d9e1e7}th{background:#dfe9ec}summary{cursor:pointer;font-weight:bold}small{color:#465563}
+</style>
+</head>
+<body><main>
+<header><span class="label">产品需求 · 采集阈值与渠道验收规则已确认</span><h1>BMC 自动采集与告警</h1><p>服务器登记后自动获取硬件与健康信息，此后每 5 分钟检查一次。异常进入告警中心，并通过已配置渠道推送给运维人员。</p></header>
+<section><h2>范围与边界</h2><p>覆盖自用与对外运营两种模式的远程管理端。只读取已登记服务器的 BMC；批量添加时，每台登记成功且符合条件的服务器独立处理，不另行探测未登记地址，不触发电源操作，不涉及固件、外设驱动或本地显示屏。</p><p>目前有效采集为 Redfish 硬件摘要，现有告警记录、规则和渠道可供复用，但尚无自动投递闭环。本期以 Redfish 支持的字段为准；IPMI 服务器明确显示暂不支持自动硬件采集，不将协议不支持视为故障。</p></section>
+<section><h2>功能、依赖与验收</h2><div class="scroll"><table><thead><tr><th scope="col">优先级 / 功能</th><th scope="col">规则与依赖</th><th scope="col">验收标准</th></tr></thead><tbody>
+<tr><td>P0 · FR-01<br>首次采集</td><td>服务器保存成功后自动进入异步采集，单条与批量添加一致。依赖已登记的 BMC 地址、协议、端口及凭据；不阻塞保存。失败时保留资产，详情展示采集失败与可读原因，不展示密码。</td><td>添加一台支持的设备后无需点击“采集”；批量添加中只有登记成功且支持的设备进入任务。BMC 不可达时，服务器仍在列表中。</td></tr>
+<tr><td>P0 · FR-02<br>周期采集</td><td>首次采集后每 5 分钟检查；已纳管且满足条件的服务器同样进入周期。单台设备同一时刻只执行一次采集，超时后释放任务，积压不补跑所有错过的轮次。停止纳管后不再调度。依赖后台任务服务可用。</td><td>关闭浏览器后仍继续采集；任务未结束时不叠加；后台重启后能继续检查。5 分钟是调度周期，任务排队或 BMC 超时时不承诺固定完成时间。</td></tr>
+<tr><td>P0 · FR-03<br>异常与恢复</td><td>基于 Redfish 明确返回的健康状态识别警告和严重异常；采集失败与设备健康异常分开记录。没有健康字段时显示未知，不判为正常。连续两次采集失败才触发采集类告警，避免瞬时网络波动；任一次成功后清零连续失败计数，并恢复该类告警。</td><td>模拟健康异常、持续异常和恢复：同设备同类异常只有一条活动告警，不随每轮重复新增；严重级别上升更新原告警；明确恢复后可再次触发。一次临时失败按建议规则仅显示采集失败。</td></tr>
+<tr><td>P0 · FR-04<br>告警投递</td><td>产生或升级告警时按匹配规则向已启用、已配置的渠道推送。无匹配渠道仍保留站内告警；发送失败不把告警标为已送达。依赖现有规则、渠道配置及相应投递能力；优先以现有 SMTP 配置验证闭环。</td><td>配置匹配规则和有效渠道后，新异常可实际收到通知；持续异常不重复推送。停用渠道后仅保留记录；错误渠道可区分发送失败和送达成功。通知不包含 BMC 凭据。</td></tr>
+<tr><td>P0 · FR-05<br>运维查看</td><td>服务器详情显示采集进度、最近成功时间和安全的失败原因；失败时保留上次成功摘要，不把旧信息标为最新。告警中心显示活动和已恢复告警，沿用项目、租户和权限隔离。</td><td>新登记、采集中、成功、失败、协议不支持均可区分；其他租户或无权项目的用户看不到相应结果和告警。</td></tr>
+</tbody></table></div></section>
+<section><h2>状态示意</h2><div class="note">登记成功 → 首次采集 → 每 5 分钟检查 → 正常则更新摘要，异常则更新告警并按规则推送。</div><details><summary>采集失败时管理员看到什么？</summary><p>详情展示本次失败和上次成功时间。单次失败不会被当成硬件故障；按建议阈值达到连续两次失败后，告警中心新增采集类告警。设备明确恢复时结束活动告警。</p></details></section>
+<section><h2>已确认规则与阶段交接</h2><p><strong>用户已确认：</strong>采集连续失败两次再告警，首期外部投递先验收 SMTP；其他渠道也需要先测试验证。每个渠道应区分未测试、测试成功、测试失败，记录最近测试时间及脱敏结果；未经实际验证不得宣称可用。SMTP 先完成真实收信验收，其他渠道逐个验证配置有效、实际接收和失败反馈，测试消息必须明确标为测试，不产生真实设备告警。</p><p>需求确认后，由 UI 明确服务器详情和告警记录的状态展示与交互；UI 定稿后，后端负责调度、健康判定、告警及投递，前端负责状态展示和联调。各阶段以本表验收项交接，不改动裸机固件。</p></section>
+</main></body></html>

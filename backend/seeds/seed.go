@@ -26,7 +26,7 @@ func SeedData(db *gorm.DB) error {
 		{Key: "brand.platform_tagline", Value: "BAREMETAL CONTROL PLANE", Description: "平台副标题", Category: "brand"},
 		{Key: "brand.logo_url", Value: "", Description: "平台 Logo（图片 URL 或 Base64 数据）", Category: "brand"},
 		{Key: "theme.nav_bg", Value: "#101e2b", Description: "导航栏背景色", Category: "theme"},
-		{Key: "theme.nav_text", Value: "#a9bbc7", Description: "导航栏文字颜色", Category: "theme"},
+		{Key: "theme.nav_text", Value: "#ffffff", Description: "导航栏文字颜色", Category: "theme"},
 		{Key: "app.footer_text", Value: "控制平面在线", Description: "侧边栏底部文案", Category: "app"},
 		{Key: "app.footer_visible", Value: "true", Description: "是否显示侧边栏底部状态", Category: "app"},
 	}

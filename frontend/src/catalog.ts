@@ -42,29 +42,14 @@ export const sections: Section[] = [
   {
     path: '/datacenters',
     title: '机房管理',
-    subtitle: '管理物理站点与容量',
+    subtitle: '管理物理站点与联系信息',
     api: '/datacenters',
     permission: 'datacenters:read',
     mode: 'both',
     fields: [
       field('name', '机房名称', true),
-      field('code', '编码'),
       field('location', '位置'),
-      field('description', '描述')
-    ]
-  },
-  {
-    path: '/racks',
-    title: '机柜管理',
-    subtitle: '追踪机柜空间与部署位置',
-    api: '/racks',
-    permission: 'racks:read',
-    mode: 'both',
-    fields: [
-      field('name', '机柜名称', true),
-      field('datacenter_id', '机房 ID'),
-      { ...field('height_u', '高度 (U)'), type: 'number' },
-      field('location', '位置')
+      field('contact', '联系人')
     ]
   },
   {
@@ -81,9 +66,10 @@ export const sections: Section[] = [
       { ...field('bmc_secret', 'BMC 密码'), type: 'password' },
       { ...field('bmc_port', 'BMC 端口'), type: 'number' },
       { ...field('bmc_protocol', 'BMC 协议'), type: 'select', options: ['redfish', 'ipmi'] },
-      field('management_ip', '管理 IP')
+      field('management_ip', '管理 IP'),
+      { ...field('datacenter_id', '机房'), type: 'select' }
     ],
-    columns: ['name', 'bmc_address', 'management_ip', 'status', 'power_state', 'created_at']
+    columns: ['name', 'bmc_address', 'management_ip', 'datacenter_id', 'status', 'created_at']
   },
   {
     path: '/images',
@@ -173,9 +159,9 @@ export const sections: Section[] = [
       field('name', '规则名称', true),
       field('metric', '监控指标', true),
       field('operator', '运算符', true),
-      field('threshold', '阈值', true),
-      field('severity', '告警等级', true),
-      field('time_window', '时间窗口(秒)')
+      { ...field('threshold', '阈值（collection_failed 留空）'), type: 'number' },
+      { ...field('severity', '告警等级', true), type: 'select', options: ['info', 'warning', 'critical'] },
+      { ...field('duration_seconds', '持续时间（内置监控请填 0）'), type: 'number' }
     ],
     columns: ['name', 'metric', 'threshold', 'severity', 'enabled', 'created_at']
   },
@@ -189,10 +175,11 @@ export const sections: Section[] = [
     mode: 'both',
     fields: [
       field('name', '渠道名称', true),
-      { ...field('type', '渠道类型'), type: 'select', options: ['wechat', 'dingtalk', 'webhook', 'email'] },
-      field('config', '配置(JSON)', true)
+      { ...field('kind', '渠道类型', true), type: 'select', options: ['email', 'webhook', 'lark'] },
+      { ...field('config', '非敏感配置(JSON)', true), type: 'json' },
+      { ...field('secret', 'SMTP 密码或 HTTPS Webhook 完整地址'), type: 'password' }
     ],
-    columns: ['name', 'type', 'enabled', 'created_at']
+    columns: ['name', 'kind', 'enabled', 'last_test_status', 'last_test_at', 'last_test_message', 'created_at']
   },
   // === 新增：Kickstart 装机模板 ===
   {
@@ -370,11 +357,14 @@ export const sections: Section[] = [
     mode: 'self_use',
     fields: [
       { ...field('asset_id', '资产 ID', true), type: 'number' },
-      field('method', '折旧方式'),
+      field('asset_name', '资产名称'),
+      field('depreciation_method', '折旧方式'),
       { ...field('useful_life_months', '使用年限（月）'), type: 'number' },
-      { ...field('residual_value', '残值'), type: 'number' }
+      { ...field('purchase_cost', '资产原值'), type: 'number' },
+      { ...field('salvage_value', '残值'), type: 'number' }
     ],
-    columns: ['asset_id', 'method', 'useful_life_months', 'residual_value', 'created_at']
+    columns: ['asset_id', 'asset_name', 'depreciation_method', 'purchase_cost', 'useful_life_months', 'salvage_value', 'created_at'],
+    readonly: true
   },
   // === 自用模式专属：维保告警 ===
   {
@@ -385,7 +375,7 @@ export const sections: Section[] = [
     permission: 'assets:read',
     mode: 'self_use',
     fields: [],
-    columns: ['asset_id', 'asset_name', 'warranty_expiry', 'days_remaining', 'status'],
+    columns: ['asset_id', 'name', 'warranty_expiry', 'days_remaining', 'status'],
     readonly: true
   },
   // === 对外运营模式专属：产品管理 ===
@@ -401,12 +391,15 @@ export const sections: Section[] = [
       field('description', '描述'),
       { ...field('spec_json', '规格配置'), type: 'json' },
       { ...field('pricing_json', '定价方案'), type: 'json' },
-      { ...field('billing_cycle', '计费周期'), type: 'select', options: ['monthly', 'quarterly', 'yearly', 'one-time'] },
-      { ...field('status', '状态'), type: 'select', options: ['active', 'inactive', 'draft'] }
+      { ...field('billing_cycle', '计费周期'), type: 'select', options: ['hourly', 'daily', 'monthly', 'yearly'] },
+      { ...field('status', '状态'), type: 'select', options: ['active', 'inactive', 'sold_out'] }
     ],
     columns: ['name', 'billing_cycle', 'status', 'created_at']
   },
   // === 对外运营模式专属：订单管理 ===
+  // 只读护栏：后端无 PUT /orders/:id 与 DELETE /orders/:id，写操作一律走
+  // POST /orders（下单）、PUT /orders/:id/:transition（流转）与 POST /orders/:id/pay-balance，
+  // 页面由专用 OrdersView 承载，ResourceView 仍需 readonly 以免命中 404。
   {
     path: '/orders',
     title: '订单管理',
@@ -415,15 +408,18 @@ export const sections: Section[] = [
     permission: 'orders:read',
     mode: 'external_operation',
     fields: [
-      { ...field('type', '订单类型'), type: 'select', options: ['new', 'renew', 'upgrade', 'add-on'] },
+      { ...field('type', '订单类型'), type: 'select', options: ['purchase', 'renew', 'upgrade', 'refund'] },
       { ...field('product_id', '产品 ID'), type: 'number' },
       { ...field('asset_id', '资产 ID'), type: 'number' },
       { ...field('amount', '金额'), type: 'number' },
-      { ...field('status', '状态'), type: 'select', options: ['pending', 'active', 'completed', 'cancelled', 'expired'] }
+      { ...field('status', '状态'), type: 'select', options: ['pending', 'paid', 'processing', 'completed', 'refunded', 'cancelled'] }
     ],
-    columns: ['type', 'product_id', 'asset_id', 'amount', 'status', 'created_at']
+    columns: ['type', 'product_id', 'asset_id', 'amount', 'status', 'created_at'],
+    readonly: true
   },
   // === 对外运营模式专属：账单管理 ===
+  // 只读护栏：后端仅有 GET /bills、GET /bills/:id、GET /bills/:id/export 与 POST /bills/generate，
+  // 不存在 POST/PUT/DELETE /bills/:id。
   {
     path: '/bills',
     title: '账单管理',
@@ -435,42 +431,51 @@ export const sections: Section[] = [
       field('period_start', '账期开始', true),
       field('period_end', '账期结束', true),
       { ...field('total_amount', '总金额'), type: 'number' },
-      { ...field('status', '状态'), type: 'select', options: ['draft', 'issued', 'paid', 'overdue', 'cancelled'] }
+      { ...field('status', '状态'), type: 'select', options: ['unpaid', 'paid', 'overdue'] }
     ],
-    columns: ['period_start', 'period_end', 'total_amount', 'status', 'created_at']
+    columns: ['period_start', 'period_end', 'total_amount', 'status', 'due_date', 'created_at'],
+    readonly: true
   },
   // === 对外运营模式专属：账户管理 ===
+  // 只读护栏：GET /accounts 返回单个账户对象（无 /accounts/:id），写入口仅有
+  // POST /accounts/recharge，因此不得出现新建/编辑/删除。
+  // 列与 accounts 表实际字段对齐（无 name / currency / status 列）。
   {
     path: '/accounts',
     title: '账户管理',
-    subtitle: '租户账户余额与充值',
+    subtitle: '租户账户余额与信用额度',
     api: '/accounts',
     permission: 'finance:read',
     mode: 'external_operation',
     fields: [
-      field('name', '账户名称', true),
-      { ...field('balance', '余额'), type: 'number' },
-      { ...field('credit_limit', '信用额度'), type: 'number' },
-      field('currency', '币种')
+      { ...field('balance', '可用余额'), type: 'number' },
+      { ...field('frozen_amount', '冻结金额'), type: 'number' },
+      { ...field('credit_limit', '信用额度'), type: 'number' }
     ],
-    columns: ['name', 'balance', 'credit_limit', 'currency', 'status']
+    columns: ['balance', 'frozen_amount', 'credit_limit', 'created_at', 'updated_at'],
+    readonly: true
   },
   // === 对外运营模式专属：支付记录 ===
+  // 只读护栏：后端仅有 GET /payments 与 POST /payments，无 GET/:id、PUT、DELETE。
+  // method 枚举含 010 迁移扩展的 balance（余额支付流水）。
   {
     path: '/payments',
     title: '支付记录',
-    subtitle: '支付流水与对账',
+    subtitle: '充值与余额支付流水对账',
     api: '/payments',
     permission: 'finance:read',
     mode: 'external_operation',
     fields: [
       { ...field('amount', '金额', true), type: 'number' },
-      { ...field('method', '支付方式'), type: 'select', options: ['bank_transfer', 'alipay', 'wechat', 'credit_card', 'balance'] },
-      { ...field('status', '状态'), type: 'select', options: ['pending', 'completed', 'failed', 'refunded'] }
+      { ...field('method', '支付方式'), type: 'select', options: ['alipay', 'wechat', 'transfer', 'balance'] },
+      { ...field('status', '状态'), type: 'select', options: ['pending', 'success', 'failed'] }
     ],
-    columns: ['amount', 'method', 'status', 'created_at']
+    columns: ['amount', 'method', 'status', 'transaction_id', 'paid_at', 'created_at'],
+    readonly: true
   },
   // === 对外运营模式专属：发票管理 ===
+  // 只读护栏：后端无 GET/PUT/DELETE /invoices/:id，仅有 POST /invoices 与
+  // PUT /invoices/:id/:status 流转；页面由专用 InvoiceView 承载。
   {
     path: '/invoices',
     title: '发票管理',
@@ -479,15 +484,17 @@ export const sections: Section[] = [
     permission: 'finance:read',
     mode: 'external_operation',
     fields: [
-      { ...field('type', '发票类型'), type: 'select', options: ['vat_normal', 'vat_special'] },
+      { ...field('type', '发票类型'), type: 'select', options: ['normal', 'special'] },
       field('title', '发票抬头', true),
       field('tax_number', '税号', true),
       { ...field('amount', '金额'), type: 'number' },
-      { ...field('status', '状态'), type: 'select', options: ['pending', 'issued', 'cancelled', 'rejected'] }
+      { ...field('status', '状态'), type: 'select', options: ['requested', 'issued', 'cancelled'] }
     ],
-    columns: ['type', 'title', 'tax_number', 'amount', 'status', 'created_at']
+    columns: ['type', 'title', 'tax_number', 'amount', 'status', 'created_at'],
+    readonly: true
   },
   // === 对外运营模式专属：优惠券 ===
+  // CRUD 契约完整（POST/PUT/DELETE /coupons、POST /coupons/:code/redeem），保持可写。
   {
     path: '/coupons',
     title: '优惠券',
@@ -498,27 +505,27 @@ export const sections: Section[] = [
     fields: [
       field('code', '优惠码', true),
       field('name', '活动名称', true),
-      { ...field('type', '优惠类型'), type: 'select', options: ['percentage', 'fixed', 'free_trial'] },
+      { ...field('type', '优惠类型'), type: 'select', options: ['fixed', 'percent'] },
       { ...field('value', '优惠值'), type: 'number' },
       field('valid_from', '生效时间'),
       field('valid_until', '失效时间')
     ],
     columns: ['code', 'name', 'type', 'value', 'valid_from', 'valid_until', 'status']
   },
-  // === 对外运营模式专属：工单管理 ===
+  // === 两种模式通用：工单系统（后端 work_orders 路由在 self_use / external_operation 下均开放） ===
   {
     path: '/work-orders',
     title: '工单管理',
     subtitle: '服务请求与故障处理',
     api: '/work-orders',
     permission: 'work_orders:read',
-    mode: 'external_operation',
+    mode: 'both',
     fields: [
-      { ...field('type', '工单类型'), type: 'select', options: ['incident', 'request', 'maintenance', 'inspection'] },
+      { ...field('type', '工单类型'), type: 'select', options: ['fault', 'technical', 'consultation', 'other'] },
       field('title', '标题', true),
       { ...field('description', '描述'), type: 'textarea' },
-      { ...field('status', '状态'), type: 'select', options: ['open', 'in_progress', 'waiting', 'resolved', 'closed'] },
-      { ...field('priority', '优先级'), type: 'select', options: ['low', 'medium', 'high', 'critical'] }
+      { ...field('status', '状态'), type: 'select', options: ['open', 'in_progress', 'resolved', 'closed'] },
+      { ...field('priority', '优先级'), type: 'select', options: ['low', 'medium', 'high', 'urgent'] }
     ],
     columns: ['type', 'title', 'status', 'priority', 'created_at']
   },
@@ -554,7 +561,6 @@ export const labels: Record<string, string> = {
   management_ip: '管理 IP',
   bmc_port: 'BMC 端口',
   bmc_protocol: 'BMC 协议',
-  rack_u_position: '机柜 U 位',
   power_state: '电源状态',
   tenant_id: '租户 ID',
   mac_address: 'MAC 地址',
@@ -568,8 +574,9 @@ export const labels: Record<string, string> = {
   serial_number: '序列号',
   bmc_ip: 'BMC IP',
   project_id: '项目 ID',
-  datacenter_id: '机房 ID',
-  rack_id: '机柜 ID',
+  datacenter_id: '机房',
+  location: '位置',
+  contact: '联系人',
   asset_id: '资产 ID',
   image_id: '镜像 ID',
   os_type: '操作系统',
@@ -623,9 +630,14 @@ export const labels: Record<string, string> = {
   period_start: '账期开始',
   period_end: '账期结束',
   total_amount: '总金额',
+  due_date: '到期日',
   balance: '余额',
+  frozen_amount: '冻结金额',
   credit_limit: '信用额度',
   currency: '币种',
+  transaction_id: '交易号',
+  paid_at: '支付时间',
+  issued_at: '开具时间',
   valid_from: '生效时间',
   valid_until: '失效时间',
   title: '标题',

@@ -14,8 +14,8 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		CurrentPassword string `json:"current_password"`
 		NewPassword     string `json:"new_password"`
 	}
-	if c.ShouldBindJSON(&in) != nil || len(in.NewPassword) < 12 {
-		fail(c, 400, "new password must be at least 12 characters")
+	if c.ShouldBindJSON(&in) != nil || len(in.NewPassword) < 6 {
+		fail(c, 400, "new password must be at least 6 characters")
 		return
 	}
 	var u model.User

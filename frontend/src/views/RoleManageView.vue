@@ -2,6 +2,7 @@
 // 角色权限管理页面 — 只读展示角色与权限分配矩阵
 import { ref, watch } from 'vue'
 import {
+  NButton,
   NDataTable,
   NTag,
   NCheckbox,

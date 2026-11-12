@@ -20,12 +20,10 @@ type resource struct {
 
 // 注册项为固定白名单；路由参数永远不参与表名或列名拼接。
 var resources = []resource{
-	{"assets", "assets", "name serial_number manufacturer model rack_id rack_u_position height_u bmc_address bmc_protocol bmc_port bmc_tls_verify bmc_user bmc_secret management_ip mac_address status purchase_date warranty_expiry vendor", "name bmc_address bmc_user bmc_secret", false},
+	{"assets", "assets", "name serial_number manufacturer model datacenter_id bmc_address bmc_protocol bmc_port bmc_tls_verify bmc_user bmc_secret management_ip mac_address status purchase_date warranty_expiry vendor", "name bmc_address bmc_user bmc_secret", false},
 	{"datacenters", "datacenters", "name location contact", "name", false},
-	{"racks", "racks", "name datacenter_id height_u", "name datacenter_id", false},
 	{"tags", "tags", "name color", "name", false},
 	{"asset-tags", "asset_tags", "asset_id tag_id", "asset_id tag_id", false},
-	{"rack-labels", "rack_labels", "rack_id key value", "rack_id key value", false},
 	{"networks", "networks", "name subnet gateway vlan_id dhcp_enabled", "name subnet", false},
 	{"ip-pools", "ip_pools", "network_id name start_address end_address", "network_id name start_address end_address", false},
 	{"ip-allocations", "ip_allocations", "network_id pool_id asset_id address mac_address status", "network_id address", false},
@@ -52,25 +50,30 @@ var resources = []resource{
 	{"alerts", "alerts", "", "", true}, {"alert-events", "alert_events", "", "", true}, {"notification-deliveries", "notification_deliveries", "", "", true},
 	{"discovery-candidates", "discovery_candidates", "", "", true}, {"sol-sessions", "sol_sessions", "", "", true}, {"audit", "audits", "", "", true},
 
-	// 双模式新增资源：部门管理（自用模式）
-	{"departments", "departments", "name parent_id description", "name", false},
 	// 以下资源已迁移至自定义处理器（租户级作用域），不再使用通用 CRUD：
-	// products, orders, bills, accounts, payments, invoices, coupons, work_orders
+	// departments, products, orders, bills, accounts, payments, invoices, coupons, work_orders
 	// 自定义处理器位于同目录下对应的 .go 文件中
 }
-var references = map[string]string{"rack_id": "racks", "datacenter_id": "datacenters", "asset_id": "assets", "tag_id": "tags", "network_id": "networks", "pool_id": "ip_pools", "image_id": "images", "image_template_id": "image_templates", "kickstart_template_id": "kickstart_templates", "partition_template_id": "partition_templates", "install_plan_id": "install_plans", "script_id": "post_install_scripts", "firmware_package_id": "firmware_packages", "rule_id": "alert_rules", "channel_id": "alert_channels", "window_id": "maintenance_windows"}
+var references = map[string]string{"datacenter_id": "datacenters", "asset_id": "assets", "tag_id": "tags", "network_id": "networks", "pool_id": "ip_pools", "image_id": "images", "image_template_id": "image_templates", "kickstart_template_id": "kickstart_templates", "partition_template_id": "partition_templates", "install_plan_id": "install_plans", "script_id": "post_install_scripts", "firmware_package_id": "firmware_packages", "rule_id": "alert_rules", "channel_id": "alert_channels", "window_id": "maintenance_windows"}
 var jsonFields = map[string]bool{"config": true, "layout": true, "compatible_models": true, "metrics": true, "selector": true, "spec_json": true, "pricing_json": true, "detail_json": true}
-var hidden = " - 'bmc_secret_ciphertext' - 'bmc_secret_key_id' - 'password_hash' - 'secret_ciphertext' - 'secret_key_id' - 'callback_token_hash' - 'config_snapshot' - 'redfish_snapshot' - 'snapshot' - 'payload' - 'result' - 'before_snapshot' - 'after_snapshot'"
+var hidden = " - 'bmc_secret_ciphertext' - 'bmc_secret_key_id' - 'password_hash' - 'secret_ciphertext' - 'secret_key_id' - 'test_claim_until' - 'callback_token_hash' - 'config_snapshot' - 'redfish_snapshot' - 'snapshot' - 'payload' - 'result' - 'before_snapshot' - 'after_snapshot'"
 
 func queryScope(db *gorm.DB, r resource, sc scope) *gorm.DB {
 	q := db.Table(r.table).Where("tenant_id=? AND project_id=? AND deleted_at IS NULL", sc.Tenant, sc.Project)
 	if sc.Admin {
 		return q
 	}
+	// 数据隔离唯一权威源：GetSystemMode()（system_modes 表）；
+	// 仅运营模式（external_operation）需要按已交付购买订单过滤，
+	// 自用模式（self_use）或未初始化时不做隔离。
+	mode := currentSystemMode(db)
+	if mode != ModeExternalOperation {
+		return q
+	}
 	var ownership *gorm.DB
 	switch r.table {
 	case "assets":
-		return q.Where("(NOT EXISTS (SELECT 1 FROM system_settings WHERE key=? AND value=?::jsonb AND deleted_at IS NULL) OR create_by=?)", "platform.operation_mode", `"external"`, sc.User)
+		return q.Where("COALESCE(assets.subscription_state,'legacy') <> 'reclaim_pending'").Where("EXISTS (SELECT 1 FROM orders WHERE orders.asset_id=assets.id AND orders.tenant_id=? AND orders.type='purchase' AND orders.status='completed' AND orders.deleted_at IS NULL)", sc.Tenant)
 	case "asset_tags", "ip_allocations", "asset_monitor_configs", "maintenance_window_assets", "asset_hardwares", "firmware_inventories", "operations", "installations", "firmware_upgrades", "sensor_records", "alerts", "sol_sessions":
 		ownership = queryScope(db.Session(&gorm.Session{NewDB: true}), resource{table: "assets"}, sc).Select("id")
 	case "operation_logs":
@@ -95,7 +98,7 @@ func queryScope(db *gorm.DB, r resource, sc scope) *gorm.DB {
 	case "notification_deliveries":
 		field = "alert_event_id"
 	}
-	return q.Where("(NOT EXISTS (SELECT 1 FROM system_settings WHERE key=? AND value=?::jsonb AND deleted_at IS NULL) OR "+field+" IN (?))", "platform.operation_mode", `"external"`, ownership)
+	return q.Where(field+" IN (?)", ownership)
 }
 func decodeRows(db *gorm.DB, r resource) ([]map[string]any, error) {
 	var rows []struct{ Doc string }
@@ -127,6 +130,98 @@ func page(c *gin.Context) (int, int) {
 	}
 	return p, n
 }
+
+// 订单按租户隔离，asset_id 将交付关系关联到当前项目的资产。
+const assetDisplayStatusSQL = `COALESCE((
+ SELECT CASE WHEN op.status IN ('pending','retry_wait') THEN 'queued'
+  WHEN op.kind='power_on' THEN 'starting'
+  WHEN op.kind='power_off' THEN 'stopping'
+  WHEN op.kind='power_cycle' THEN 'restarting'
+  WHEN op.kind='collect' AND assets.collected_at IS NULL THEN 'managing'
+  WHEN op.kind='collect' THEN 'collecting'
+  WHEN op.kind='install' THEN 'reinstalling'
+  WHEN op.kind='firmware_upgrade' THEN 'upgrading' END
+ FROM operations op
+ WHERE op.tenant_id=assets.tenant_id AND op.project_id=assets.project_id
+  AND op.asset_id=assets.id AND op.deleted_at IS NULL
+  AND op.status IN ('running','pending','retry_wait')
+  AND op.kind IN ('power_on','power_off','power_cycle','collect','install','firmware_upgrade')
+ ORDER BY CASE WHEN op.status='running' THEN 0 ELSE 1 END, op.created_at DESC, op.id DESC LIMIT 1
+), CASE
+ WHEN assets.status IN ('maintenance','retired') THEN assets.status
+ WHEN assets.collected_at IS NULL AND COALESCE(assets.collection_error,'')<>'' THEN 'error'
+ WHEN (SELECT op.status='unknown' AND op.created_at>COALESCE(assets.collected_at,assets.created_at)
+  FROM operations op
+  WHERE op.tenant_id=assets.tenant_id AND op.project_id=assets.project_id
+   AND op.asset_id=assets.id AND op.deleted_at IS NULL
+   AND op.kind IN ('power_on','power_off','power_cycle')
+  ORDER BY op.created_at DESC, op.id DESC LIMIT 1) THEN 'unknown'
+ WHEN assets.power_state='off' THEN 'stopped'
+ WHEN assets.power_state='on' AND EXISTS (SELECT 1 FROM orders
+  WHERE orders.tenant_id=assets.tenant_id AND orders.asset_id=assets.id
+   AND orders.type='purchase' AND orders.status='completed' AND orders.deleted_at IS NULL) THEN 'in_use'
+ WHEN assets.power_state='on' THEN 'running'
+ WHEN assets.collected_at IS NULL AND assets.status='unknown' THEN 'pending_management'
+ WHEN assets.status='offline' THEN 'offline'
+ ELSE 'unknown' END)`
+
+func assetSearchCondition(field string) (string, error) {
+	fields := []string{"id", "name", "bmc_address", "management_ip", "serial_number", "manufacturer", "model", "datacenter"}
+	conditions := make([]string, 0, len(fields))
+	for _, key := range fields {
+		condition := "assets." + key + " ILIKE ?"
+		switch key {
+		case "id":
+			condition = "assets.id::text ILIKE ?"
+		case "bmc_address", "management_ip":
+			condition = "host(assets." + key + ") ILIKE ?"
+		case "datacenter":
+			condition = `EXISTS (SELECT 1 FROM datacenters dc WHERE dc.id=assets.datacenter_id
+    AND dc.tenant_id=assets.tenant_id AND dc.project_id=assets.project_id
+    AND dc.deleted_at IS NULL AND dc.name ILIKE ?)`
+		}
+		if field == key {
+			return condition, nil
+		}
+		conditions = append(conditions, condition)
+	}
+	if field == "auto" {
+		return "(" + strings.Join(conditions, " OR ") + ")", nil
+	}
+	return "", errors.New("invalid search_field")
+}
+
+func assetListQuery(q *gorm.DB, condition, search, tags, status string, datacenterID int64) *gorm.DB {
+	if search = strings.TrimSpace(search); search != "" {
+		args := make([]any, strings.Count(condition, "?"))
+		for i := range args {
+			args[i] = "%" + search + "%"
+		}
+		q = q.Where(condition, args...)
+	}
+	if datacenterID > 0 {
+		q = q.Where("assets.datacenter_id=?", datacenterID)
+	}
+	names := []string{}
+	for _, name := range strings.Split(tags, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) > 0 {
+		q = q.Where(`EXISTS (SELECT 1 FROM asset_tags at JOIN tags t ON t.id=at.tag_id
+   AND t.tenant_id=at.tenant_id AND t.project_id=at.project_id AND t.deleted_at IS NULL
+   WHERE at.asset_id=assets.id AND at.tenant_id=assets.tenant_id
+    AND at.project_id=assets.project_id AND at.deleted_at IS NULL AND t.name IN ?)`, names)
+	}
+	base := q.Select("assets.*, " + assetDisplayStatusSQL + " AS display_status")
+	q = q.Session(&gorm.Session{NewDB: true}).Table("(?) AS assets", base)
+	if status = strings.TrimSpace(status); status != "" {
+		q = q.Where("assets.display_status=?", status)
+	}
+	return q
+}
+
 func (a *App) listResource(r resource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sc := contextScope(c)
@@ -134,7 +229,14 @@ func (a *App) listResource(r resource) gin.HandlerFunc {
 		if id := number(c.Query("asset_id")); id > 0 && (strings.Contains(r.fields, "asset_id") || r.table == "sensor_records" || r.table == "operations" || r.table == "alerts" || r.table == "asset_hardwares" || r.table == "firmware_inventories" || r.table == "sol_sessions") {
 			q = q.Where("asset_id=?", id)
 		}
-		if search := strings.TrimSpace(c.Query("search")); search != "" && strings.Contains(" "+r.fields+" ", " name ") {
+		if r.table == "assets" {
+			condition, err := assetSearchCondition(c.DefaultQuery("search_field", "auto"))
+			if err != nil {
+				fail(c, 400, err.Error())
+				return
+			}
+			q = assetListQuery(q, condition, c.Query("search"), c.Query("tags"), c.Query("status"), number(c.Query("datacenter_id")))
+		} else if search := strings.TrimSpace(c.Query("search")); search != "" && strings.Contains(" "+r.fields+" ", " name ") {
 			q = q.Where("name ILIKE ?", "%"+search+"%")
 		}
 		var total int64
@@ -263,6 +365,10 @@ func inputResource(c *gin.Context, r resource, create bool) (map[string]any, err
 }
 func (a *App) writeResource(r resource, create bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if create && r.table == "assets" && !contextScope(c).Admin && currentSystemMode(a.store.db) == ModeExternalOperation {
+			fail(c, 403, errAssetProvisioningForbidden.Error())
+			return
+		}
 		in, e := inputResource(c, r, create)
 		if e != nil {
 			fail(c, 400, e.Error())
@@ -271,6 +377,10 @@ func (a *App) writeResource(r resource, create bool) gin.HandlerFunc {
 		sc := contextScope(c)
 		var id int64
 		e = a.store.saveResource(c.Request.Context(), r, sc, number(c.Param("id")), in, create, &id)
+		if errors.Is(e, errAssetProvisioningForbidden) {
+			fail(c, 403, e.Error())
+			return
+		}
 		if e != nil {
 			fail(c, 409, "resource validation or relation conflict")
 			return
@@ -282,6 +392,10 @@ func (a *App) deleteResource(r resource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sc := contextScope(c)
 		e := a.store.deleteResource(c.Request.Context(), r, sc, number(c.Param("id")))
+		if errors.Is(e, errAssetProvisioningForbidden) {
+			fail(c, 403, e.Error())
+			return
+		}
 		if e != nil {
 			fail(c, 409, "resource is missing, busy, or still referenced")
 			return

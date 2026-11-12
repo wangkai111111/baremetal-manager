@@ -14,12 +14,17 @@ import (
 // 工单管理处理器（两种模式通用）
 // ============================================================
 //
-// 待注册路由（routes.go）：
+// 已注册路由（routes.go，两种模式通用的公共组，不受模式门禁限制）：
 // GET    /api/v1/projects/:projectId/work-orders                    → listWorkOrders       → work_orders:read
 // POST   /api/v1/projects/:projectId/work-orders                    → createWorkOrder      → work_orders:write
 // GET    /api/v1/projects/:projectId/work-orders/:id                → getWorkOrder         → work_orders:read
 // PUT    /api/v1/projects/:projectId/work-orders/:id                → updateWorkOrder      → work_orders:write
 // PUT    /api/v1/projects/:projectId/work-orders/:id/:transition    → transitionWorkOrder  → work_orders:write
+//
+// 协作增强端点见 work_order_ext.go：
+// PUT    /api/v1/projects/:projectId/work-orders/:id/assign    → assignWorkOrder        → work_orders:write + 客服/管理员
+// GET    /api/v1/projects/:projectId/work-orders/:id/messages  → listWorkOrderMessages  → work_orders:read
+// POST   /api/v1/projects/:projectId/work-orders/:id/messages  → createWorkOrderMessage → work_orders:write
 
 // 工单状态流转规则
 var workOrderTransitions = map[string]map[string]bool{
@@ -34,9 +39,12 @@ var validWorkOrderTypes = map[string]bool{"fault": true, "technical": true, "con
 // 合法优先级
 var validPriorities = map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
 
-// listWorkOrders 查询工单列表
+// listWorkOrders 查询工单列表。
+// 可见范围：平台管理员或持有 work_orders:manage 的客服角色→租户全量；
+// 其余用户→自己提交的 + 指派给自己的工单。
 func (a *App) listWorkOrders(c *gin.Context) {
 	sc := contextScope(c)
+	viewer := a.workOrderAccess(c)
 	q := a.store.db.Table("work_orders").
 		Where("tenant_id=? AND deleted_at IS NULL", sc.Tenant)
 	// 按状态筛选
@@ -57,15 +65,15 @@ func (a *App) listWorkOrders(c *gin.Context) {
 	}
 	// 按提交人筛选
 	if userID := number(c.Query("user_id")); userID > 0 {
-		// 非管理员只能查看自己的工单
-		if !sc.Admin && userID != sc.User {
+		// 非管理员且无客服权限时只能查看自己相关的工单
+		if !viewer.canAll && userID != sc.User {
 			fail(c, 403, "无权查看其他用户的工单")
 			return
 		}
 		q = q.Where("user_id=?", userID)
-	} else if !sc.Admin {
-		// 非管理员默认只查看自己的工单
-		q = q.Where("user_id=?", sc.User)
+	} else if !viewer.canAll {
+		// 普通用户默认只看到自己提交或被指派的工单
+		q = q.Where("(user_id=? OR assigned_to=?)", sc.User, sc.User)
 	}
 	// 搜索标题
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
@@ -104,14 +112,25 @@ func (a *App) getWorkOrder(c *gin.Context) {
 		fail(c, 404, "工单不存在")
 		return
 	}
-	// 非管理员只能查看自己的工单
-	if !sc.Admin {
-		if userID, ok := item["user_id"]; ok && toInt64(userID) != sc.User {
-			fail(c, 403, "无权查看此工单")
-			return
-		}
+	// 可见性与列表保持一致：客服/管理员全量，其余限提交人与被指派人
+	if !a.workOrderAccess(c).visible(toInt64(item["user_id"]), workOrderAssignee(item)) {
+		fail(c, 403, "无权查看此工单")
+		return
 	}
 	ok(c, item)
+}
+
+// workOrderAssignee 从通用查询结果中提取可空的指派人。
+func workOrderAssignee(item map[string]any) *int64 {
+	raw, present := item["assigned_to"]
+	if !present || raw == nil {
+		return nil
+	}
+	value := toInt64(raw)
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }
 
 // createWorkOrder 创建新工单
@@ -182,6 +201,7 @@ func (a *App) createWorkOrder(c *gin.Context) {
 // updateWorkOrder 更新工单信息
 func (a *App) updateWorkOrder(c *gin.Context) {
 	sc := contextScope(c)
+	viewer := a.workOrderAccess(c)
 	id := number(c.Param("id"))
 	if id <= 0 {
 		fail(c, 400, "无效的工单ID")
@@ -201,8 +221,8 @@ func (a *App) updateWorkOrder(c *gin.Context) {
 		fail(c, 404, "工单不存在")
 		return
 	}
-	// 非管理员只能修改自己的工单
-	if !sc.Admin && existing.UserID != sc.User {
+	// 无客服权限时只能修改自己的工单
+	if !viewer.canAll && existing.UserID != sc.User {
 		fail(c, 403, "无权修改此工单")
 		return
 	}
@@ -282,6 +302,7 @@ func (a *App) updateWorkOrder(c *gin.Context) {
 // transitionWorkOrder 处理工单状态流转
 func (a *App) transitionWorkOrder(c *gin.Context) {
 	sc := contextScope(c)
+	viewer := a.workOrderAccess(c)
 	id := number(c.Param("id"))
 	transition := strings.TrimSpace(c.Param("transition"))
 	if id <= 0 {
@@ -316,18 +337,22 @@ func (a *App) transitionWorkOrder(c *gin.Context) {
 	// - open → in_progress: 仅管理员或指派人可操作
 	// - resolved → closed: 提交者可关闭
 	// - in_progress → resolved: 指派人者或管理员可操作
-	if !sc.Admin {
+	if !viewer.canAll {
 		switch transition {
 		case "in_progress":
 			// 需要是指派人或管理员
-			var wo struct{ AssignedTo *int64 `gorm:"column:assigned_to"` }
+			var wo struct {
+				AssignedTo *int64 `gorm:"column:assigned_to"`
+			}
 			a.store.db.Table("work_orders").Select("assigned_to").Where("id=?", id).Take(&wo)
 			if wo.AssignedTo == nil || *wo.AssignedTo != sc.User {
 				fail(c, 403, "仅指派的处理人可开始处理工单")
 				return
 			}
 		case "resolved":
-			var wo struct{ AssignedTo *int64 `gorm:"column:assigned_to"` }
+			var wo struct {
+				AssignedTo *int64 `gorm:"column:assigned_to"`
+			}
 			a.store.db.Table("work_orders").Select("assigned_to").Where("id=?", id).Take(&wo)
 			if wo.AssignedTo == nil || *wo.AssignedTo != sc.User {
 				fail(c, 403, "仅指派的处理人可解决工单")
