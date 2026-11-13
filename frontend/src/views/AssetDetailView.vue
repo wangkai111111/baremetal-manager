@@ -6,10 +6,7 @@ import * as echarts from 'echarts'
 import {
   NButton,
   NCard,
-  NCheckbox,
-  NCheckboxGroup,
   NDataTable,
-  NDatePicker,
   NDescriptions,
   NDescriptionsItem,
   NDropdown,
@@ -116,9 +113,6 @@ const opPageSize = ref(20)
 const opKindFilter = ref<string | null>(null)
 const opStatusFilter = ref<string | null>(null)
 
-const sensorRows = ref<RecordData[]>([])
-const sensorLoading = ref(false)
-const sensorError = ref('')
 const ledgerHardware = ref<RecordData[]>([])
 const ipAllocations = ref<RecordData[]>([])
 const networkRows = ref<RecordData[]>([])
@@ -132,14 +126,9 @@ const datacenterRows = ref<RecordData[]>([])
 const departmentRows = ref<RecordData[]>([])
 
 // 监控 Tab 状态
-const monitorRange = ref<'1h' | '6h' | '24h' | '7d' | '30d' | 'custom'>('24h')
-const customRange = ref<[number, number] | null>(null)
-const showMetrics = ref<Record<string, boolean>>({ cpu: true, memory: true, disk: true, network: true })
-const monitorChartRef = ref<HTMLElement>()
 const cpuTempRef = ref<HTMLElement>()
 const fanRef = ref<HTMLElement>()
 const powerRef = ref<HTMLElement>()
-let monitorChart: echarts.ECharts | null = null
 let gaugeCharts: Array<echarts.ECharts | null> = [null, null, null]
 
 // ============================================================
@@ -332,20 +321,6 @@ async function loadHardwareLedger() {
   }
 }
 
-async function loadSensors() {
-  if (!auth.can('monitor:read')) { sensorError.value = '当前角色缺少监控读取权限（monitor:read）'; return }
-  sensorLoading.value = true
-  sensorError.value = ''
-  try {
-    sensorRows.value = rows(await resource.list('/sensor-records', { asset_id: assetId.value, page_size: 200 })).items
-  } catch (e) {
-    sensorRows.value = []
-    sensorError.value = errorText(e)
-  } finally {
-    sensorLoading.value = false
-  }
-}
-
 async function loadNetwork() {
   networkLoading.value = true
   try {
@@ -402,7 +377,6 @@ function resetData() {
   asset.value = {}
   collection.value = {}
   operations.value = []
-  sensorRows.value = []
   ledgerHardware.value = []
   ipAllocations.value = []
   solSessions.value = []
@@ -713,6 +687,33 @@ function buildSectionColumns(rows: RecordData[], fields: FieldDef[]): DataTableC
   return columns
 }
 
+const firmwareRows = computed(() => {
+  const rows: RecordData[] = []
+  for (const source of componentsOf('firmware')) {
+    const name = str(source.name).trim().toLowerCase()
+    const version = str(source.version).trim().toLowerCase()
+    const existing = rows.find(row => name && str(row.name).trim().toLowerCase() === name
+      && (!row.serial_number || !source.serial_number || row.serial_number === source.serial_number))
+    if (existing) {
+      const versions = str(existing.version).split(' / ').filter(Boolean)
+      if (version && !versions.some(value => value.toLowerCase() === version)) versions.push(str(source.version).trim())
+      existing.version = versions.join(' / ')
+      for (const [key, value] of Object.entries(source)) {
+        if (existing[key] == null || existing[key] === '') existing[key] = value
+      }
+    } else rows.push({ ...source, version: str(source.version).trim() })
+  }
+  const biosVersion = str(collection.value.bios_version).trim()
+  if (biosVersion) {
+    const bios = rows.find(row => /\bbios\b/i.test(str(row.name)))
+    if (bios) {
+      const versions = str(bios.version).split(' / ').filter(Boolean)
+      bios.version = [biosVersion, ...versions.filter(version => version.toLowerCase() !== biosVersion.toLowerCase())].join(' / ')
+    } else rows.push({ name: 'System BIOS', version: biosVersion })
+  }
+  return rows
+})
+
 const hardwareSections = computed<HardwareSection[]>(() => {
   const sensors = componentsOf('sensors')
   const sections: HardwareSection[] = [
@@ -768,7 +769,7 @@ const hardwareSections = computed<HardwareSection[]>(() => {
       ]
     },
     {
-      key: 'firmware', title: 'BIOS / 固件', group: 'firmware', rows: componentsOf('firmware'), empty: '快照中没有固件清单明细',
+      key: 'firmware', title: 'BIOS / 固件', group: 'firmware', rows: firmwareRows.value, empty: '快照中没有固件清单明细',
       fields: [
         { key: 'name', label: '组件', width: 170 }, { key: 'version', label: '版本', mono: true, width: 150 },
         { key: 'manufacturer', label: '制造商' }, { key: 'state', label: '状态' }
@@ -776,11 +777,6 @@ const hardwareSections = computed<HardwareSection[]>(() => {
     }
   ]
   return sections
-})
-
-const biosRow = computed(() => {
-  const version = str(collection.value.bios_version)
-  return version ? [{ name: 'System BIOS（快照摘要）', version, state: str(asset.value.power_state) === 'on' ? 'On' : 'Present' }] : []
 })
 
 const ledgerColumns: DataTableColumns<RecordData> = [
@@ -823,168 +819,25 @@ const nicColumns = computed<DataTableColumns<RecordData>>(() => buildSectionColu
 ]))
 
 // ============================================================
-// 监控：时间窗、趋势与仪表
+// 监控：传感器仪表
 // ============================================================
-type RangeKey = '1h' | '6h' | '24h' | '7d' | '30d' | 'custom'
-const RANGE_DEF: Record<Exclude<RangeKey, 'custom'>, { span: number; bucket: number; label: string; fmt: string }> = {
-  '1h': { span: 3600e3, bucket: 300e3, label: '1 小时', fmt: 'HH:mm' },
-  '6h': { span: 6 * 3600e3, bucket: 30 * 60e3, label: '6 小时', fmt: 'HH:mm' },
-  '24h': { span: 24 * 3600e3, bucket: 2 * 3600e3, label: '24 小时', fmt: 'HH:mm' },
-  '7d': { span: 7 * 86400e3, bucket: 6 * 3600e3, label: '7 天', fmt: 'MM-DD HH:mm' },
-  '30d': { span: 30 * 86400e3, bucket: 24 * 3600e3, label: '30 天', fmt: 'MM-DD' }
-}
-const rangeItems: { key: RangeKey; label: string }[] = [
-  { key: '1h', label: RANGE_DEF['1h'].label }, { key: '6h', label: RANGE_DEF['6h'].label },
-  { key: '24h', label: RANGE_DEF['24h'].label }, { key: '7d', label: RANGE_DEF['7d'].label },
-  { key: '30d', label: RANGE_DEF['30d'].label }, { key: 'custom', label: '自定义' }
-]
-const METRICS = [
-  { key: 'cpu', label: 'CPU 使用率', color: '#165DFF', axis: 'percent' },
-  { key: 'memory', label: '内存使用率', color: '#00B42A', axis: 'percent' },
-  { key: 'disk', label: '磁盘使用率', color: '#FF7D00', axis: 'percent' },
-  { key: 'network', label: '网络吞吐', color: '#0FC6C2', axis: 'rate' }
-]
-const activeMetrics = computed(() => METRICS.filter(metric => showMetrics.value[metric.key]).map(metric => metric.key))
-function onMetricChange(keys: Array<string | number>) {
-  const set = new Set(keys.map(String))
-  METRICS.forEach(metric => { showMetrics.value[metric.key] = set.has(metric.key) })
-}
-
-function windowBounds() {
-  if (monitorRange.value === 'custom' && customRange.value) {
-    const [from, to] = customRange.value
-    const span = Math.max(60e3, to - from)
-    return { from, to, bucket: Math.max(60e3, span / 40), fmt: span <= 86400e3 ? 'MM-DD HH:mm' : 'MM-DD' }
-  }
-  const def = RANGE_DEF[monitorRange.value === 'custom' ? '24h' : monitorRange.value]
-  const to = dayjs().valueOf()
-  return { from: to - def.span, to, bucket: def.bucket, fmt: def.fmt }
-}
-
-function classifyMetric(row: RecordData): string | null {
-  const key = `${str(row.metric)} ${str(row.sensor_key)}`.toLowerCase()
-  if (/cpu|processor|compute|proc/.test(key)) return 'cpu'
-  if (/mem|ram/.test(key)) return 'memory'
-  if (/disk|storage|volume|logicaldrive|raid/.test(key)) return 'disk'
-  if (/net|nic|eth|throughput|link.?speed|bandwidth/.test(key)) return 'network'
-  return null
-}
-
-const trendBuckets = computed(() => {
-  const { from, to, bucket, fmt } = windowBounds()
-  const slots: { start: number; label: string; values: Record<string, number[]> }[] = []
-  for (let start = from; start < to; start += bucket) slots.push({ start, label: dayjs(start).format(fmt), values: {} })
-  let hits = 0
-  for (const row of sensorRows.value) {
-    const key = classifyMetric(row)
-    if (!key) continue
-    const value = numOf(row.value)
-    if (!Number.isFinite(value)) continue
-    const unit = str(row.unit || row.units).toLowerCase()
-    if (unit.includes('%') || key !== 'network') {
-      const percentageLike = unit.includes('%') || (value >= 0 && value <= 100)
-      if (!percentageLike) continue
-    }
-    const at = dayjs(str(row.sampled_at || row.created_at)).valueOf()
-    if (!Number.isFinite(at) || at < from || at > to) continue
-    const index = Math.min(slots.length - 1, Math.floor((at - from) / bucket))
-    if (index < 0) continue
-    hits++
-    const slot = slots[index]
-    ;(slot.values[key] ||= []).push(value)
-  }
-  const average = (list?: number[]) => (list && list.length ? Number((list.reduce((a, b) => a + b, 0) / list.length).toFixed(1)) : null)
-  const series: Record<string, Array<number | null>> = {}
-  METRICS.forEach(metric => { series[metric.key] = slots.map(slot => average(slot.values[metric.key])) })
-  return { labels: slots.map(slot => slot.label), series, hits, points: slots.length }
-})
-const hasTrend = computed(() => trendBuckets.value.hits >= 2)
-const trendNote = computed(() => {
-  if (sensorError.value) return `样本读取失败：${sensorError.value}`
-  if (!sensorRows.value.length) return '暂无时序样本'
-  return `${trendBuckets.value.hits} 个样本 · 近 ${trendBuckets.value.points} 个时间桶`
-})
-const trendEmptyReason = computed(() => {
-  if (sensorError.value) return `监控样本读取失败：${sensorError.value}`
-  if (!auth.can('monitor:read')) return '当前角色缺少 monitor:read 权限，无法读取 sensor_records 时序数据。'
-  if (!sensorRows.value.length) return '该设备尚无 sensor_records 时序样本。当前版本的内置 Redfish 轮询只更新资产摘要字段与告警，不写入时序表；趋势曲线需要外部采集器（如 Prometheus / 自定义上报）落库后才会出现。'
-  return `已取到 ${sensorRows.value.length} 条记录，但所选时间窗内可用样本不足 2 个（后端单次最多返回 200 条，按最新优先）。可放宽时间范围或扩大窗口。`
-})
-
-function chartTokens() {
-  const cs = getComputedStyle(document.documentElement)
-  const read = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback
-  return {
-    text: read('--color-text-primary', '#1D2129'), secondary: read('--color-text-secondary', '#4E5969'),
-    faint: read('--color-text-tertiary', '#86909C'), line: read('--color-border', '#E5E6EB'),
-    soft: read('--color-border-light', '#F0F0F0'), surface: read('--color-surface', '#FFFFFF')
-  }
-}
-function withAlpha(color: string, alpha: number) {
-  const hex = color.replace('#', '')
-  const full = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex
-  const int = parseInt(full, 16)
-  return `rgba(${(int >> 16) & 255}, ${(int >> 8) & 255}, ${int & 255}, ${alpha})`
-}
-
-function initMonitorChart() {
-  if (!monitorChartRef.value) return
-  if (monitorChart && monitorChart.isDisposed()) monitorChart = null
-  if (!monitorChart) monitorChart = echarts.init(monitorChartRef.value)
-  const t = chartTokens()
-  const { labels, series } = trendBuckets.value
-  const enabled = METRICS.filter(metric => activeMetrics.value.includes(metric.key))
-  const rateVisible = enabled.some(metric => metric.axis === 'rate')
-  const percentAxis = {
-    type: 'value', name: '使用率', min: 0, max: 100, interval: 25, nameTextStyle: { color: t.faint, fontSize: 11 },
-    axisLabel: { formatter: '{value}%', color: t.faint, fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false },
-    splitLine: { lineStyle: { color: t.soft, type: 'dashed' } }
-  }
-  const rateAxis = {
-    type: 'value', name: '网络', nameTextStyle: { color: t.faint, fontSize: 11 },
-    axisLabel: { color: t.faint, fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false }
-  }
-  monitorChart.setOption({
-    animationDuration: 620, animationEasing: 'cubicOut',
-    grid: { left: 8, right: 14, top: 44, bottom: 56, containLabel: true },
-    legend: { top: 8, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, itemGap: 18, textStyle: { color: t.secondary, fontSize: 12 } },
-    tooltip: {
-      trigger: 'axis', backgroundColor: t.surface, borderColor: t.line, borderWidth: 1, padding: [8, 12],
-      textStyle: { color: t.text, fontSize: 12 },
-      axisPointer: { type: 'line', lineStyle: { color: t.line, type: 'dashed' } }
-    },
-    dataZoom: [
-      { type: 'inside', throttle: 60 },
-      { type: 'slider', height: 18, bottom: 12, borderColor: t.line, fillerColor: withAlpha('#165DFF', 0.08), handleStyle: { color: t.surface, borderColor: t.line }, textStyle: { color: t.faint, fontSize: 10 } }
-    ],
-    xAxis: {
-      type: 'category', boundaryGap: false, data: labels,
-      axisLine: { lineStyle: { color: t.line } }, axisTick: { show: false },
-      axisLabel: { color: t.faint, fontSize: 11, hideOverlap: true }
-    },
-    yAxis: rateVisible ? [percentAxis, { ...rateAxis, position: 'right', offset: 0 }] : [percentAxis],
-    series: enabled.map(metric => ({
-      name: metric.label, type: 'line', smooth: true, showSymbol: false, symbol: 'circle', symbolSize: 6,
-      yAxisIndex: metric.axis === 'rate' && rateVisible ? 1 : 0,
-      connectNulls: true, lineStyle: { color: metric.color, width: 2 }, itemStyle: { color: metric.color },
-      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: withAlpha(metric.color, 0.24) }, { offset: 1, color: withAlpha(metric.color, 0) }]) },
-      data: series[metric.key]
-    }))
-  }, true)
-  monitorChart.resize()
-}
-
 // 传感器仪表：读数来自采集快照 components.sensors，是当前唯一可信的实时数据
-const sensorReadings = computed(() => componentsOf('sensors').filter(row => Number.isFinite(numOf(row.reading)) && numOf(row.reading) > 0))
+const sensorReadings = computed(() => componentsOf('sensors').filter(row => row.reading != null && row.reading !== '' && Number.isFinite(Number(row.reading))))
 function readingsByUnit(...units: string[]) {
-  return sensorReadings.value.filter(row => units.includes(str(row.units)))
+  const normalize = (unit: string) => {
+    const value = unit.trim().toLowerCase()
+    if (['°c', 'c', 'cel', 'celsius'].includes(value)) return 'celsius'
+    if (['rpm', 'r/min', 'rev/min', '{rev}/min'].includes(value)) return 'rpm'
+    return value
+  }
+  const expected = units.map(normalize)
+  return sensorReadings.value.filter(row => expected.includes(normalize(str(row.units))))
 }
 const cpuTemp = computed(() => {
   const list = readingsByUnit('°C', 'C', 'Celsius')
   if (!list.length) return null
   const named = list.find(row => /cpu|proc|核心|socket/i.test(`${str(row.name)} ${str(row.id)}`))
-  const target = named || [...list].sort((a, b) => numOf(b.reading) - numOf(a.reading))[0]
-  return numOf(target.reading)
+  return named ? numOf(named.reading) : null
 })
 const fanRpm = computed(() => {
   const list = readingsByUnit('RPM')
@@ -1012,20 +865,19 @@ const sensorColumns = computed<DataTableColumns<RecordData>>(() => [
   { title: '状态', key: 'state', minWidth: 88, render: row => formatField('state', row.state) }
 ])
 
-function gaugeOption(value: number | null, min: number, max: number, unit: string, colors: [number, string][]) {
-  const t = chartTokens()
+function gaugeOption(value: number | null, min: number, max: number, colors: [number, string][]) {
   return {
+    animationDuration: 700,
+    animationDurationUpdate: 700,
+    animationEasingUpdate: 'cubicOut' as const,
     series: [{
-      type: 'gauge', startAngle: 208, endAngle: -28, min, max, radius: '92%', center: ['50%', '58%'],
+      type: 'gauge', startAngle: 210, endAngle: -30, min, max, splitNumber: 2, radius: '76%', center: ['50%', '50%'],
       progress: { show: true, width: 10, roundCap: true, itemStyle: { color: colors[0][1] } },
       axisLine: { lineStyle: { width: 10, color: colors } },
-      pointer: { show: false }, axisTick: { show: false }, splitLine: { show: false },
-      axisLabel: { show: true, distance: 14, color: t.faint, fontSize: 9 },
-      anchor: { show: false }, title: { show: false },
-      detail: {
-        valueAnimation: true, offsetCenter: [0, '6%'], fontSize: 22, fontWeight: 700, color: t.text,
-        formatter: (v: number) => (Number.isFinite(v) && v > 0 ? `${Math.round(v)}${unit}` : '—')
-      },
+      pointer: { show: value != null, length: '64%', width: 5, itemStyle: { color: colors[0][1] } },
+      axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: false },
+      anchor: { show: value != null, showAbove: true, size: 10, itemStyle: { color: colors[0][1] } },
+      title: { show: false }, detail: { show: false },
       data: [{ value: value == null ? 0 : value }]
     }]
   }
@@ -1042,17 +894,15 @@ function renderGauges() {
     if (!el) return
     if (gaugeCharts[index] && gaugeCharts[index]!.isDisposed()) gaugeCharts[index] = null
     if (!gaugeCharts[index]) gaugeCharts[index] = echarts.init(el)
-    gaugeCharts[index]!.setOption(gaugeOption(configs[index].value, configs[index].min, configs[index].max, configs[index].unit, configs[index].colors), true)
+    gaugeCharts[index]!.setOption(gaugeOption(configs[index].value, configs[index].min, configs[index].max, configs[index].colors))
     gaugeCharts[index]!.resize()
   })
 }
 
 function renderMonitor() {
-  if (hasTrend.value) initMonitorChart()
   renderGauges()
 }
 function resizeCharts() {
-  monitorChart?.resize()
   gaugeCharts.forEach(chart => chart?.resize())
 }
 
@@ -1237,7 +1087,6 @@ let loadedTabs = new Set<string>()
 async function ensureTabData(tab: string) {
   if (loadedTabs.has(tab)) return
   loadedTabs.add(tab)
-  if (tab === 'monitor') await loadSensors()
   if (tab === 'hardware') await loadHardwareLedger()
   if (tab === 'network') await loadNetwork()
   if (tab === 'console') await loadSolSessions()
@@ -1253,8 +1102,7 @@ watch(activeTab, async tab => {
   if (tab === 'monitor') renderMonitor()
   if (tab === 'logs') opPage.value = 1
 })
-watch([monitorRange, customRange, showMetrics], () => { if (activeTab.value === 'monitor' && hasTrend.value) initMonitorChart() }, { deep: true })
-watch([collection, sensorRows], () => { if (activeTab.value === 'monitor') nextTick(renderMonitor) })
+watch(collection, () => { if (activeTab.value === 'monitor') nextTick(renderMonitor) })
 
 async function reloadAll() {
   cancelCollection()
@@ -1270,8 +1118,6 @@ onMounted(() => { window.addEventListener('resize', resizeCharts) })
 onUnmounted(() => {
   cancelCollection()
   window.removeEventListener('resize', resizeCharts)
-  monitorChart?.dispose()
-  monitorChart = null
   gaugeCharts.forEach(chart => chart?.dispose())
   gaugeCharts = [null, null, null]
 })
@@ -1396,35 +1242,6 @@ onUnmounted(() => {
 
         <!-- ===== Tab 2 监控 ===== -->
         <n-tab-pane name="monitor" tab="监控">
-          <div class="monitor-toolbar">
-            <div class="range-segment">
-              <button v-for="item in rangeItems" :key="item.key" type="button"
-                :class="{ active: monitorRange === item.key }" @click="monitorRange = item.key">
-                {{ item.label }}
-              </button>
-            </div>
-            <n-date-picker v-if="monitorRange === 'custom'" v-model:value="customRange" type="datetimerange" clearable
-              size="small" />
-            <n-checkbox-group class="metric-toggles" :value="activeMetrics" @update:value="onMetricChange">
-              <n-checkbox v-for="metric in METRICS" :key="metric.key" :value="metric.key">
-                <span class="metric-dot" :style="{ background: metric.color }"></span>{{ metric.label }}
-              </n-checkbox>
-            </n-checkbox-group>
-            <n-button size="small" :loading="sensorLoading" @click="loadSensors().then(renderMonitor)">刷新样本</n-button>
-          </div>
-
-          <section class="card section">
-            <header class="section-head">
-              <h2>资源使用趋势</h2>
-              <span class="section-note">{{ trendNote }}</span>
-            </header>
-            <div v-show="hasTrend" ref="monitorChartRef" class="chart-container large"></div>
-            <div v-if="!hasTrend" class="trend-empty" role="status">
-              <div class="trend-empty-mark mono">∅</div>
-              <p>{{ trendEmptyReason }}</p>
-            </div>
-          </section>
-
           <section class="card section">
             <header class="section-head">
               <h2>实时传感器读数</h2>
@@ -1479,12 +1296,6 @@ onUnmounted(() => {
             <n-data-table v-if="item.rows.length" size="small" :columns="buildSectionColumns(item.rows, item.fields)"
               :data="item.rows" :pagination="false" :max-height="320" />
             <div v-else class="empty-hint">{{ item.empty }}</div>
-          </section>
-
-          <section v-if="biosRow.length" class="card section hw-section">
-            <header class="section-head"><h2>BIOS（快照摘要）</h2></header>
-            <n-data-table size="small" :columns="buildSectionColumns(biosRow, [{ key: 'name', label: '组件', width: 220 }, { key: 'version', label: '版本', mono: true }])"
-              :data="biosRow" :pagination="false" />
           </section>
 
           <section v-if="ledgerHardware.length" class="card section hw-section">
@@ -2086,95 +1897,9 @@ onUnmounted(() => {
 }
 
 /* === 监控 === */
-.monitor-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-  padding: 10px 14px;
-  margin-bottom: 14px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, var(--color-surface-raised), var(--color-surface));
-}
-
-.range-segment {
-  display: inline-flex;
-  flex-wrap: wrap;
-  padding: 2px;
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
-  background: var(--color-bg);
-}
-
-.range-segment button {
-  appearance: none;
-  padding: 5px 12px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  font-size: var(--font-size-xs);
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.range-segment button:hover {
-  color: var(--color-primary);
-}
-
-.range-segment button.active {
-  font-weight: 600;
-  color: var(--color-primary);
-  background: var(--color-surface);
-  box-shadow: var(--shadow-sm);
-}
-
-.metric-toggles {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-}
-
-.metric-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
-  border-radius: 2px;
-  vertical-align: middle;
-}
-
-.trend-empty {
-  display: grid;
-  justify-items: center;
-  gap: 10px;
-  padding: 44px 16px;
-  border: 1px dashed var(--color-border-dark);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-raised);
-}
-
-.trend-empty-mark {
-  font-size: 24px;
-  color: var(--color-text-disabled);
-}
-
-.trend-empty p {
-  max-width: 640px;
-  margin: 0;
-  font-size: var(--font-size-xs);
-  line-height: 1.8;
-  color: var(--color-text-tertiary);
-  text-align: center;
-}
-
 .sensor-gauges {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 12px;
 }
 
@@ -2192,7 +1917,8 @@ onUnmounted(() => {
 }
 
 .gauge-title {
-  font-size: 11px;
+  text-align: center;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: .6px;
   text-transform: uppercase;
@@ -2200,11 +1926,16 @@ onUnmounted(() => {
 }
 
 .gauge-chart {
-  height: 150px;
+  width: 100%;
+  height: 180px;
 }
 
 .gauge-foot {
-  font-size: var(--font-size-xs);
+  min-height: 32px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  font-size: 18px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: center;
   color: var(--color-text-secondary);
@@ -2472,10 +2203,6 @@ onUnmounted(() => {
   background: var(--color-surface-hover);
 }
 
-[data-theme='dark'] .range-segment {
-  background: var(--color-surface-raised);
-}
-
 /* === 响应式：窄屏下右轨回落为横向卡片，配置网格退成单列 === */
 @media (max-width: 1180px) {
   .overview-layout {
@@ -2517,7 +2244,6 @@ onUnmounted(() => {
   .crumbs a,
   .config-cell,
   .sensor-gauge-card,
-  .range-segment button,
   .console-close {
     transition: none;
   }
