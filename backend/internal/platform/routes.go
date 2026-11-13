@@ -96,6 +96,9 @@ func (a *App) routes() *gin.Engine {
 	auth.GET("/projects", a.projects)
 	auth.POST("/projects", a.createProject)
 	auth.POST("/auth/switch-project", a.switchProject)
+	auth.GET("/pxe-services", a.pxeServices)
+	auth.PUT("/pxe-services", a.pxeServices)
+	auth.POST("/pxe-services/:service/:action", a.pxeServices)
 	auth.GET("/settings", a.settings)
 	auth.PUT("/settings", a.updateSettings)
 	auth.POST("/settings/smtp-test", a.smtpTest)
@@ -216,6 +219,8 @@ func (a *App) routes() *gin.Engine {
 	// ============================================================
 	p.GET("/admin/operations-dashboard", append(externalOp, a.require("operations:read"), a.getOperationsDashboard)...)
 
+	p.GET("/images/catalog", a.require("images:read"), a.imageCatalog)
+	p.POST("/images/catalog/:catalogId/download", a.require("images:write"), a.queueCatalogImage)
 	p.GET("/images/:id/download", a.require("images:read"), a.downloadImage)
 	p.POST("/alerts/:id/:transition", a.require("alerts:write"), a.alertTransition)
 	p.POST("/assets/:id/actions", a.action)
@@ -229,9 +234,9 @@ func (a *App) routes() *gin.Engine {
 	p.GET("/assets/:id/collection", a.require("assets:read"), a.collection)
 	p.GET("/assets/:id/sol", a.require("sol:access"), a.sol)
 	p.POST("/assets/:id/sol-ticket", a.require("sol:access"), a.solTicket)
-	p.POST("/assets/:id/install", a.require("install:operate"), unsupported)
+	p.POST("/assets/:id/install", a.require("install:operate"), a.installWithPreflight)
 	p.POST("/assets/:id/firmware-upgrade", a.require("firmware:operate"), unsupported)
-	p.POST("/installations", a.require("install:write"), unsupported)
+	p.POST("/installations", a.require("install:write"), a.installWithPreflight)
 	p.POST("/firmware-upgrades", a.require("firmware:write"), unsupported)
 	// 浏览器 WebSocket 使用短时一次性票据，不能将登录 JWT 放入 URL。
 	v.GET("/sol/connect", a.solWithTicket)

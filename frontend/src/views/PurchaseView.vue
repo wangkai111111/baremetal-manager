@@ -212,7 +212,7 @@ async function loadImages() {
   try {
     const res = await resource.list('/images', { page: 1, page_size: 100 })
     const data = rows(res)
-    images.value = data.items
+    images.value = data.items.filter(image => image.status === 'ready')
   } catch (e) {
     message.error('镜像列表加载失败：' + errorText(e))
   }

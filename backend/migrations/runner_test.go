@@ -3,11 +3,28 @@ package migrations
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func TestImageDownloadSourcesMigration(t *testing.T) {
+	last := incrementalMigrations[len(incrementalMigrations)-1]
+	previous := incrementalMigrations[len(incrementalMigrations)-2]
+	if TargetVersion != "013_image_download_sources" || last.version != TargetVersion || last.sql != ImageDownloadSourcesSQL {
+		t.Fatal("source migration not registered as target")
+	}
+	if previous.version != "012_image_download_jobs" || previous.sql != ImageDownloadJobsSQL {
+		t.Fatal("existing job migration registration changed")
+	}
+	for _, part := range []string{"ALTER TABLE image_download_jobs", "ADD COLUMN source text NOT NULL DEFAULT 'official'", "CHECK (source IN ('official', 'tuna'))"} {
+		if !strings.Contains(ImageDownloadSourcesSQL, part) {
+			t.Errorf("missing source migration constraint %q", part)
+		}
+	}
+}
 
 // 集成测试必须显式指向一次性空库，禁止自动连接工作数据库。
 func TestTargetMigrationIntegration(t *testing.T) {
@@ -82,6 +99,13 @@ func TestTargetMigrationIntegration(t *testing.T) {
 		}
 		if err := tx.Table("users").Count(&count).Error; err != nil {
 			return err
+		}
+		var jobsAllowed bool
+		if err := tx.Raw("SELECT has_table_privilege(current_user,'image_download_jobs','SELECT,INSERT,UPDATE,DELETE') AND has_sequence_privilege(current_user,'image_download_jobs_id_seq','USAGE,SELECT')").Scan(&jobsAllowed).Error; err != nil {
+			return err
+		}
+		if !jobsAllowed {
+			t.Error("application role cannot access image download jobs or their sequence")
 		}
 		var allowed bool
 		if err := tx.Raw("SELECT has_table_privilege(current_user,'audits','UPDATE') OR has_table_privilege(current_user,'audits','DELETE') OR has_table_privilege(current_user,'audits','TRUNCATE')").Scan(&allowed).Error; err != nil {

@@ -28,7 +28,7 @@ var resources = []resource{
 	{"ip-pools", "ip_pools", "network_id name start_address end_address", "network_id name start_address end_address", false},
 	{"ip-allocations", "ip_allocations", "network_id pool_id asset_id address mac_address status", "network_id address", false},
 	{"pxe-configs", "pxe_configs", "network_id name boot_mode next_server boot_file enabled config", "network_id name boot_mode next_server boot_file", false},
-	{"images", "images", "name object_key size_bytes sha256 os_type version architecture", "name object_key size_bytes sha256 os_type version architecture", false},
+	{"images", "images", "name os_type version architecture", "name os_type version architecture", false},
 	{"image-templates", "image_templates", "name image_id config", "name image_id", false},
 	{"kickstart-templates", "kickstart_templates", "name format content revision", "name format content", false},
 	{"partition-templates", "partition_templates", "name layout revision", "name layout", false},
@@ -226,6 +226,9 @@ func (a *App) listResource(r resource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sc := contextScope(c)
 		q := queryScope(a.store.db.WithContext(c.Request.Context()), r, sc)
+		if r.table == "images" && c.Query("visibility") == "private" {
+			q = q.Where(`NOT EXISTS (SELECT 1 FROM image_download_jobs AS job WHERE job.image_id=images.id AND job.tenant_id=images.tenant_id AND job.project_id=images.project_id)`)
+		}
 		if id := number(c.Query("asset_id")); id > 0 && (strings.Contains(r.fields, "asset_id") || r.table == "sensor_records" || r.table == "operations" || r.table == "alerts" || r.table == "asset_hardwares" || r.table == "firmware_inventories" || r.table == "sol_sessions") {
 			q = q.Where("asset_id=?", id)
 		}

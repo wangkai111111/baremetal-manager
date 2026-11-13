@@ -45,3 +45,9 @@ var SubscriptionBalancePaymentSQL string
 //
 //go:embed 011_governance_phase56.sql
 var GovernanceSQL string
+
+//go:embed 012_image_download_jobs.sql
+var ImageDownloadJobsSQL string
+
+//go:embed 013_image_download_sources.sql
+var ImageDownloadSourcesSQL string

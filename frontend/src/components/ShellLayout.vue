@@ -9,7 +9,7 @@ import {
 import type { MenuOption, MenuProps } from 'naive-ui'
 import {
   GridOutline, ServerOutline, BusinessOutline,
-  DiscOutline, FlashOutline, GitNetworkOutline,
+  DiscOutline, GitNetworkOutline,
   WarningOutline, HardwareChipOutline, PeopleOutline, SettingsOutline,
   ListOutline, ReceiptOutline, MenuOutline, ChevronDownOutline,
   NotificationsOutline, ChevronBackOutline, ChevronForwardOutline,
@@ -164,9 +164,7 @@ const allMenuGroups = computed(() => {
     {
       label: '交付与网络',
       items: [
-        { label: '镜像管理', path: '/images', icon: DiscOutline },
-        { label: '装机方案', path: '/installations', icon: FlashOutline },
-        { label: '装机模板', path: '/kickstart-templates', icon: DiscOutline },
+        { label: '镜像仓库', path: '/images', icon: DiscOutline },
         { label: '子网管理', path: '/subnets', icon: GitNetworkOutline },
         { label: 'IP 地址', path: '/ip-addresses', icon: GitNetworkOutline },
         { label: '地址池', path: '/ip-pools', icon: GitNetworkOutline },
@@ -254,9 +252,7 @@ const allMenuGroups = computed(() => {
     {
       label: '交付与网络',
       items: [
-        { label: '镜像管理', path: '/images', icon: DiscOutline },
-        { label: '装机方案', path: '/installations', icon: FlashOutline },
-        { label: '装机模板', path: '/kickstart-templates', icon: DiscOutline },
+        { label: '镜像仓库', path: '/images', icon: DiscOutline },
         { label: '子网管理', path: '/subnets', icon: GitNetworkOutline },
         { label: 'IP 地址', path: '/ip-addresses', icon: GitNetworkOutline },
         { label: '地址池', path: '/ip-pools', icon: GitNetworkOutline },

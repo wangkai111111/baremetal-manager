@@ -60,6 +60,11 @@ func run() error {
 	if err := migrations.Verify(db); err != nil {
 		return err
 	}
+	if len(os.Args) > 1 && os.Args[1] == "pxe-services" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return platform.RunPXEServices(ctx, db)
+	}
 	app, err := platform.New(db)
 	if err != nil {
 		return err

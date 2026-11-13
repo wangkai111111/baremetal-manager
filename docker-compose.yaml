@@ -238,11 +238,19 @@ services:
 
   backend:
     <<: *backend-common
+    group_add: ["2000"]
+    volumes:
+      - pxe-control:/run/bmm-pxe:ro
+      - ./provisioning/tftp:/var/lib/tftpboot:ro
 
   worker:
     <<: *backend-common
     # 后端镜像入口统一使用 /app/server，worker 作为命令参数。
     command: ${WORKER_COMMAND:-worker}
+    # ISO 下载临时文件使用磁盘卷，避免继承 128 MB 的内存临时目录。
+    tmpfs: []
+    volumes:
+      - image-download-temp:/tmp
     expose: []
     healthcheck:
       disable: true
@@ -290,17 +298,22 @@ services:
           cpus: "1.00"
           memory: 256M
 
-  # 可选 DHCP/TFTP 单机实验配置：docker compose --profile provisioning up -d。
-  # 多机生产场景通常应使用 host 网络或独立物理 DHCP 中继，并限制监听网卡。
-  dhcp-tftp:
-    image: ${DNSMASQ_IMAGE:-alpine:3.20}
-    profiles: ["provisioning"]
+  # 仅监管固定 DHCP/TFTP 子进程；每次容器启动两者均关闭，须管理员明确启用。
+  pxe-services:
+    build:
+      context: ./backend
+    image: ${BACKEND_IMAGE:-baremetal-manager/backend:latest}
+    command: ["pxe-services"]
     restart: unless-stopped
+    user: "0:2000"
     network_mode: host
-    command: ["sh", "-c", "apk add --no-cache dnsmasq && exec dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq.d/bmm.conf"]
+    environment:
+      DATABASE_URL: ${PXE_DATABASE_URL:-${DATABASE_URL}}
     volumes:
-      - ./deploy/dnsmasq/dnsmasq.conf:/etc/dnsmasq.d/bmm.conf:ro
-      - tftp-data:/var/lib/tftpboot
+      - pxe-control:/run/bmm-pxe
+      - pxe-state:/var/lib/bmm-pxe
+      - ./provisioning/tftp:/var/lib/tftpboot:ro
+    read_only: true
     cap_drop:
       - ALL
     cap_add:
@@ -320,4 +333,7 @@ volumes:
     name: ${POSTGRES_VOLUME:-baremetal-manager-target-pgdata}
   redis-data:
   minio-data:
+  image-download-temp:
   tftp-data:
+  pxe-control:
+  pxe-state:

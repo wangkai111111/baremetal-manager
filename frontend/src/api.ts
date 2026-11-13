@@ -143,6 +143,32 @@ export const batchOps = {
   scan: (assetIds: number[]) => Promise.all(assetIds.map(id => api.post(`/assets/${id}/collect`))),
   remove: (path: string, ids: (string | number)[]) => Promise.all(ids.map(id => resource.remove(path, id)))
 }
+export interface CatalogImage {
+  id: string
+  name: string
+  os_type: string
+  version: string
+  architecture: string
+  filename: string
+  source_url: string
+  status: string
+  downloaded_bytes: number
+  total_bytes: number
+  error?: string | null
+  image_id?: number | null
+}
+export const imageApi = {
+  catalog: (signal?: AbortSignal) => api.get('/images/catalog', { signal }),
+  list: (page: number, signal?: AbortSignal) => api.get('/images', { params: { page, page_size: 20, visibility: 'private' }, signal }),
+  download: (id: string, source: string, signal?: AbortSignal) => {
+    const config: AxiosRequestConfig & ScopedConfig = { signal, _expectedProjectId: sessionStorage.getItem('bmm_project_id') || '', _expectedContextVersion: contextVersion }
+    return api.post(`/images/catalog/${encodeURIComponent(id)}/download`, { source }, config)
+  },
+  upload: (data: FormData, signal: AbortSignal, onUploadProgress: AxiosRequestConfig['onUploadProgress']) => {
+    const config: AxiosRequestConfig & ScopedConfig = { signal, timeout: 0, onUploadProgress, _expectedProjectId: sessionStorage.getItem('bmm_project_id') || '', _expectedContextVersion: contextVersion }
+    return api.post('/images', data, config)
+  }
+}
 export function errorText(error: unknown) { return error instanceof Error ? error.message : '请求失败' }
 export const taskStatuses = ['pending', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'timeout', 'unknown']
 export function taskStatusType(status: unknown): 'success' | 'warning' | 'error' | 'info' | 'default' {

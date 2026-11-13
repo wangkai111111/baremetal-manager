@@ -755,14 +755,16 @@ async function collectAsset(row: RecordData) {
   }
 }
 
-// 后端 /assets/:id/install 尚未实现真实装机执行，此处优雅降级而不是发起注定失败的请求
 function startReinstall(row: RecordData) {
   dialog.info({
-    title: '重装系统',
-    content: `${row.name || row.id}：装机执行能力尚未开放（后端返回 501）。可在「装机任务」查看历史重装记录，或等待装机流水线上线。`,
-    positiveText: '查看装机任务',
-    negativeText: '知道了',
-    onPositiveClick: () => router.push('/installations')
+    title: 'PXE 重装预检',
+    content: `${row.name || row.id}：检查当前项目绑定、DHCP/TFTP 实际状态及引导文件。装机执行尚未实现，即使预检通过也不会重启或清盘。`,
+    positiveText: '执行预检',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try { await api.post(`/assets/${encodeURIComponent(String(row.id))}/install`) }
+      catch (e) { message.warning(errorText(e)) }
+    }
   })
 }
 

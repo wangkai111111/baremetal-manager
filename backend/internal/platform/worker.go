@@ -309,11 +309,17 @@ func (a *App) Worker(ctx context.Context) {
 	defer ticker.Stop()
 	slots := make(chan struct{}, 4)
 	notificationSlots := make(chan struct{}, 4)
+	imageSlots := make(chan struct{}, 1)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			select {
+			case imageSlots <- struct{}{}:
+				go func() { defer func() { <-imageSlots }(); a.pollImageDownload(ctx) }()
+			default:
+			}
 			for i := 0; i < 4; i++ {
 				select {
 				case notificationSlots <- struct{}{}:

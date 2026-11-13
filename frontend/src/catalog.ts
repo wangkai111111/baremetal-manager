@@ -73,24 +73,13 @@ export const sections: Section[] = [
   },
   {
     path: '/images',
-    title: '系统镜像',
-    subtitle: '镜像仓库与安装介质',
+    title: '镜像仓库',
+    subtitle: '公有镜像目录与项目内可用镜像',
     api: '/images',
     permission: 'images:read',
     mode: 'both',
     fields: [field('name', '镜像名称', true), field('os_type', '操作系统', true), field('version', '版本', true), field('architecture', '架构', true), field('object_key', '存储对象键', true), { ...field('size_bytes', '大小（字节）', true), type: 'number' }, field('sha256', 'SHA256', true)],
     columns: ['name', 'os_type', 'version', 'status', 'created_at']
-  },
-  {
-    path: '/installations',
-    title: '装机任务',
-    subtitle: '重装功能暂不支持；可查看任务中心已有记录',
-    api: '/tasks',
-    permission: 'tasks:read',
-    mode: 'both',
-    fields: [],
-    columns: ['kind', 'asset_id', 'status', 'error', 'created_at'],
-    readonly: true
   },
   {
     path: '/subnets',
@@ -180,23 +169,6 @@ export const sections: Section[] = [
       { ...field('secret', 'SMTP 密码或 HTTPS Webhook 完整地址'), type: 'password' }
     ],
     columns: ['name', 'kind', 'enabled', 'last_test_status', 'last_test_at', 'last_test_message', 'created_at']
-  },
-  // === 新增：Kickstart 装机模板 ===
-  {
-    path: '/kickstart-templates',
-    title: '装机模板',
-    subtitle: 'Kickstart 自动应答模板管理',
-    api: '/kickstart-templates',
-    permission: 'images:write',
-    mode: 'both',
-    fields: [
-      field('name', '模板名称', true),
-      field('os_type', '操作系统', true),
-      field('template_content', '模板内容', true),
-      field('partition_scheme', '分区方案'),
-      field('post_script', '装机后脚本')
-    ],
-    columns: ['name', 'os_type', 'created_at']
   },
   // === 新增：IP 地址池 ===
   {

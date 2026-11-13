@@ -8,7 +8,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const TargetVersion = "011_governance_phase56"
+const TargetVersion = "013_image_download_sources"
 
 var incrementalMigrations = []struct{ version, sql string }{
 	{"004_mode_system", ModeSystemSQL},
@@ -18,7 +18,9 @@ var incrementalMigrations = []struct{ version, sql string }{
 	{"008_asset_subscriptions", AssetSubscriptionsSQL},
 	{"009_subscription_safety", SubscriptionSafetySQL},
 	{"010_subscription_balance_payment", SubscriptionBalancePaymentSQL},
-	{TargetVersion, GovernanceSQL},
+	{"011_governance_phase56", GovernanceSQL},
+	{"012_image_download_jobs", ImageDownloadJobsSQL},
+	{TargetVersion, ImageDownloadSourcesSQL},
 }
 
 // Apply 在空库内执行目标迁移；旧数据库明确报错，不隐式破坏历史数据。
