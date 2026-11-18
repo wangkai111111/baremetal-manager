@@ -105,7 +105,7 @@ func (a *App) openAPI(c *gin.Context) {
 		}
 		parts := strings.Split(route.Path, "/")
 		for i, s := range parts {
-			if strings.HasPrefix(s, ":") {
+			if strings.HasPrefix(s, ":") || strings.HasPrefix(s, "*") {
 				parts[i] = "{" + s[1:] + "}"
 			}
 		}
@@ -115,9 +115,33 @@ func (a *App) openAPI(c *gin.Context) {
 			item = map[string]any{}
 			paths[path] = item
 		}
-		item.(map[string]any)[strings.ToLower(route.Method)] = gin.H{"responses": gin.H{"200": gin.H{"description": "Response envelope or binary image / WebSocket for documented endpoints"}}}
+		parameters := []gin.H{}
+		for _, part := range strings.Split(route.Path, "/") {
+			if strings.HasPrefix(part, ":") || strings.HasPrefix(part, "*") {
+				parameters = append(parameters, gin.H{"name": part[1:], "in": "path", "required": true, "schema": gin.H{"type": "string"}})
+			}
+		}
+		operation := gin.H{"parameters": parameters, "responses": gin.H{"200": gin.H{"description": "Response envelope, file stream, or WebSocket upgrade"}}}
+		public := map[string]bool{"/api/v1/auth/login": true, "/api/v1/brand": true, "/api/v1/docs/openapi.json": true, "/api/v1/setup/status": true, "/api/v1/setup/config": true}
+		if public[route.Path] || strings.HasPrefix(route.Path, "/api/v1/provision/") {
+			operation["security"] = []any{}
+		}
+		if route.Path == "/api/v1/sol/connect" {
+			operation["security"] = []gin.H{{"SOLTicket": []string{}}}
+			operation["description"] = "Requires a short-lived, single-use ticket issued by the authenticated sol-ticket endpoint."
+		}
+		item.(map[string]any)[strings.ToLower(route.Method)] = operation
 	}
-	c.JSON(200, gin.H{"openapi": "3.0.3", "info": gin.H{"title": "Baremetal target platform API", "version": "1.0.0", "description": "Only actual registered routes are listed. Device installation and firmware execution are unavailable (501)."}, "paths": paths})
+	c.JSON(200, gin.H{
+		"openapi":  "3.0.3",
+		"info":     gin.H{"title": "Baremetal Manager API", "version": "1.0.0", "description": "Registered routes. Test VM PXE installation is supported; physical installation and firmware execution require supported hardware and implementation."},
+		"security": []gin.H{{"BearerAuth": []string{}}, {"APIKey": []string{}}},
+		"components": gin.H{"securitySchemes": gin.H{
+			"BearerAuth": gin.H{"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+			"APIKey":     gin.H{"type": "apiKey", "in": "header", "name": "X-API-Key"},
+			"SOLTicket":  gin.H{"type": "apiKey", "in": "query", "name": "ticket"},
+		}}, "paths": paths,
+	})
 }
 func (a *App) alertTransition(c *gin.Context) {
 	sc := contextScope(c)

@@ -15,6 +15,7 @@ package platform
 // 工单消息表 work_order_messages 由 011_governance_phase56.sql 引入。
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -89,8 +90,8 @@ func (a *App) assignWorkOrder(c *gin.Context) {
 		AssignedTo *int64 `json:"assigned_to"`
 		Note       string `json:"note"`
 	}
-	if c.ShouldBindJSON(&in) != nil || in.AssignedTo == nil {
-		fail(c, 400, "必须提供 assigned_to（0 或 null 表示取消指派）")
+	if c.ShouldBindJSON(&in) != nil || in.AssignedTo == nil || *in.AssignedTo < 0 {
+		fail(c, 400, "必须提供 assigned_to（0 表示取消指派）")
 		return
 	}
 	note := strings.TrimSpace(in.Note)
@@ -121,7 +122,7 @@ func (a *App) assignWorkOrder(c *gin.Context) {
 		}
 		err := a.store.db.Table("users u").Select("u.id,u.username,u.name").
 			Joins("JOIN tenant_memberships tm ON tm.user_id=u.id AND tm.tenant_id=? AND tm.deleted_at IS NULL", sc.Tenant).
-			Where("u.id=? AND u.status='active' AND u.deleted_at IS NULL", *in.AssignedTo).Take(&profile).Error
+			Where("u.id=? AND u.status='active' AND u.deleted_at IS NULL AND tm.status='active'", *in.AssignedTo).Take(&profile).Error
 		if err != nil {
 			fail(c, 404, "指定的处理人不存在或不属于当前租户")
 			return
@@ -130,8 +131,8 @@ func (a *App) assignWorkOrder(c *gin.Context) {
 	}
 	meta := requestMeta(c, sc.User)
 	e := a.store.db.Transaction(func(tx *gorm.DB) error {
-		res := tx.Table("work_orders").Where("id=? AND tenant_id=? AND deleted_at IS NULL", id, sc.Tenant).
-			Updates(map[string]any{"assigned_to": assignedID, "update_by": sc.User})
+		res := tx.Table("work_orders").Where("id=? AND tenant_id=? AND deleted_at IS NULL AND status<>'closed'", id, sc.Tenant).
+			Updates(map[string]any{"assigned_to": assignedID})
 		if res.Error != nil {
 			return res.Error
 		}
@@ -155,6 +156,10 @@ func (a *App) assignWorkOrder(c *gin.Context) {
 		return a.store.recordAudit(tx, sc, meta, "assign", "work_orders", id, "success")
 	})
 	if e != nil {
+		if errors.Is(e, gorm.ErrRecordNotFound) {
+			fail(c, 409, "工单已关闭或不存在，请刷新后重试")
+			return
+		}
 		fail(c, 500, "工单指派失败")
 		return
 	}

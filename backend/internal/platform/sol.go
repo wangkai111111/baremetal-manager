@@ -51,10 +51,13 @@ func (a *App) solTicket(c *gin.Context) {
 		return
 	}
 	sc := contextScope(c)
-	var count int64
-	queryScope(a.store.db, resource{table: "assets"}, sc).Where("id=?", number(c.Param("id"))).Count(&count)
-	if count != 1 {
+	var identity device
+	if err := queryScope(a.store.db, resource{table: "assets"}, sc).Where("id=?", number(c.Param("id"))).Take(&identity).Error; err != nil {
 		fail(c, 404, "asset not found")
+		return
+	}
+	if isTestVMIdentity(identity.Manufacturer, identity.Model, identity.MACAddress) {
+		fail(c, 422, errTestVMLabRequired.Error())
 		return
 	}
 	key := uuid.NewString()
@@ -105,6 +108,10 @@ func (a *App) openSOL(c *gin.Context, sc scope, id int64) {
 	asset, d, e := a.loadDevice(ctx, sc, id)
 	if e != nil {
 		fail(c, 404, "asset unavailable")
+		return
+	}
+	if isTestVMIdentity(d.Manufacturer, d.Model, d.MACAddress) {
+		fail(c, 422, errTestVMLabRequired.Error())
 		return
 	}
 	session := map[string]any{"tenant_id": sc.Tenant, "project_id": sc.Project, "asset_id": id, "user_id": sc.User, "node_id": a.node, "expires_at": time.Now().Add(15 * time.Minute)}
@@ -164,7 +171,7 @@ func (a *App) openSOL(c *gin.Context, sc scope, id int64) {
 				return
 			case <-ticker.C:
 				var count int64
-				if err := queryScope(a.store.db.WithContext(ctx), resource{table: "assets"}, sc).Where("id=? AND COALESCE(subscription_state,'legacy') <> 'reclaim_pending'", id).Count(&count).Error; err != nil || count == 0 {
+				if err := queryScope(a.store.db.WithContext(ctx), resource{table: "assets"}, sc).Where("id=?", id).Count(&count).Error; err != nil || count == 0 {
 					cancel()
 					return
 				}
@@ -202,7 +209,7 @@ func (a *App) openSOL(c *gin.Context, sc scope, id int64) {
 }
 
 // 只公开品牌与运营白名单设置，不把敏感设置或任意数据库字段投射到前端。
-var brandDefaults = map[string]any{"brand.platform_name": "METALOPS", "brand.platform_tagline": "BAREMETAL CONTROL PLANE", "brand.logo_url": "", "theme.nav_bg": "#101e2b", "theme.nav_text": "#ffffff", "app.footer_text": "控制平面在线", "app.footer_visible": true, "app.login_notice": "", "platform.operation_mode": "self_hosted", "registration.enabled": false, "registration.email_verification": false, "billing.enabled": false, "billing.model_prices": []any{}}
+var brandDefaults = map[string]any{"brand.platform_name": "METALOPS", "brand.platform_tagline": "BAREMETAL CONTROL PLANE", "brand.logo_url": "", "theme.nav_bg": "#101e2b", "theme.nav_text": "#ffffff", "app.footer_text": "控制平面在线", "app.footer_visible": true, "app.login_notice": ""}
 
 var smtpDefaults = map[string]any{"smtp.host": "", "smtp.port": 587, "smtp.username": "", "smtp.password": "", "smtp.from": "", "smtp.tls": true}
 
@@ -281,17 +288,7 @@ func settingKeys() []string {
 }
 func (a *App) brand(c *gin.Context) {
 	s := a.publicSettings()
-	// 用权威源 system_modes 表读取 operation_mode
-	operationMode := s["platform.operation_mode"]
-	if mode, err := GetSystemMode(a.store.db); err == nil && mode != "" {
-		switch mode {
-		case ModeExternalOperation:
-			operationMode = "external"
-		case ModeSelfUse:
-			operationMode = "self_hosted"
-		}
-	}
-	ok(c, gin.H{"platform_name": s["brand.platform_name"], "platform_tagline": s["brand.platform_tagline"], "logo_url": s["brand.logo_url"], "nav_bg_color": s["theme.nav_bg"], "nav_text_color": s["theme.nav_text"], "footer_text": s["app.footer_text"], "footer_visible": s["app.footer_visible"], "login_notice": s["app.login_notice"], "operation_mode": operationMode, "feature_flags": gin.H{"registration_enabled": s["registration.enabled"], "email_verification": s["registration.email_verification"], "billing_enabled": s["billing.enabled"]}, "model_prices": s["billing.model_prices"]})
+	ok(c, gin.H{"platform_name": s["brand.platform_name"], "platform_tagline": s["brand.platform_tagline"], "logo_url": s["brand.logo_url"], "nav_bg_color": s["theme.nav_bg"], "nav_text_color": s["theme.nav_text"], "footer_text": s["app.footer_text"], "footer_visible": s["app.footer_visible"], "login_notice": s["app.login_notice"]})
 }
 func (a *App) settings(c *gin.Context) {
 	if !current(c).IsPlatformAdmin {
@@ -332,37 +329,6 @@ func (a *App) updateSettings(c *gin.Context) {
 			return
 		}
 	}
-	// 部署模式的唯一权威源是 system_modes 表；system_settings 里的 platform.operation_mode
-	// 只是冗余缓存，初始化锁定后禁止通过设置接口改写。
-	if _, exists := in["platform.operation_mode"]; exists {
-		locked, e := IsModeLocked(a.store.db)
-		if e != nil {
-			fail(c, 500, "查询部署模式锁定状态失败")
-			return
-		}
-		if locked {
-			fail(c, 403, "部署模式初始化后不可更改，如需变更请联系运维人员执行数据迁移")
-			return
-		}
-	}
-	// 租户自助注册只在对外运营模式下可用（同样以 system_modes 为判断依据）。
-	if want, exists := in["registration.enabled"]; exists {
-		if enabled, isBool := want.(bool); isBool && enabled {
-			mode, e := GetSystemMode(a.store.db)
-			if e != nil {
-				fail(c, 500, "查询部署模式失败")
-				return
-			}
-			if mode != ModeExternalOperation {
-				fail(c, 403, "租户自助注册仅在对外运营模式（external_operation）下可启用")
-				return
-			}
-		}
-	}
-	if enabled, ok := in["registration.email_verification"].(bool); ok && enabled && !a.smtpReady(in) {
-		fail(c, 400, "SMTP settings are required before enabling email verification")
-		return
-	}
 	e := a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
 		// 全局设置沿用现有项目审计表，归档到首个有效项目，不新增全局审计 DDL。
 		var project struct{ ID, TenantID int64 }
@@ -385,43 +351,7 @@ func (a *App) updateSettings(c *gin.Context) {
 		fail(c, 500, "settings update failed")
 		return
 	}
-	// 兜底清理：未锁定状态下允许写入运行模式缓存，写入后清除模式缓存
-	if _, exists := in["platform.operation_mode"]; exists {
-		InvalidateModeCache()
-	}
 	ok(c, a.publicSettings())
-}
-
-func (a *App) smtpReady(pending map[string]any) bool {
-	values := map[string]any{}
-	for k := range smtpDefaults {
-		values[k] = nil
-	}
-	var rows []struct{ Key, Value string }
-	a.store.db.Table("system_settings").Select("key,value::text").Where("deleted_at IS NULL AND key IN ?", settingKeys()).Scan(&rows)
-	for _, r := range rows {
-		var v any
-		if json.Unmarshal([]byte(r.Value), &v) == nil {
-			values[r.Key] = v
-		}
-	}
-	for k, v := range pending {
-		if strings.HasPrefix(k, "smtp.") {
-			values[k] = v
-		}
-	}
-	host, h := values["smtp.host"].(string)
-	user, u := values["smtp.username"].(string)
-	password, p := values["smtp.password"].(string)
-	from, f := values["smtp.from"].(string)
-	port, po := values["smtp.port"].(float64)
-	if !po {
-		if i, ok := values["smtp.port"].(int); ok {
-			port = float64(i)
-			po = true
-		}
-	}
-	return h && u && p && f && po && host != "" && user != "" && password != "" && from != "" && port >= 1 && port <= 65535
 }
 
 func validSetting(key string, value any) bool {
@@ -434,8 +364,6 @@ func validSetting(key string, value any) bool {
 		return false
 	}
 	switch key {
-	case "platform.operation_mode":
-		return value == "self_hosted" || value == "external"
 	case "smtp.port":
 		switch port := value.(type) {
 		case float64:
@@ -451,13 +379,6 @@ func validSetting(key string, value any) bool {
 	case "smtp.password":
 		str, ok := value.(string)
 		return ok && len(str) <= 4096
-	case "billing.model_prices":
-		switch value.(type) {
-		case []any, map[string]any:
-			return !sensitive(value)
-		default:
-			return false
-		}
 	}
 	switch def.(type) {
 	case bool:

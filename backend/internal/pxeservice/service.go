@@ -131,7 +131,10 @@ func (c Config) Render(service string) string {
 	}
 	p, _ := netip.ParsePrefix(c.Subnet)
 	mask := net.CIDRMask(p.Bits(), 32)
-	return base + fmt.Sprintf("dhcp-range=%s,%s,%s,12h\ndhcp-leasefile=/var/lib/bmm-pxe/dnsmasq.leases\ndhcp-option=3\ndhcp-option=6\ndhcp-match=set:efi,option:client-arch,7\ndhcp-match=set:efi,option:client-arch,9\ndhcp-boot=tag:!efi,%s,,%s\ndhcp-boot=tag:efi,%s,,%s\n", c.Start, c.End, net.IP(mask).String(), c.BIOS, c.Server, c.EFI, c.Server)
+	if c.Interface == TestVMBridge && c.Subnet == "192.168.77.0/24" {
+		base += "dhcp-host=" + TestVMMAC + ",192.168.77.100\n"
+	}
+	return base + fmt.Sprintf("dhcp-range=%s,%s,%s,12h\ndhcp-leasefile=/var/lib/bmm-pxe/dnsmasq.leases\ndhcp-option=3\ndhcp-option=6\ndhcp-match=set:efi,option:client-arch,7\ndhcp-match=set:efi,option:client-arch,9\ndhcp-match=set:ipxe,175\ndhcp-userclass=set:ipxe,iPXE\ndhcp-boot=tag:!ipxe,tag:!efi,%s,,%s\ndhcp-boot=tag:!ipxe,tag:efi,%s,,%s\ndhcp-boot=tag:ipxe,default.ipxe,,%s\n", c.Start, c.End, net.IP(mask).String(), c.BIOS, c.Server, c.EFI, c.Server, c.Server)
 }
 
 type controller struct {
@@ -140,6 +143,9 @@ type controller struct {
 	commands map[string]*exec.Cmd
 	last     string
 	active   func(context.Context) (bool, error)
+	vm       TestVMConfig
+	vmDone   chan struct{}
+	vmError  string
 }
 
 func Run(ctx context.Context, active func(context.Context) (bool, error)) error {
@@ -148,6 +154,29 @@ func Run(ctx context.Context, active func(context.Context) (bool, error)) error 
 		if e = json.Unmarshal(data, &s.config); e != nil {
 			return e
 		}
+	}
+	if data, e := os.ReadFile(testVMState); e == nil {
+		if e = json.Unmarshal(data, &s.vm); e != nil {
+			return e
+		}
+		if s.vm.TenantID <= 0 || s.vm.ProjectID <= 0 || (s.vm.Firmware != "bios" && s.vm.Firmware != "uefi") {
+			return errors.New("invalid persisted test VM owner or firmware")
+		}
+	} else if !os.IsNotExist(e) {
+		return e
+	}
+	// 仅开放动态引导目录给非 root worker，静态介质保持只读。
+	for _, name := range []string{"nocloud", "ipxe"} {
+		dir := filepath.Join(s.config.Root, name)
+		if e := os.MkdirAll(dir, 0750); e != nil {
+			return e
+		}
+		if e := os.Chown(dir, 998, 2000); e != nil {
+			return e
+		}
+	}
+	if e := os.MkdirAll("/var/lib/bmm-pxe", 0700); e != nil {
+		return e
 	}
 	if e := os.MkdirAll(filepath.Dir(Socket), 0755); e != nil {
 		return e
@@ -160,6 +189,9 @@ func Run(ctx context.Context, active func(context.Context) (bool, error)) error 
 		return e
 	}
 	defer l.Close()
+	if e = os.Chown(Socket, -1, 2000); e != nil {
+		return e
+	}
 	if e = os.Chmod(Socket, 0660); e != nil {
 		return e
 	}
@@ -188,6 +220,10 @@ func (s *controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(Status{s.config, s.commands["dhcp"] != nil, s.commands["tftp"] != nil, s.last})
 		return
 	}
+	if r.URL.Path == "/test-vm" || strings.HasPrefix(r.URL.Path, "/test-vm/") {
+		s.testVMHTTP(w, r)
+		return
+	}
 	busy, e := s.active(r.Context())
 	if e != nil {
 		failure(503, errors.New("无法确认活动装机任务，拒绝变更"))
@@ -198,7 +234,7 @@ func (s *controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "PUT" && r.URL.Path == "/config" {
-		if len(s.commands) > 0 {
+		if s.commands["dhcp"] != nil || s.commands["tftp"] != nil {
 			failure(409, errors.New("请先停止两项服务再修改配置"))
 			return
 		}
@@ -314,6 +350,6 @@ func Call(ctx context.Context, method, path string, body []byte) ([]byte, int, e
 		return nil, 0, errors.New("PXE 控制服务不可达，实际状态未知")
 	}
 	defer resp.Body.Close()
-	b, e := io.ReadAll(io.LimitReader(resp.Body, 16384))
+	b, e := io.ReadAll(io.LimitReader(resp.Body, 65536))
 	return b, resp.StatusCode, e
 }

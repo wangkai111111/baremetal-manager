@@ -7,7 +7,12 @@ import type { DataTableColumns } from 'naive-ui'
 import * as echarts from 'echarts'
 import dayjs from 'dayjs'
 import { depreciationApi, errorText, exportToExcel, resource, rows, unwrap, type RecordData } from '../api'
+import { flattenDepartments } from '../utils/departments'
 import { useAuth } from '../stores/auth'
+import AssetFinanceEditor from '../components/AssetFinanceEditor.vue'
+const financeOpen = ref(false)
+const financeAsset = ref<string | undefined>()
+function editFinance(id?: string) { financeAsset.value = id; financeOpen.value = true }
 
 const router = useRouter()
 const message = useMessage()
@@ -17,8 +22,13 @@ const auth = useAuth()
 // 数据状态
 // ============================================================
 const assets = ref<RecordData[]>([])
+const departments = ref<{ id: number; name: string }[]>([])
+function departmentName(id: string) {
+  return departments.value.find(dept => String(dept.id) === id)?.name || `部门 #${id}`
+}
 const depreciations = ref<RecordData[]>([])
 const loading = ref(false)
+let loadSequence = 0
 const search = ref('')
 const statusFilter = ref<string>('all')
 const selectedAssetId = ref<string>('')
@@ -55,10 +65,8 @@ function usedMonthsFrom(start: unknown): number {
   if (!begin.isValid()) return 0
   const now = dayjs()
   if (begin.isAfter(now)) return 0
-  const whole = Math.max(now.diff(begin, 'month'), 0)
-  const anchor = begin.add(whole, 'month')
-  const monthDays = anchor.endOf('month').date() || 30
-  return Math.min(whole + now.diff(anchor, 'day') / monthDays, whole + 1)
+  return Math.max((now.year() - begin.year()) * 12 + now.month() - begin.month()
+    + now.date() / now.daysInMonth() - begin.date() / begin.daysInMonth(), 0)
 }
 
 const METHOD_LABELS: Record<string, string> = {
@@ -138,10 +146,10 @@ const allRows = computed<DepRow[]>(() =>
     const startValue = dep?.start_date ?? asset.purchase_date ?? null
     const usedMonths = monthly != null && purchaseCost != null ? usedMonthsFrom(startValue) : 0
     const depreciable = purchaseCost != null ? Math.max(purchaseCost - (salvageValue ?? 0), 0) : null
-    const accumulated = depreciable != null && monthly != null
+    const accumulated = dep && num(dep.accumulated_depreciation) != null ? num(dep.accumulated_depreciation) : depreciable != null && monthly != null
       ? Math.min(monthly * usedMonths, depreciable)
       : dep ? num(dep.accumulated_depreciation) : null
-    const netValue = purchaseCost != null && accumulated != null
+    const netValue = dep && num(dep.net_value) != null ? num(dep.net_value) : purchaseCost != null && accumulated != null
       ? Math.max(purchaseCost - accumulated, salvageValue ?? 0)
       : dep ? num(dep.net_value) : null
     const configured = !!dep || (purchaseCost != null && usefulLife != null)
@@ -511,13 +519,24 @@ async function fetchAllPages(
 }
 
 async function load() {
+  const sequence = ++loadSequence
   if (!auth.projectId) return
   loading.value = true
+  departments.value = []
   try {
     const [assetPage, depreciationPage] = await Promise.all([
       fetchAllPages(async page => rows(await resource.list('/assets', { page, page_size: 200 }))),
       fetchAllPages(async page => rows(await depreciationApi.list({ page, page_size: 200 })))
     ])
+    if (sequence !== loadSequence) return
+    if (auth.can('departments:read')) {
+      try {
+        const result = flattenDepartments(rows(await resource.list('/departments')).items)
+        if (sequence !== loadSequence) return
+        departments.value = result
+      } catch { if (sequence === loadSequence) departments.value = [] }
+    }
+    if (sequence !== loadSequence) return
     assets.value = assetPage.items
     depreciations.value = depreciationPage.items
     assetsTotal.value = assetPage.total
@@ -528,9 +547,9 @@ async function load() {
     }
     await renderTrendChart()
   } catch (e) {
-    message.error(errorText(e))
+    if (sequence === loadSequence) message.error(errorText(e))
   } finally {
-    loading.value = false
+    if (sequence === loadSequence) loading.value = false
   }
 }
 
@@ -563,7 +582,10 @@ async function exportExcel() {
   }
 }
 
-watch(() => auth.projectId, () => {
+watch([() => auth.projectId, () => auth.tenantId], () => {
+  assets.value = []
+  depreciations.value = []
+  departments.value = []
   selectedAssetId.value = ''
   detail.value = null
   search.value = ''
@@ -597,6 +619,7 @@ watch(trendRef, el => {
         <p>按直线法追踪资产净值变化，掌握设备残值与折余价值</p>
       </div>
       <div class="head-actions">
+        <n-button v-if="auth.can('assets:write')" type="primary" @click="editFinance()">配置折旧</n-button>
         <n-button quaternary @click="load">刷新</n-button>
         <n-button type="primary" ghost @click="exportExcel">导出 Excel</n-button>
       </div>
@@ -699,7 +722,7 @@ watch(trendRef, el => {
                   {{ assetStatusLabel(selectedRow.assetStatus) }}
                 </n-tag>
                 <n-tag v-if="selectedRow.departmentId" size="tiny" :bordered="false" type="info">
-                  部门 #{{ selectedRow.departmentId }}
+                  {{ departmentName(selectedRow.departmentId) }}
                 </n-tag>
               </div>
             </div>
@@ -708,6 +731,7 @@ watch(trendRef, el => {
             </n-button>
           </div>
 
+          <n-button v-if="auth.can('assets:write') && assets.find(a => String(a.id) === selectedRow?.assetId)?.can_manage === true" type="primary" secondary size="small" style="margin: 0 20px 16px" @click="editFinance(selectedRow.assetId)">{{ selectedRow.configured ? '编辑折旧参数' : '配置折旧参数' }}</n-button>
           <div v-if="!breakdown || !breakdown.configured" class="dep-detail-empty">
             <n-empty description="该资产尚未配置折旧参数">
               <template #extra>
@@ -765,6 +789,7 @@ watch(trendRef, el => {
         </div>
       </aside>
     </div>
+    <AssetFinanceEditor v-model:show="financeOpen" :asset-id="financeAsset" kind="depreciation" @saved="load" />
   </div>
 </template>
 
@@ -780,14 +805,14 @@ watch(trendRef, el => {
   align-items: start;
 }
 
-.dep-asset-cell {
+:deep(.dep-asset-cell) {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
 
-.dep-asset-name {
+:deep(.dep-asset-name) {
   font-weight: 600;
   color: var(--color-text-primary);
   overflow: hidden;
@@ -795,33 +820,33 @@ watch(trendRef, el => {
   white-space: nowrap;
 }
 
-.dep-asset-sn {
+:deep(.dep-asset-sn) {
   font-size: 11px;
   color: var(--color-text-tertiary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.money-value {
+:deep(.money-value) {
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13px;
   color: var(--color-text-primary);
 }
 
-.money-value.muted {
+:deep(.money-value.muted) {
   color: var(--color-text-tertiary);
 }
 
-.money-value.warn {
+:deep(.money-value.warn) {
   color: var(--color-warning);
 }
 
-.money-value.net-value {
+:deep(.money-value.net-value) {
   font-weight: 700;
   color: var(--color-primary);
 }
 
-.dep-accumulated {
+:deep(.dep-accumulated) {
   display: flex;
   flex-direction: column;
   align-items: flex-end;

@@ -51,3 +51,26 @@ var ImageDownloadJobsSQL string
 
 //go:embed 013_image_download_sources.sql
 var ImageDownloadSourcesSQL string
+
+//go:embed 014_operation_client_ip.sql
+var OperationClientIPSQL string
+
+//go:embed 015_order_configuration.sql
+var OrderConfigurationSQL string
+
+// InternalManagementSQL removes commercial mode configuration without deleting historical data.
+//
+//go:embed 016_internal_management.sql
+var InternalManagementSQL string
+
+//go:embed 017_installation_progress.sql
+var InstallationProgressSQL string
+
+//go:embed 018_asset_access.sql
+var AssetAccessSQL string
+
+//go:embed 019_remove_network_records.sql
+var RemoveNetworkRecordsSQL string
+
+//go:embed 020_quiet_automatic_collection.sql
+var QuietAutomaticCollectionSQL string

@@ -162,9 +162,14 @@ func (a *App) createWorkOrder(c *gin.Context) {
 	}
 	// 如果指定了处理人，验证其存在性
 	if in.AssignedTo != nil && *in.AssignedTo > 0 {
+		if !a.workOrderAccess(c).canAll {
+			fail(c, 403, "仅平台管理员或客服角色可指派工单")
+			return
+		}
 		var count int64
-		a.store.db.Table("users").
-			Where("id=? AND status='active' AND deleted_at IS NULL", *in.AssignedTo).
+		a.store.db.Table("users u").
+			Joins("JOIN tenant_memberships tm ON tm.user_id=u.id AND tm.tenant_id=? AND tm.status='active' AND tm.deleted_at IS NULL", sc.Tenant).
+			Where("u.id=? AND u.status='active' AND u.deleted_at IS NULL", *in.AssignedTo).
 			Count(&count)
 		if count == 0 {
 			fail(c, 404, "指定的处理人不存在")
@@ -260,10 +265,19 @@ func (a *App) updateWorkOrder(c *gin.Context) {
 		updates["priority"] = *in.Priority
 	}
 	if in.AssignedTo != nil {
+		if !viewer.canAll {
+			fail(c, 403, "仅平台管理员或客服角色可指派工单")
+			return
+		}
+		if existing.Status == "closed" {
+			fail(c, 409, "已关闭的工单不可再指派")
+			return
+		}
 		if *in.AssignedTo > 0 {
 			var count int64
-			a.store.db.Table("users").
-				Where("id=? AND status='active' AND deleted_at IS NULL", *in.AssignedTo).
+			a.store.db.Table("users u").
+				Joins("JOIN tenant_memberships tm ON tm.user_id=u.id AND tm.tenant_id=? AND tm.status='active' AND tm.deleted_at IS NULL", sc.Tenant).
+				Where("u.id=? AND u.status='active' AND u.deleted_at IS NULL", *in.AssignedTo).
 				Count(&count)
 			if count == 0 {
 				fail(c, 404, "指定的处理人不存在")
@@ -282,7 +296,7 @@ func (a *App) updateWorkOrder(c *gin.Context) {
 	}
 	e = a.store.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Table("work_orders").
-			Where("id=? AND tenant_id=? AND deleted_at IS NULL", id, sc.Tenant).
+			Where("id=? AND tenant_id=? AND status=? AND deleted_at IS NULL", id, sc.Tenant, existing.Status).
 			Updates(updates)
 		if res.Error != nil {
 			return res.Error
@@ -315,12 +329,13 @@ func (a *App) transitionWorkOrder(c *gin.Context) {
 	}
 	// 查询当前工单
 	var workOrder struct {
-		ID     int64
-		Status string
-		UserID int64 `gorm:"column:user_id"`
+		ID         int64
+		Status     string
+		UserID     int64 `gorm:"column:user_id"`
+		AssignedTo *int64
 	}
 	e := a.store.db.Table("work_orders").
-		Select("id, status, user_id").
+		Select("id, status, user_id, assigned_to").
 		Where("id=? AND tenant_id=? AND deleted_at IS NULL", id, sc.Tenant).
 		Take(&workOrder).Error
 	if e != nil {
@@ -328,6 +343,10 @@ func (a *App) transitionWorkOrder(c *gin.Context) {
 		return
 	}
 	// 校验状态流转合法性
+	if !viewer.visible(workOrder.UserID, workOrder.AssignedTo) {
+		fail(c, 403, "无权操作此工单")
+		return
+	}
 	allowed, exists := workOrderTransitions[workOrder.Status]
 	if !exists || !allowed[transition] {
 		fail(c, 400, fmt.Sprintf("不允许从 %s 流转到 %s", workOrder.Status, transition))

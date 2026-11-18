@@ -102,12 +102,13 @@ func (g *IPXEScriptGenerator) UbuntuScript(mac, ip, netmask, gateway, isoFileNam
 		kernelArgs = append(kernelArgs, "ip=dhcp")
 		networkLine = provisioningIPXEDHCP
 	}
-	// seed 目录以 NoCloud-net 形式提供；分号在 iPXE 脚本里必须转义，否则会被当作命令行分隔符截断。
+	// iPXE forwards semicolons verbatim. GRUB-style backslash escaping would reach
+	// /proc/cmdline unchanged and prevent cloud-init from recognizing the datasource.
 	// ${mac} 在生成时直接展开为无冒号小写 MAC（与落盘目录名一致），不依赖 iPXE 内置变量（那是冒号形式）。
 	kernelArgs = append(kernelArgs,
 		"autoinstall",
 		"url=${http-base}/iso/"+name,
-		`ds=nocloud-net\;s=${http-base}/nocloud/`+macFile+`/`,
+		`ds=nocloud-net;s=${http-base}/nocloud/`+macFile+`/`,
 	)
 
 	var b strings.Builder

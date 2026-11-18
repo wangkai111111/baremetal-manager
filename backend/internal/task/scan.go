@@ -26,7 +26,7 @@ func (p *ScanProcessor) Process(ctx context.Context, payload ScanNetworkAction) 
 	// 3. 对存活 IP 尝试 BMC 连接（Redfish/IPMI）
 	// 4. 识别设备型号、序列号等信息
 	// 5. 与现有 Asset 匹配或创建新 Asset
-	// 6. 更新 Network 和 IPAllocation 记录
+	// 6. 更新网络发现记录
 	return fmt.Errorf("网段扫描功能尚未实现")
 }
 

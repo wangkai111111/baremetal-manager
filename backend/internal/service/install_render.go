@@ -281,7 +281,7 @@ autoinstall:
     install-server: true
     allow-pw: true
 {{- if .HasSSHKey }}
-    authorized_keys:
+    authorized-keys:
       - {{ printf "%q" .SSHKey }}
 {{- end }}
   user-data:

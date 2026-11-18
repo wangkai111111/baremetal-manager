@@ -19,6 +19,10 @@ import type { DataTableColumns } from 'naive-ui'
 import dayjs from 'dayjs'
 import { depreciationApi, errorText, exportToExcel, rows, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
+import AssetFinanceEditor from '../components/AssetFinanceEditor.vue'
+const financeOpen = ref(false)
+const financeAsset = ref<string | undefined>()
+function editFinance(id?: string) { financeAsset.value = id; financeOpen.value = true }
 
 const router = useRouter()
 const message = useMessage()
@@ -47,23 +51,27 @@ function clampDays(value: number): number {
   return Math.min(Math.max(Math.round(value), MIN_ALERT_DAYS), MAX_ALERT_DAYS)
 }
 
+let loadSequence = 0
 async function load() {
+  const sequence = ++loadSequence
   if (!auth.projectId) return
   loading.value = true
   loadError.value = ''
   const alertWindow = clampDays(days.value)
   try {
     const response = await depreciationApi.warrantyAlerts(alertWindow)
+    if (sequence !== loadSequence) return
     const payload = unwrap<RecordData>(response)
     const data = rows(response)
     alerts.value = data.items
     total.value = data.total
     appliedDays.value = Number(payload?.alert_days ?? alertWindow)
   } catch (e) {
+    if (sequence !== loadSequence) return
     loadError.value = errorText(e)
     message.error(loadError.value)
   } finally {
-    loading.value = false
+    if (sequence === loadSequence) loading.value = false
   }
 }
 
@@ -80,6 +88,7 @@ type Tone = 'urgent' | 'high' | 'mid' | 'low'
 type TagType = 'error' | 'warning' | 'info' | 'success' | 'default'
 
 function urgencyOf(remaining: number): { label: string; tone: Tone; type: TagType } {
+  if (remaining < 0) return { label: '已过期', tone: 'urgent', type: 'error' }
   if (remaining <= 7) return { label: '危急', tone: 'urgent', type: 'error' }
   if (remaining <= 30) return { label: '紧急', tone: 'high', type: 'error' }
   if (remaining <= 90) return { label: '关注', tone: 'mid', type: 'warning' }
@@ -146,6 +155,7 @@ const buckets = computed(() => {
 // 表格列
 // ============================================================
 const columns = computed<DataTableColumns<RecordData>>(() => [
+  ...(auth.can('assets:write') ? [{ title: '操作', key: 'edit', width: 100, render: (row: RecordData) => h(NButton, {text: true, type:'primary', disabled: row.can_manage !== true, onClick: () => editFinance(String(row.asset_id))}, {default: () => '编辑维保'}) }] : []),
   {
     title: '服务器',
     key: 'name',
@@ -195,13 +205,13 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
       const percentage = Math.max(Math.min(Math.round((remaining / appliedDays.value) * 100), 100), 2)
       return h('div', { class: ['wa-remaining', `wa-remaining-${urgency.tone}`] }, [
         h('div', { class: 'wa-remaining-head' }, [
-          h('span', { class: 'wa-remaining-days' }, `${remaining} 天`),
+          h('span', { class: 'wa-remaining-days' }, remaining < 0 ? `已过期 ${Math.abs(remaining)} 天` : `${remaining} 天`),
           h(NTag, { size: 'tiny', bordered: false, type: urgency.type }, { default: () => urgency.label })
         ]),
         h(NProgress, {
           type: 'line',
           percentage,
-          displayIndicator: false,
+          showIndicator: false,
           height: 4,
           fillBorderRadius: 2,
           status: urgency.type === 'error' ? 'error' : urgency.type === 'warning' ? 'warning' : 'success'
@@ -244,9 +254,10 @@ async function exportExcel() {
       <div>
         <div class="eyebrow dark">ASSET / WARRANTY</div>
         <h1>维保告警</h1>
-        <p>按告警窗口巡检即将到保的服务器，提前安排续保、延保或退役计划</p>
+        <p>查看已过期与即将到期的维保，安排续保、延保或退役计划</p>
       </div>
       <div class="head-actions">
+        <n-button v-if="auth.can('assets:write')" type="primary" @click="editFinance()">设置采购 / 维保</n-button>
         <n-button quaternary :loading="loading" @click="load">刷新</n-button>
         <n-button type="primary" ghost :disabled="!filtered.length" @click="exportExcel">导出清单</n-button>
       </div>
@@ -258,9 +269,9 @@ async function exportExcel() {
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         </div>
         <div class="metric-content">
-          <div class="metric-label">窗口内到保</div>
+          <div class="metric-label">过期及即将到期</div>
           <div class="metric-value">{{ total }}</div>
-          <div class="metric-foot">近 {{ appliedDays }} 天需处理</div>
+          <div class="metric-foot">含已过期及未来 {{ appliedDays }} 天内到期</div>
         </div>
       </div>
       <div class="metric-card">
@@ -270,7 +281,7 @@ async function exportExcel() {
         <div class="metric-content">
           <div class="metric-label">危急 / 紧急</div>
           <div class="metric-value">{{ buckets.urgent }} / {{ buckets.high }}</div>
-          <div class="metric-foot">≤7 天与 ≤30 天两个分级</div>
+          <div class="metric-foot">已过期或 ≤7 天 / 8–30 天</div>
         </div>
       </div>
       <div class="metric-card">
@@ -291,7 +302,7 @@ async function exportExcel() {
           <div class="panel-title">到保清单 <span class="count">{{ filtered.length }}</span></div>
           <p class="panel-caption">
             <template v-if="loadError">加载失败：{{ loadError }}</template>
-            <template v-else>告警窗口 {{ appliedDays }} 天，仅统计维保到期日在今天之后的服务器；已过期维保请查看资产详情</template>
+            <template v-else>包含已过期及未来 {{ appliedDays }} 天内到期的服务器；编辑到期日期后自动更新</template>
           </p>
         </div>
         <div class="toolbar-actions wa-toolbar">
@@ -347,6 +358,7 @@ async function exportExcel() {
         </p>
       </div>
     </div>
+    <AssetFinanceEditor v-model:show="financeOpen" :asset-id="financeAsset" kind="lifecycle" @saved="load" />
   </div>
 </template>
 

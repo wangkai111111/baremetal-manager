@@ -20,14 +20,12 @@ type resource struct {
 
 // 注册项为固定白名单；路由参数永远不参与表名或列名拼接。
 var resources = []resource{
-	{"assets", "assets", "name serial_number manufacturer model datacenter_id bmc_address bmc_protocol bmc_port bmc_tls_verify bmc_user bmc_secret management_ip mac_address status purchase_date warranty_expiry vendor", "name bmc_address bmc_user bmc_secret", false},
+	{"assets", "assets", "name serial_number manufacturer model datacenter_id department_id bmc_address bmc_protocol bmc_port bmc_tls_verify bmc_user bmc_secret management_ip mac_address status purchase_date warranty_expiry vendor", "name bmc_address bmc_user bmc_secret", false},
 	{"datacenters", "datacenters", "name location contact", "name", false},
 	{"tags", "tags", "name color", "name", false},
 	{"asset-tags", "asset_tags", "asset_id tag_id", "asset_id tag_id", false},
-	{"networks", "networks", "name subnet gateway vlan_id dhcp_enabled", "name subnet", false},
+	{"networks", "networks", "name subnet gateway vlan_id dns_servers dhcp_enabled", "name subnet", false},
 	{"ip-pools", "ip_pools", "network_id name start_address end_address", "network_id name start_address end_address", false},
-	{"ip-allocations", "ip_allocations", "network_id pool_id asset_id address mac_address status", "network_id address", false},
-	{"pxe-configs", "pxe_configs", "network_id name boot_mode next_server boot_file enabled config", "network_id name boot_mode next_server boot_file", false},
 	{"images", "images", "name os_type version architecture", "name os_type version architecture", false},
 	{"image-templates", "image_templates", "name image_id config", "name image_id", false},
 	{"kickstart-templates", "kickstart_templates", "name format content revision", "name format content", false},
@@ -51,58 +49,48 @@ var resources = []resource{
 	{"discovery-candidates", "discovery_candidates", "", "", true}, {"sol-sessions", "sol_sessions", "", "", true}, {"audit", "audits", "", "", true},
 
 	// 以下资源已迁移至自定义处理器（租户级作用域），不再使用通用 CRUD：
-	// departments, products, orders, bills, accounts, payments, invoices, coupons, work_orders
+	// departments, work_orders
 	// 自定义处理器位于同目录下对应的 .go 文件中
 }
-var references = map[string]string{"datacenter_id": "datacenters", "asset_id": "assets", "tag_id": "tags", "network_id": "networks", "pool_id": "ip_pools", "image_id": "images", "image_template_id": "image_templates", "kickstart_template_id": "kickstart_templates", "partition_template_id": "partition_templates", "install_plan_id": "install_plans", "script_id": "post_install_scripts", "firmware_package_id": "firmware_packages", "rule_id": "alert_rules", "channel_id": "alert_channels", "window_id": "maintenance_windows"}
-var jsonFields = map[string]bool{"config": true, "layout": true, "compatible_models": true, "metrics": true, "selector": true, "spec_json": true, "pricing_json": true, "detail_json": true}
-var hidden = " - 'bmc_secret_ciphertext' - 'bmc_secret_key_id' - 'password_hash' - 'secret_ciphertext' - 'secret_key_id' - 'test_claim_until' - 'callback_token_hash' - 'config_snapshot' - 'redfish_snapshot' - 'snapshot' - 'payload' - 'result' - 'before_snapshot' - 'after_snapshot'"
+var references = map[string]string{"department_id": "departments", "datacenter_id": "datacenters", "asset_id": "assets", "tag_id": "tags", "network_id": "networks", "pool_id": "ip_pools", "image_id": "images", "image_template_id": "image_templates", "kickstart_template_id": "kickstart_templates", "partition_template_id": "partition_templates", "install_plan_id": "install_plans", "script_id": "post_install_scripts", "firmware_package_id": "firmware_packages", "rule_id": "alert_rules", "channel_id": "alert_channels", "window_id": "maintenance_windows"}
+var jsonFields = map[string]bool{"config": true, "layout": true, "compatible_models": true, "metrics": true, "selector": true, "detail_json": true}
+var hidden = " - 'bmc_secret_ciphertext' - 'bmc_secret_key_id' - 'password_hash' - 'secret_ciphertext' - 'secret_key_id' - 'test_claim_until' - 'callback_token_hash' - 'config_snapshot' - 'redfish_snapshot' - 'snapshot' - 'payload' - 'result' - 'before_snapshot' - 'after_snapshot' - 'subscription_state' - 'lease_end' - 'unsubscribed_at'"
 
+// queryScope enforces organization and project isolation for every resource.
 func queryScope(db *gorm.DB, r resource, sc scope) *gorm.DB {
 	q := db.Table(r.table).Where("tenant_id=? AND project_id=? AND deleted_at IS NULL", sc.Tenant, sc.Project)
-	if sc.Admin {
-		return q
-	}
-	// 数据隔离唯一权威源：GetSystemMode()（system_modes 表）；
-	// 仅运营模式（external_operation）需要按已交付购买订单过滤，
-	// 自用模式（self_use）或未初始化时不做隔离。
-	mode := currentSystemMode(db)
-	if mode != ModeExternalOperation {
-		return q
-	}
-	var ownership *gorm.DB
+	// Automatic polling is internal queue work, not a user operation or task history.
 	switch r.table {
-	case "assets":
-		return q.Where("COALESCE(assets.subscription_state,'legacy') <> 'reclaim_pending'").Where("EXISTS (SELECT 1 FROM orders WHERE orders.asset_id=assets.id AND orders.tenant_id=? AND orders.type='purchase' AND orders.status='completed' AND orders.deleted_at IS NULL)", sc.Tenant)
-	case "asset_tags", "ip_allocations", "asset_monitor_configs", "maintenance_window_assets", "asset_hardwares", "firmware_inventories", "operations", "installations", "firmware_upgrades", "sensor_records", "alerts", "sol_sessions":
-		ownership = queryScope(db.Session(&gorm.Session{NewDB: true}), resource{table: "assets"}, sc).Select("id")
+	case "operations":
+		q = q.Where("NOT (automatic AND kind='collect')")
 	case "operation_logs":
-		ownership = queryScope(db.Session(&gorm.Session{NewDB: true}), resource{table: "operations"}, sc).Select("id")
-	case "installation_events":
-		ownership = queryScope(db.Session(&gorm.Session{NewDB: true}), resource{table: "installations"}, sc).Select("id")
-	case "alert_events":
-		ownership = queryScope(db.Session(&gorm.Session{NewDB: true}), resource{table: "alerts"}, sc).Select("id")
-	case "notification_deliveries":
-		ownership = queryScope(db.Session(&gorm.Session{NewDB: true}), resource{table: "alert_events"}, sc).Select("id")
-	default:
-		return q
+		q = q.Where(`EXISTS (SELECT 1 FROM operations visible_op WHERE visible_op.id=operation_logs.operation_id
+          AND visible_op.tenant_id=operation_logs.tenant_id AND visible_op.project_id=operation_logs.project_id
+          AND NOT (visible_op.automatic AND visible_op.kind='collect'))`)
 	}
-	field := "asset_id"
-	switch r.table {
-	case "operation_logs":
-		field = "operation_id"
-	case "installation_events":
-		field = "installation_id"
-	case "alert_events":
-		field = "alert_id"
-	case "notification_deliveries":
-		field = "alert_event_id"
-	}
-	return q.Where(field+" IN (?)", ownership)
+	return filterAssetResource(q, r.table, sc)
 }
+func resourceDocumentSQL(r resource) string {
+	doc := "(to_jsonb(" + r.table + ")" + hidden + ")"
+	if r.table == "operations" {
+		doc += ` || jsonb_build_object(
+ 'operator_name', (SELECT NULLIF(u.name,'') FROM users u WHERE u.id=operations.user_id AND u.deleted_at IS NULL),
+ 'client_ip', host(operations.client_ip),
+ 'bmc_ip', (SELECT host(ast.bmc_address) FROM assets ast
+  WHERE ast.tenant_id=operations.tenant_id AND ast.project_id=operations.project_id
+   AND ast.id=operations.asset_id AND ast.deleted_at IS NULL),
+ 'installation_stage', (SELECT inst.status FROM installations inst
+  WHERE inst.tenant_id=operations.tenant_id AND inst.project_id=operations.project_id
+   AND inst.operation_id=operations.id AND inst.asset_id=operations.asset_id
+   AND operations.kind='install' AND inst.deleted_at IS NULL),
+ 'installation_step', (SELECT s->>'title' FROM installations inst CROSS JOIN LATERAL jsonb_array_elements(inst.progress) s WHERE inst.operation_id=operations.id AND inst.asset_id=operations.asset_id AND inst.tenant_id=operations.tenant_id AND inst.project_id=operations.project_id AND inst.deleted_at IS NULL AND s->>'status'='running' LIMIT 1))`
+	}
+	return "(" + doc + ")::text AS doc"
+}
+
 func decodeRows(db *gorm.DB, r resource) ([]map[string]any, error) {
 	var rows []struct{ Doc string }
-	e := db.Select("(to_jsonb(" + r.table + ")" + hidden + ")::text AS doc").Scan(&rows).Error
+	e := db.Select(resourceDocumentSQL(r)).Scan(&rows).Error
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		var m map[string]any
@@ -131,7 +119,7 @@ func page(c *gin.Context) (int, int) {
 	return p, n
 }
 
-// 订单按租户隔离，asset_id 将交付关系关联到当前项目的资产。
+// 资产显示状态由当前运维任务与电源状态推导。
 const assetDisplayStatusSQL = `COALESCE((
  SELECT CASE WHEN op.status IN ('pending','retry_wait') THEN 'queued'
   WHEN op.kind='power_on' THEN 'starting'
@@ -157,9 +145,6 @@ const assetDisplayStatusSQL = `COALESCE((
    AND op.kind IN ('power_on','power_off','power_cycle')
   ORDER BY op.created_at DESC, op.id DESC LIMIT 1) THEN 'unknown'
  WHEN assets.power_state='off' THEN 'stopped'
- WHEN assets.power_state='on' AND EXISTS (SELECT 1 FROM orders
-  WHERE orders.tenant_id=assets.tenant_id AND orders.asset_id=assets.id
-   AND orders.type='purchase' AND orders.status='completed' AND orders.deleted_at IS NULL) THEN 'in_use'
  WHEN assets.power_state='on' THEN 'running'
  WHEN assets.collected_at IS NULL AND assets.status='unknown' THEN 'pending_management'
  WHEN assets.status='offline' THEN 'offline'
@@ -226,6 +211,9 @@ func (a *App) listResource(r resource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sc := contextScope(c)
 		q := queryScope(a.store.db.WithContext(c.Request.Context()), r, sc)
+		if network := number(c.Query("network_id")); network > 0 && r.table == "ip_pools" {
+			q = q.Where("network_id=?", network)
+		}
 		if r.table == "images" && c.Query("visibility") == "private" {
 			q = q.Where(`NOT EXISTS (SELECT 1 FROM image_download_jobs AS job WHERE job.image_id=images.id AND job.tenant_id=images.tenant_id AND job.project_id=images.project_id)`)
 		}
@@ -233,6 +221,9 @@ func (a *App) listResource(r resource) gin.HandlerFunc {
 			q = q.Where("asset_id=?", id)
 		}
 		if r.table == "assets" {
+			if c.Query("manageable") == "true" {
+				q = q.Where(departmentAccessSQL(sc, "assets.department_id", true))
+			}
 			condition, err := assetSearchCondition(c.DefaultQuery("search_field", "auto"))
 			if err != nil {
 				fail(c, 400, err.Error())
@@ -241,6 +232,30 @@ func (a *App) listResource(r resource) gin.HandlerFunc {
 			q = assetListQuery(q, condition, c.Query("search"), c.Query("tags"), c.Query("status"), number(c.Query("datacenter_id")))
 		} else if search := strings.TrimSpace(c.Query("search")); search != "" && strings.Contains(" "+r.fields+" ", " name ") {
 			q = q.Where("name ILIKE ?", "%"+search+"%")
+		}
+		// Filter only known columns; user input is always bound as a value.
+		if r.table != "assets" {
+			if r.table == "alerts" {
+				switch c.Query("resolved") {
+				case "false":
+					q = q.Where("status <> 'resolved'")
+				case "true":
+					q = q.Where("status = 'resolved'")
+				}
+			}
+			if status := strings.TrimSpace(c.Query("status")); status != "" && (r.table == "operations" || r.table == "alerts" || r.table == "images") {
+				q = q.Where("status=?", status)
+			}
+			if search := strings.TrimSpace(c.Query("search")); search != "" {
+				switch r.table {
+				case "operations":
+					q = q.Where("(kind ILIKE ? OR status ILIKE ? OR error ILIKE ?)", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+				case "alerts":
+					q = q.Where("message ILIKE ?", "%"+search+"%")
+				case "audits":
+					q = q.Where("(action ILIKE ? OR target_type ILIKE ? OR target_id ILIKE ?)", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+				}
+			}
 		}
 		var total int64
 		if q.Count(&total).Error != nil {
@@ -252,6 +267,24 @@ func (a *App) listResource(r resource) gin.HandlerFunc {
 		if e != nil {
 			fail(c, 500, "resource query failed")
 			return
+		}
+		if r.table == "assets" {
+			managed := []int64{}
+			pageIDs := []int64{}
+			for _, item := range items {
+				pageIDs = append(pageIDs, asInt(item["id"]))
+			}
+			if err := queryScope(a.store.db, resource{table: "assets"}, sc).Where("id IN ?", pageIDs).Where(departmentAccessSQL(sc, "assets.department_id", true)).Pluck("id", &managed).Error; err != nil {
+				fail(c, 500, "资产权限查询失败")
+				return
+			}
+			lookup := map[int64]bool{}
+			for _, id := range managed {
+				lookup[id] = true
+			}
+			for _, item := range items {
+				item["can_manage"] = lookup[asInt(item["id"])]
+			}
 		}
 		ok(c, gin.H{"items": items, "total": total, "page": p, "page_size": n})
 	}
@@ -266,6 +299,9 @@ func (a *App) getResource(r resource) gin.HandlerFunc {
 		if len(items) == 0 {
 			fail(c, 404, "resource not found")
 			return
+		}
+		if r.table == "assets" {
+			items[0]["can_manage"] = a.store.managesAsset(contextScope(c), number(c.Param("id")))
 		}
 		ok(c, items[0])
 	}
@@ -343,12 +379,42 @@ func inputResource(c *gin.Context, r resource, create bool) (map[string]any, err
 			in[k] = gorm.Expr("?::jsonb", string(b))
 		}
 	}
+	if err := normalizeNetworkInput(r.table, in); err != nil {
+		return nil, err
+	}
 	if create {
 		for _, k := range strings.Fields(r.required) {
 			v, exists := in[k]
 			if !exists || v == nil || v == "" {
 				return nil, fmt.Errorf("required field: %s", k)
 			}
+		}
+	}
+	if r.table == "assets" {
+		life := lifecycleInput{}
+		if v, ok := in["purchase_date"]; ok && v != nil {
+			d, ok := v.(string)
+			if !ok {
+				return nil, errors.New("无效采购日期")
+			}
+			life.PurchaseDate = &d
+		}
+		if v, ok := in["warranty_expiry"]; ok && v != nil {
+			d, ok := v.(string)
+			if !ok {
+				return nil, errors.New("无效维保日期")
+			}
+			life.WarrantyExpiry = &d
+		}
+		if v, ok := in["vendor"]; ok && v != nil {
+			d, ok := v.(string)
+			if !ok {
+				return nil, errors.New("无效供应商")
+			}
+			life.Vendor = d
+		}
+		if err := life.validate(); err != nil {
+			return nil, err
 		}
 	}
 	if v, exists := in["bmc_secret"]; exists {
@@ -368,20 +434,30 @@ func inputResource(c *gin.Context, r resource, create bool) (map[string]any, err
 }
 func (a *App) writeResource(r resource, create bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if create && r.table == "assets" && !contextScope(c).Admin && currentSystemMode(a.store.db) == ModeExternalOperation {
-			fail(c, 403, errAssetProvisioningForbidden.Error())
-			return
-		}
 		in, e := inputResource(c, r, create)
 		if e != nil {
 			fail(c, 400, e.Error())
 			return
 		}
 		sc := contextScope(c)
+		if !create {
+			if err := a.guardPXENetworkChange(c.Request.Context(), sc, r, number(c.Param("id")), in, false); err != nil {
+				fail(c, 409, err.Error())
+				return
+			}
+		}
 		var id int64
 		e = a.store.saveResource(c.Request.Context(), r, sc, number(c.Param("id")), in, create, &id)
-		if errors.Is(e, errAssetProvisioningForbidden) {
-			fail(c, 403, e.Error())
+		if errors.Is(e, errDepartmentMissing) {
+			fail(c, 409, "所选部门不存在或已删除，请刷新部门选项")
+			return
+		}
+		if errors.Is(e, errTestVMLabRequired) {
+			fail(c, 409, e.Error())
+			return
+		}
+		if text, ok := networkValidationMessage(e); ok {
+			fail(c, 409, text)
 			return
 		}
 		if e != nil {
@@ -394,9 +470,13 @@ func (a *App) writeResource(r resource, create bool) gin.HandlerFunc {
 func (a *App) deleteResource(r resource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sc := contextScope(c)
+		if err := a.guardPXENetworkChange(c.Request.Context(), sc, r, number(c.Param("id")), nil, true); err != nil {
+			fail(c, 409, "网络删除被阻止："+err.Error())
+			return
+		}
 		e := a.store.deleteResource(c.Request.Context(), r, sc, number(c.Param("id")))
-		if errors.Is(e, errAssetProvisioningForbidden) {
-			fail(c, 403, e.Error())
+		if errors.Is(e, errTestVMLabRequired) {
+			fail(c, 409, e.Error())
 			return
 		}
 		if e != nil {

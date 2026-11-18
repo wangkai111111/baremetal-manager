@@ -46,6 +46,5 @@ export MINIO_ACCESS_KEY="${MINIO_ROOT_USER:-bmm-minio}"
 export MINIO_SECRET_KEY="${MINIO_ROOT_PASSWORD:?请设置 MINIO_ROOT_PASSWORD}"
 export MINIO_BUCKET="${MINIO_BUCKET:-baremetal-images}"
 export SOL_ALLOWED_ORIGIN="${DEV_FRONTEND_ORIGIN:-http://localhost:${DEV_FRONTEND_PORT:-5173}}"
-export SEED_DATA=false
 if [[ "$MODE" == "backend" ]]; then MODE=api; fi
 exec go -C "$ROOT/backend" run ./cmd/server "$MODE"

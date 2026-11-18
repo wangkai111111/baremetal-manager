@@ -15,7 +15,7 @@ import (
 func RunPXEServices(ctx context.Context, db *gorm.DB) error {
 	return pxeservice.Run(ctx, func(ctx context.Context) (bool, error) {
 		var count int64
-		e := db.WithContext(ctx).Table("installations").Where("deleted_at IS NULL AND status IN ('pending','preparing','booting','installing','post_install','unknown')").Count(&count).Error
+		e := db.WithContext(ctx).Table("installations").Where("deleted_at IS NULL AND (cleanup_pending OR status IN ('pending','preparing','booting','installing','post_install','unknown'))").Count(&count).Error
 		if e != nil || count > 0 {
 			return count > 0, e
 		}
@@ -114,6 +114,23 @@ func (a *App) pxeServices(c *gin.Context) {
 }
 func (a *App) installWithPreflight(c *gin.Context) {
 	sc := contextScope(c)
+	if !a.store.allowed(sc, "assets:operate") {
+		fail(c, 403, "permission denied")
+		return
+	}
+	var in struct {
+		InstallPlanID int64               `json:"install_plan_id"`
+		Confirmed     bool                `json:"confirmed"`
+		Access        *installAccessInput `json:"access"`
+	}
+	if c.ShouldBindJSON(&in) != nil || in.InstallPlanID <= 0 || !in.Confirmed || number(c.Param("id")) <= 0 {
+		fail(c, 400, "必须指定 install_plan_id 并以 confirmed:true 明确授权清空测试虚机磁盘")
+		return
+	}
+	if err := in.Access.validate(); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
 	var asset int64
 	if c.Param("id") != "" {
 		if e := a.store.db.Table("assets").Select("id").Where("id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL", number(c.Param("id")), sc.Tenant, sc.Project).Scan(&asset).Error; e != nil || asset == 0 {
@@ -145,5 +162,10 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		fail(c, 409, "PXE 预检失败："+e.Error())
 		return
 	}
-	unsupported(c)
+	id, opID, err := a.enqueueInstallation(c.Request.Context(), sc, asset, in.InstallPlanID, state.Config.NetworkID, state.Config.Root, in.Access, requestMeta(c, sc.User))
+	if err != nil {
+		fail(c, 409, err.Error())
+		return
+	}
+	c.JSON(202, gin.H{"code": 0, "data": gin.H{"installation_id": id, "operation_id": opID, "status": "pending"}, "message": "已授权测试虚机清盘，等待 PXE 安装回调"})
 }

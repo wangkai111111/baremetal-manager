@@ -6,6 +6,9 @@ import router from './router'
 import './style.css'
 
 // 在挂载前读取主题偏好，确保离散 API 使用正确的主题
+if (localStorage.getItem('darkMode') === null && ['dark', 'light'].includes(localStorage.getItem('theme') || '')) {
+  localStorage.setItem('darkMode', String(localStorage.getItem('theme') === 'dark'))
+}
 const storedTheme = localStorage.getItem('darkMode')
 let isDark = false
 if (storedTheme !== null) {

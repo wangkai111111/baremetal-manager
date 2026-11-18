@@ -6,7 +6,6 @@ package service
 // 本文件把已完成的三块能力串成一条可执行的自动装机链路：
 //   1. Task #20 渲染引擎：RenderInstallConfig / InstallVars / HashPassword；
 //   2. Task #21 PXE 交付：IPXEScriptGenerator（ipxe/{mac12}.ipxe）、
-//      DnsmasqConfigGenerator（{TFTPRoot}/dnsmasq.conf）、
 //      provisioning_http（/nocloud/{mac}/{file} 与 /install-callback/{token}）；
 //   3. BMC 控制与进度回收：adapter.BMC 的 SetBootOrder/Power + installations 回调事件。
 //
@@ -54,7 +53,7 @@ type IPXEScriptWriter interface {
 	BootFile(mac string) (string, error)
 }
 
-// DnsmasqRegenerator 由 *platform.DnsmasqConfigGenerator 实现，负责整份 dnsmasq.conf。
+// DnsmasqRegenerator 是旧编排器保留的配置生成接口；实时服务由 pxeservice 管理。
 type DnsmasqRegenerator interface {
 	Generate(ctx context.Context) (string, error)
 	GenerateHostEntry(mac, ip, hostname string) string

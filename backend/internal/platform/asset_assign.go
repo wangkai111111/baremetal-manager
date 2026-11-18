@@ -1,168 +1,166 @@
 package platform
 
 import (
-	"fmt"
-	"time"
-
+	"encoding/json"
+	"errors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
-// ============================================================
-// 资产分配至部门处理器（自用模式）
-// ============================================================
-//
-// 待注册路由（routes.go）：
-// POST /api/v1/projects/:projectId/assets/:id/assign       → assignAssetToDepartment  → assets:write
-// POST /api/v1/projects/:projectId/assets/batch-assign     → batchAssignAssets        → assets:write
+var errDepartmentMissing = errors.New("部门不存在或已删除")
+var errDepartmentChildren = errors.New("请先删除或迁移子部门")
+var errDepartmentAssets = errors.New("请先移除该部门下的资产分配（包括其他项目）")
+var errDepartmentCycle = errors.New("不能将部门移动到自己的下级部门")
 
-// assignAssetToDepartment 将单个资产分配到指定部门
+// Membership is organization-wide. Serialize deletion and assignment across
+// projects, always before acquiring project locks.
+func lockDepartments(tx *gorm.DB, sc scope) error {
+	return tx.Exec("SELECT pg_advisory_xact_lock(?, ?)", int32(69421), int32(sc.Tenant)).Error
+}
+func validateDepartment(tx *gorm.DB, sc scope, id int64) error {
+	if id == 0 {
+		return nil
+	}
+	var count int64
+	if err := tx.Table("departments").Where("id=? AND tenant_id=? AND deleted_at IS NULL", id, sc.Tenant).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return errDepartmentMissing
+	}
+	return nil
+}
+
+// Missing must not silently clear assignments; null and zero explicitly clear.
+func departmentTarget(raw json.RawMessage) (int64, error) {
+	if len(raw) == 0 {
+		return 0, errors.New("请指定部门，解除分配请传 null")
+	}
+	var id *int64
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return 0, errors.New("无效的部门ID")
+	}
+	if id == nil {
+		return 0, nil
+	}
+	if *id < 0 {
+		return 0, errors.New("无效的部门ID")
+	}
+	return *id, nil
+}
+
+func (s *store) assignAssets(tx *gorm.DB, sc scope, ids []int64, departmentID int64, action string) error {
+	if err := lockDepartments(tx, sc); err != nil {
+		return err
+	}
+	if err := lockScope(tx, sc); err != nil {
+		return err
+	}
+	if err := validateDepartment(tx, sc, departmentID); err != nil {
+		return err
+	}
+	if !(&store{tx}).managesDepartment(sc, departmentID) {
+		return errors.New("无权分配到该部门")
+	}
+	q := func() *gorm.DB {
+		return queryScope(tx, resource{table: "assets"}, sc).Where("id IN ?", ids).Where(departmentAccessSQL(sc, "assets.department_id", true))
+	}
+	var count int64
+	if err := q().Count(&count).Error; err != nil {
+		return err
+	}
+	if count != int64(len(ids)) {
+		return gorm.ErrRecordNotFound
+	}
+	var value any
+	if departmentID > 0 {
+		value = departmentID
+	}
+	res := q().Updates(map[string]any{"department_id": value, "update_by": sc.User})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != int64(len(ids)) {
+		return gorm.ErrRecordNotFound
+	}
+	for _, id := range ids {
+		if err := s.audit(tx, sc, action, "assets", id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func (a *App) assignAssetToDepartment(c *gin.Context) {
-	sc := contextScope(c)
-	assetID := number(c.Param("id"))
-	if assetID <= 0 {
+	id := number(c.Param("id"))
+	if id <= 0 {
 		fail(c, 400, "无效的资产ID")
 		return
 	}
+	a.assignDepartment(c, []int64{id}, false)
+}
+func (a *App) batchAssignAssets(c *gin.Context) { a.assignDepartment(c, nil, true) }
+func (a *App) assignDepartment(c *gin.Context, ids []int64, batch bool) {
 	var in struct {
-		DepartmentID *int64 `json:"department_id"`
+		AssetIDs     []int64         `json:"asset_ids"`
+		DepartmentID json.RawMessage `json:"department_id"`
 	}
 	if c.ShouldBindJSON(&in) != nil {
 		fail(c, 400, "无效的请求体")
 		return
 	}
-	// 验证资产存在且属于当前项目
-	var assetCount int64
-	a.store.db.Table("assets").
-		Where("id=? AND project_id=? AND deleted_at IS NULL", assetID, sc.Project).
-		Count(&assetCount)
-	if assetCount == 0 {
-		fail(c, 404, "资产不存在")
+	target, err := departmentTarget(in.DepartmentID)
+	if err != nil {
+		fail(c, 400, err.Error())
 		return
 	}
-	// 验证部门存在（如果指定了部门）
-	if in.DepartmentID != nil && *in.DepartmentID > 0 {
-		var deptCount int64
-		a.store.db.Table("departments").
-			Where("id=? AND tenant_id=? AND deleted_at IS NULL", *in.DepartmentID, sc.Tenant).
-			Count(&deptCount)
-		if deptCount == 0 {
-			fail(c, 404, "部门不存在")
-			return
-		}
+	if batch {
+		ids = in.AssetIDs
 	}
-	// 更新资产的部门归属
-	var updateValue any
-	if in.DepartmentID != nil && *in.DepartmentID > 0 {
-		updateValue = *in.DepartmentID
-	} else {
-		updateValue = nil
-	}
-	e := a.store.db.Transaction(func(tx *gorm.DB) error {
-		res := tx.Table("assets").
-			Where("id=? AND project_id=? AND deleted_at IS NULL", assetID, sc.Project).
-			Update("department_id", updateValue)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return gorm.ErrRecordNotFound
-		}
-		// 记录审计日志
-		return tx.Table("audits").Create(map[string]any{
-			"tenant_id":   sc.Tenant,
-			"project_id":  sc.Project,
-			"user_id":     sc.User,
-			"request_id":  fmt.Sprintf("%d-%d", time.Now().UnixNano(), sc.User),
-			"action":      "assign",
-			"target_type": "assets",
-			"target_id":   fmt.Sprint(assetID),
-			"outcome":     "success",
-		}).Error
-	})
-	if e != nil {
-		if e == gorm.ErrRecordNotFound {
-			fail(c, 404, "资产不存在")
-			return
-		}
-		fail(c, 500, "资产分配失败")
+	if len(ids) == 0 || len(ids) > 500 {
+		fail(c, 400, "单次分配需选择 1–500 个资产")
 		return
 	}
-	ok(c, gin.H{"asset_id": assetID, "department_id": updateValue})
-}
-
-// batchAssignAssets 批量将多个资产分配到指定部门
-func (a *App) batchAssignAssets(c *gin.Context) {
+	seen := map[int64]bool{}
+	unique := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			fail(c, 400, "无效的资产ID")
+			return
+		}
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	action := "assign"
+	if batch {
+		action = "batch_assign"
+	}
 	sc := contextScope(c)
-	var in struct {
-		AssetIDs     []int64 `json:"asset_ids"`
-		DepartmentID *int64  `json:"department_id"`
-	}
-	if c.ShouldBindJSON(&in) != nil || len(in.AssetIDs) == 0 {
-		fail(c, 400, "asset_ids 不能为空")
+	err = a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		return a.store.assignAssets(tx, sc, unique, target, action)
+	})
+	if errors.Is(err, errDepartmentMissing) {
+		fail(c, 404, err.Error())
 		return
 	}
-	if len(in.AssetIDs) > 500 {
-		fail(c, 400, "单次批量操作不能超过500个资产")
-		return
-	}
-	// 验证部门存在（如果指定了部门）
-	if in.DepartmentID != nil && *in.DepartmentID > 0 {
-		var deptCount int64
-		a.store.db.Table("departments").
-			Where("id=? AND tenant_id=? AND deleted_at IS NULL", *in.DepartmentID, sc.Tenant).
-			Count(&deptCount)
-		if deptCount == 0 {
-			fail(c, 404, "部门不存在")
-			return
-		}
-	}
-	// 验证所有资产存在且属于当前项目
-	var validCount int64
-	a.store.db.Table("assets").
-		Where("id IN ? AND project_id=? AND deleted_at IS NULL", in.AssetIDs, sc.Project).
-		Count(&validCount)
-	if validCount != int64(len(in.AssetIDs)) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		fail(c, 404, "部分资产不存在或不属于当前项目")
 		return
 	}
-	// 批量更新
-	var updateValue any
-	if in.DepartmentID != nil && *in.DepartmentID > 0 {
-		updateValue = *in.DepartmentID
-	} else {
-		updateValue = nil
-	}
-	e := a.store.db.Transaction(func(tx *gorm.DB) error {
-		res := tx.Table("assets").
-			Where("id IN ? AND project_id=? AND deleted_at IS NULL", in.AssetIDs, sc.Project).
-			Update("department_id", updateValue)
-		if res.Error != nil {
-			return res.Error
-		}
-		// 批量记录审计日志
-		for _, assetID := range in.AssetIDs {
-			if err := tx.Table("audits").Create(map[string]any{
-				"tenant_id":   sc.Tenant,
-				"project_id":  sc.Project,
-				"user_id":     sc.User,
-				"request_id":  fmt.Sprintf("%d-%d", time.Now().UnixNano(), sc.User),
-				"action":      "batch_assign",
-				"target_type": "assets",
-				"target_id":   fmt.Sprint(assetID),
-				"outcome":     "success",
-			}).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if e != nil {
-		fail(c, 500, "批量分配失败")
+	if err != nil {
+		fail(c, 409, "资产分配失败：无权管理所选范围或存在关联冲突")
 		return
 	}
-	ok(c, gin.H{
-		"updated_count": validCount,
-		"department_id": updateValue,
-	})
+	var value any
+	if target > 0 {
+		value = target
+	}
+	result := gin.H{"department_id": value}
+	if batch {
+		result["updated_count"] = len(unique)
+	} else {
+		result["asset_id"] = ids[0]
+	}
+	ok(c, result)
 }

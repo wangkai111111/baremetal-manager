@@ -88,6 +88,7 @@ func TestIAMIntegration(t *testing.T) {
 	defer conn.Close()
 	db = db.Begin()
 	defer db.Rollback()
+	seedIntegrationAdmin(t, db)
 	t.Setenv("JWT_SECRET", "platform-test-secret-32-bytes-long-only")
 	t.Setenv("BMC_ENCRYPTION_KEY", "12345678901234567890123456789012")
 	a, e := New(db)

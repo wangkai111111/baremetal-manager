@@ -44,7 +44,7 @@ func TestRenderAutoinstallValidYAML(t *testing.T) {
 				"version: 1",
 				"identity:",
 				"ssh:",
-				"authorized_keys:",
+				"authorized-keys:",
 				"username: admin",
 				"10.0.0.25/24",
 				"dhcp4", // 不应出现——通过下方否定断言处理

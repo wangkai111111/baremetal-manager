@@ -60,9 +60,9 @@ type BMCConfig struct {
 
 // SOLConfig SOL 串口配置
 type SOLConfig struct {
-	AllowedOrigin  string `yaml:"allowed_origin"`   // 允许的跨域来源
-	SessionTimeout int    `yaml:"session_timeout"`  // 会话超时（分钟）
-	LogEnabled     bool   `yaml:"log_enabled"`      // 是否启用日志
+	AllowedOrigin  string `yaml:"allowed_origin"`  // 允许的跨域来源
+	SessionTimeout int    `yaml:"session_timeout"` // 会话超时（分钟）
+	LogEnabled     bool   `yaml:"log_enabled"`     // 是否启用日志
 }
 
 // AlertConfig 告警配置
@@ -77,9 +77,8 @@ type AlertConfig struct {
 
 // PXEConfig PXE 网络引导配置
 type PXEConfig struct {
-	DHCPRange string `yaml:"dhcp_range"` // DHCP 地址范围
-	TFTPRoot  string `yaml:"tftp_root"`  // TFTP 根目录
-	HTTPBase  string `yaml:"http_base"`  // HTTP 基础地址
+	TFTPRoot string `yaml:"tftp_root"` // TFTP 根目录
+	HTTPBase string `yaml:"http_base"` // HTTP 基础地址
 }
 
 // Load 从环境变量加载配置（保持与现有 .env 兼容）
@@ -125,7 +124,6 @@ func Load() *Config {
 	cfg.Alert.DefaultThreshold.DiskHealth = envFloat("ALERT_DEFAULT_DISK_HEALTH", 90.0)
 
 	// PXE 配置
-	cfg.PXE.DHCPRange = envStr("PXE_DHCP_RANGE", "10.0.0.100-10.0.0.200")
 	cfg.PXE.TFTPRoot = envStr("PXE_TFTP_ROOT", "/var/lib/tftpboot")
 	cfg.PXE.HTTPBase = envStr("PXE_HTTP_BASE", "http://localhost:8080")
 

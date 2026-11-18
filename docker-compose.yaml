@@ -23,14 +23,13 @@ x-backend-common: &backend-common
     JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to at least 32 random characters}
     BMC_ENCRYPTION_KEY: ${BMC_ENCRYPTION_KEY:?Set BMC_ENCRYPTION_KEY to a 32-byte key}
     SOL_ALLOWED_ORIGIN: ${SOL_ALLOWED_ORIGIN:-http://localhost:8080}
+    TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
     MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-bmm-minio}
     MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
     MINIO_BUCKET: ${MINIO_BUCKET:-baremetal-images}
-    LOG_LEVEL: ${LOG_LEVEL:-info}
-
-    # 种子数据控制
-    SEED_DATA: "false"
+    PXE_TFTP_ROOT: /var/lib/tftpboot
+    PXE_HTTP_BASE: ${PXE_HTTP_BASE:-http://192.168.77.1:18080/api/v1/provision}
 
     # 告警推送配置
     ALERT_WECHAT_WEBHOOK: ${ALERT_WECHAT_WEBHOOK:-}
@@ -242,6 +241,8 @@ services:
     volumes:
       - pxe-control:/run/bmm-pxe:ro
       - ./provisioning/tftp:/var/lib/tftpboot:ro
+      - ./provisioning/iso:/var/lib/tftpboot/iso:ro
+      - ./provisioning/netboot:/var/lib/tftpboot/netboot:ro
 
   worker:
     <<: *backend-common
@@ -249,8 +250,13 @@ services:
     command: ${WORKER_COMMAND:-worker}
     # ISO 下载临时文件使用磁盘卷，避免继承 128 MB 的内存临时目录。
     tmpfs: []
+    group_add: ["2000"]
     volumes:
       - image-download-temp:/tmp
+      - pxe-control:/run/bmm-pxe:ro
+      - ./provisioning/tftp:/var/lib/tftpboot
+      - ./provisioning/iso:/var/lib/tftpboot/iso:ro
+      - ./provisioning/netboot:/var/lib/tftpboot/netboot:ro
     expose: []
     healthcheck:
       disable: true
@@ -271,6 +277,8 @@ services:
   lb:
     <<: *service-defaults
     image: ${HAPROXY_IMAGE:-haproxy:3.0-alpine}
+    environment:
+      TRUSTED_UPSTREAM_PROXY: ${TRUSTED_UPSTREAM_PROXY:-127.0.0.1}
     ports:
       - "${HTTP_PORT:-8080}:8080"
       - "127.0.0.1:${HAPROXY_STATS_PORT:-8404}:8404"
@@ -309,14 +317,24 @@ services:
     network_mode: host
     environment:
       DATABASE_URL: ${PXE_DATABASE_URL:-${DATABASE_URL}}
+      PXE_DB_HOST: ${PXE_DB_HOST:-127.0.0.1}
+      PXE_DB_PORT: ${DB_PORT:-25432}
     volumes:
       - pxe-control:/run/bmm-pxe
       - pxe-state:/var/lib/bmm-pxe
-      - ./provisioning/tftp:/var/lib/tftpboot:ro
+      - ./provisioning/tftp:/var/lib/tftpboot
+    devices:
+      - /dev/net/tun:/dev/net/tun
+      - /dev/kvm:/dev/kvm
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     read_only: true
     cap_drop:
       - ALL
     cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
       - NET_ADMIN
       - NET_BIND_SERVICE
       - NET_RAW

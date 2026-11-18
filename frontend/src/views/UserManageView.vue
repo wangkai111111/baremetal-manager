@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 用户管理页面（增强版）— 用户账户与访问控制
 import { computed, ref, watch } from 'vue'
+import dayjs from 'dayjs'
+const formatTime = (value: unknown) => value && dayjs(String(value)).isValid() ? dayjs(String(value)).format('YYYY-MM-DD HH:mm') : '—'
 import {
   NButton,
   NInput,
@@ -15,21 +17,27 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { h } from 'vue'
-import { api, errorText, resource, rows, type RecordData } from '../api'
+import { api, errorText, resource, rows, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
+import { flattenDepartments } from '../utils/departments'
+import UserAccessEditor from '../components/UserAccessEditor.vue'
+const accessOpen = ref(false)
+const accessUser = ref<RecordData>({})
+function openAccess(row: RecordData) { accessUser.value = row; accessOpen.value = true }
 
 const message = useMessage()
 const auth = useAuth()
 
 // === 平台角色选项（后端仅支持 admin / user）===
 const roleOptions = [
-  { label: '管理员', value: 'admin' },
+  { label: '平台管理员（全部组织）', value: 'admin' },
   { label: '普通用户', value: 'user' }
 ]
 
 // === 列表数据状态 ===
 const items = ref<RecordData[]>([])
 const total = ref(0)
+const departmentNames = ref<{id: number; name: string}[]>([])
 const loading = ref(false)
 const search = ref('')
 const page = ref(1)
@@ -48,7 +56,7 @@ const newUser = ref<{ username: string; password: string; role: string }>({
 })
 
 // === 权限控制 ===
-const canWrite = computed(() => auth.can('iam:write'))
+const canWrite = computed(() => auth.user?.is_platform_admin === true)
 
 // === 表格列定义 ===
 const columns = computed<DataTableColumns<RecordData>>(() => [
@@ -56,7 +64,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
   { title: '姓名', key: 'name', minWidth: 100 },
   { title: '邮箱', key: 'email', minWidth: 160 },
   {
-    title: '角色',
+    title: '平台角色',
     key: 'role',
     minWidth: 100,
     render: (row: RecordData) => {
@@ -82,17 +90,26 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
       )
     }
   },
-  { title: '最后登录', key: 'last_login_at', minWidth: 150, render: (row: RecordData) => String(row.last_login_at || '—') },
-  { title: '创建时间', key: 'created_at', minWidth: 150 },
-  ...(canWrite.value
+  { title: '当前组织授权', key: 'access_grants', minWidth: 220, render: row => {
+    if (row.is_platform_admin === true) return '全部组织 / 全部服务器'
+    const grants = Array.isArray(row.access_grants) ? row.access_grants as RecordData[] : []
+    if (!grants.length) return h('span', { style: 'color: var(--color-text-tertiary)' }, '未授权')
+    return h('div', { style: 'display:flex; flex-direction:column; gap:4px' }, grants.map(g => h('span', {},
+      `${g.department_id == null ? '整个组织' : departmentNames.value.find(d => d.id === Number(g.department_id))?.name || `部门 #${g.department_id}`} · ${g.is_admin ? '管理员' : '普通用户'}`)))
+  } },
+  { title: '最后登录', key: 'last_login_at', minWidth: 150, render: (row: RecordData) => formatTime(row.last_login_at) },
+  { title: '创建时间', key: 'created_at', minWidth: 150, render: (row: RecordData) => formatTime(row.created_at) },
+  ...(canWrite.value || auth.can('iam:manage')
     ? [
         {
           title: '操作',
           key: 'actions',
-          width: 145,
+          width: 210,
           fixed: 'right' as const,
           render: (row: RecordData) =>
             h('div', { class: 'table-actions' }, [
+              row.is_platform_admin !== true && (auth.user?.is_platform_admin || String(row.id) !== String(auth.user?.id)) ? h(NButton, {text:true, type:'primary', onClick: () => openAccess(row)}, {default: () => '访问授权'}) : null,
+              ...(canWrite.value ? [
               h(
                 NButton,
                 { text: true, onClick: () => openEdit(row) },
@@ -107,7 +124,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
                   default: () => '确认删除此用户？'
                 }
               )
-            ])
+            ] : [])])
         }
       ]
     : [])
@@ -117,7 +134,9 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
 async function load() {
   loading.value = true
   try {
-    const data = rows(await resource.list('/users', { page: page.value, page_size: pageSize, search: search.value }))
+    const [response, tree] = await Promise.all([resource.list('/users', { page: page.value, page_size: pageSize, search: search.value }), resource.list('/departments')])
+    const data = rows(response)
+    departmentNames.value = flattenDepartments(rows(tree).items)
     items.value = data.items
     total.value = data.total
   } catch (e) {
@@ -162,13 +181,14 @@ async function saveNewUser() {
   }
   saving.value = true
   try {
-    await api.post('/auth/users', {
+    const response = await api.post('/auth/users', {
       username: newUser.value.username.trim(),
       password: newUser.value.password,
       role: newUser.value.role
     })
     message.success('用户已创建')
     creating.value = false
+    if (newUser.value.role === 'user') openAccess({id: unwrap<RecordData>(response).id, username: newUser.value.username})
     page.value = 1
     load()
   } catch (e) {
@@ -180,10 +200,6 @@ async function saveNewUser() {
 
 // === 保存用户信息 ===
 async function save() {
-  if (!form.value.name && !form.value.email) {
-    message.warning('请至少填写姓名或邮箱')
-    return
-  }
   saving.value = true
   try {
     const payload = {
@@ -220,7 +236,7 @@ async function remove(row: RecordData) {
       <div>
         <div class="eyebrow dark">ACCESS CONTROL / USERS</div>
         <h1>用户管理</h1>
-        <p>管理用户账户与角色分配</p>
+        <p>管理用户账户；通过访问授权指定可访问的组织、部门和范围管理员</p>
       </div>
       <div class="head-actions">
         <n-button v-if="canWrite" type="primary" @click="openCreate">+ 新增用户</n-button>
@@ -306,7 +322,7 @@ async function remove(row: RecordData) {
             v-model:value="newUser.password"
             type="password"
             show-password-on="click"
-            placeholder="至少 12 位字符"
+            placeholder="6–72 字节"
           />
         </n-form-item>
         <n-form-item label="平台角色">
@@ -318,5 +334,6 @@ async function remove(row: RecordData) {
         </div>
       </n-form>
     </n-modal>
+    <UserAccessEditor v-model:show="accessOpen" :user-id="accessUser.id" :username="String(accessUser.username || '')" @saved="load" />
   </div>
 </template>

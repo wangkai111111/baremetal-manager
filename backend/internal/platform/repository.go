@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/netip"
 	"strings"
 	"time"
 
@@ -34,20 +33,53 @@ func lockScope(tx *gorm.DB, sc scope) error {
 	return tx.Raw("SELECT id FROM projects WHERE tenant_id=? AND id=? AND deleted_at IS NULL AND status='active' FOR UPDATE", sc.Tenant, sc.Project).Scan(&n).Error
 }
 
-var errAssetProvisioningForbidden = errors.New("运营租户不能新增或删除平台资产")
-
 func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64, in map[string]any, create bool, out *int64) error {
-	if create && r.table == "assets" && !sc.Admin && currentSystemMode(s.db) == ModeExternalOperation {
-		return errAssetProvisioningForbidden
-	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if r.table == "assets" {
+			if err := lockDepartments(tx, sc); err != nil {
+				return err
+			}
+			if !create && !(&store{tx}).managesAsset(sc, id) {
+				return errAccessDenied
+			}
+		}
 		if e := lockScope(tx, sc); e != nil {
 			return e
 		}
+		var old map[string]any
 		if !create {
-			var old map[string]any
 			if e := queryScope(tx, r, sc).Where("id=?", id).Take(&old).Error; e != nil {
 				return e
+			}
+			if r.table == "assets" && isTestVMIdentity(fmt.Sprint(old["manufacturer"]), fmt.Sprint(old["model"]), fmt.Sprint(old["mac_address"])) {
+				return errTestVMLabRequired
+			}
+			if r.table == "assets" {
+				dateValue := func(key string) *string {
+					v, exists := in[key]
+					if !exists {
+						v = old[key]
+					}
+					if v == nil {
+						return nil
+					}
+					var value string
+					switch d := v.(type) {
+					case time.Time:
+						value = d.Format("2006-01-02")
+					case string:
+						if len(d) >= 10 {
+							value = d[:10]
+						} else {
+							value = d
+						}
+					}
+					return &value
+				}
+				life := lifecycleInput{PurchaseDate: dateValue("purchase_date"), WarrantyExpiry: dateValue("warranty_expiry")}
+				if err := life.validate(); err != nil {
+					return err
+				}
 			}
 			for k, v := range old {
 				if _, ok := in[k]; !ok {
@@ -57,15 +89,28 @@ func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64
 				}
 			}
 		}
+		if v, exists := in["asset_id"]; exists && v != nil && !(&store{tx}).managesAsset(sc, asInt(v)) {
+			return errAccessDenied
+		}
 		for k, parent := range references {
 			if v, ok := in[k]; ok && v != nil {
+				if parent == "departments" {
+					if err := validateDepartment(tx, sc, asInt(v)); err != nil {
+						return err
+					}
+					continue
+				}
 				var row map[string]any
-				if e := queryScope(tx, resource{table: parent}, sc).Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", v).Take(&row).Error; e != nil {
+				relation := queryScope(tx, resource{table: parent}, sc)
+				if e := relation.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", v).Take(&row).Error; e != nil {
 					return errors.New("relation not found")
 				}
 			}
 		}
 		if r.table == "assets" {
+			if !(&store{tx}).managesDepartment(sc, asInt(in["department_id"])) {
+				return errors.New("无权分配到该部门；请指定管理范围内的部门")
+			}
 			var n int64
 			tx.Table("device_leases").Where("tenant_id=? AND project_id=? AND asset_id=? AND expires_at>now()", sc.Tenant, sc.Project, id).Count(&n)
 			if n > 0 {
@@ -77,30 +122,8 @@ func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64
 				}
 			}
 		}
-		if r.table == "ip_pools" || r.table == "ip_allocations" {
-			var network struct{ Subnet string }
-			if e := queryScope(tx, resource{table: "networks"}, sc).Select("subnet::text").Where("id=?", in["network_id"]).Take(&network).Error; e != nil {
-				return e
-			}
-			prefix, e := netip.ParsePrefix(network.Subnet)
-			if e != nil {
-				return e
-			}
-			for _, k := range []string{"address", "start_address", "end_address"} {
-				if v, ok := in[k]; ok {
-					ip, e := netip.ParseAddr(strings.Split(fmt.Sprint(v), "/")[0])
-					if e != nil || !prefix.Contains(ip) {
-						return errors.New("address outside network")
-					}
-				}
-			}
-			if pool, ok := in["pool_id"]; ok && pool != nil {
-				var valid bool
-				e = tx.Raw("SELECT EXISTS(SELECT 1 FROM ip_pools WHERE id=? AND tenant_id=? AND project_id=? AND network_id=? AND deleted_at IS NULL AND ?::inet BETWEEN start_address AND end_address)", pool, sc.Tenant, sc.Project, in["network_id"], in["address"]).Scan(&valid).Error
-				if e != nil || !valid {
-					return errors.New("address outside pool")
-				}
-			}
+		if err := validateNetworkRelations(tx, r, sc, id, in, old); err != nil {
+			return err
 		}
 		in["update_by"] = sc.User
 		if create {
@@ -142,14 +165,26 @@ func asInt(v any) int64 {
 	}
 }
 func (s *store) deleteResource(ctx context.Context, r resource, sc scope, id int64) error {
-	if r.table == "assets" && !sc.Admin && currentSystemMode(s.db) == ModeExternalOperation {
-		return errAssetProvisioningForbidden
-	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if r.table == "assets" {
+			if err := lockDepartments(tx, sc); err != nil {
+				return err
+			}
+			if !(&store{tx}).managesAsset(sc, id) {
+				return errAccessDenied
+			}
+		}
 		if e := lockScope(tx, sc); e != nil {
 			return e
 		}
 		if r.table == "assets" {
+			var identity device
+			if err := queryScope(tx, r, sc).Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", id).Take(&identity).Error; err != nil {
+				return err
+			}
+			if isTestVMIdentity(identity.Manufacturer, identity.Model, identity.MACAddress) {
+				return errTestVMLabRequired
+			}
 			var n int64
 			tx.Table("device_leases").Where("tenant_id=? AND project_id=? AND asset_id=? AND expires_at>now()", sc.Tenant, sc.Project, id).Count(&n)
 			if n > 0 {
@@ -165,7 +200,6 @@ func (s *store) deleteResource(ctx context.Context, r resource, sc scope, id int
 					continue
 				}
 				var n int64
-				// 引用约束属于整个项目，不能遗漏运营模式下其他用户的资产。
 				childScope := sc
 				childScope.Admin = true
 				if e := queryScope(tx, child, childScope).Where(field+"=?", id).Count(&n).Error; e != nil {
@@ -176,7 +210,11 @@ func (s *store) deleteResource(ctx context.Context, r resource, sc scope, id int
 				}
 			}
 		}
-		res := queryScope(tx, r, sc).Where("id=?", id).Updates(map[string]any{"deleted_at": time.Now(), "update_by": sc.User})
+		q := queryScope(tx, r, sc).Where("id=?", id)
+		if !sc.Admin && strings.Contains(" "+r.fields+" ", " asset_id ") {
+			q = q.Where(assetAccessSQL(sc, r.table+".asset_id", true))
+		}
+		res := q.Updates(map[string]any{"deleted_at": time.Now(), "update_by": sc.User})
 		if res.Error != nil {
 			return res.Error
 		}

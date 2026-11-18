@@ -212,34 +212,6 @@ components:
         netmask: {type: string, description: 子网掩码}
         vlan_id: {type: integer, description: VLAN ID}
         network_id: {type: integer, description: 关联网络 ID}
-    AutoAssignRequest:
-      type: object
-      properties:
-        count: {type: integer, description: 自动分配数量}
-        purpose: {type: string, description: 用途说明}
-    IPAllocationRelease:
-      type: object
-      properties:
-        reason: {type: string, description: 释放原因}
-    PXEConfig:
-      type: object
-      properties:
-        id: {type: integer}
-        project_id: {type: integer}
-        dhcp_enabled: {type: boolean}
-        tftp_enabled: {type: boolean}
-        pxe_subnet: {type: string}
-        next_server: {type: string}
-        filename: {type: string}
-        updated_at: {type: string, format: date-time}
-    PXEConfigUpdate:
-      type: object
-      properties:
-        dhcp_enabled: {type: boolean, description: 是否启用 DHCP}
-        tftp_enabled: {type: boolean, description: 是否启用 TFTP}
-        pxe_subnet: {type: string, description: PXE 子网}
-        next_server: {type: string, description: 下一跳服务器地址}
-        filename: {type: string, description: 启动文件名}
     # ==================== 告警增强 ====================
     AlertRule:
       type: object
@@ -436,12 +408,6 @@ paths:
       responses: {'200': {description: Networks}}
     post:
       responses: {'201': {description: Network}}
-  /projects/{projectId}/ip-allocations:
-    parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
-    get:
-      responses: {'200': {description: Allocations}}
-    post:
-      responses: {'201': {description: Allocation}}
   /projects/{projectId}/members:
     parameters: [{name: projectId, in: path, required: true, schema: {type: integer}}]
     get:
@@ -913,64 +879,6 @@ paths:
       responses:
         '204':
           description: 删除成功
-
-  /projects/{projectId}/networks/{networkId}/auto-assign:
-    parameters:
-      - {name: projectId, in: path, required: true, schema: {type: integer}}
-      - {name: networkId, in: path, required: true, schema: {type: integer}}
-    post:
-      summary: 自动分配 IP 地址
-      tags: [网络增强]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/AutoAssignRequest'}
-      responses:
-        '200':
-          description: 分配成功
-
-  /projects/{projectId}/ip-allocations/{id}/release:
-    parameters:
-      - {name: projectId, in: path, required: true, schema: {type: integer}}
-      - {name: id, in: path, required: true, schema: {type: integer}}
-    post:
-      summary: 释放 IP 分配
-      tags: [网络增强]
-      requestBody:
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/IPAllocationRelease'}
-      responses:
-        '204':
-          description: 释放成功
-
-  /projects/{projectId}/pxe-config:
-    parameters:
-      - {name: projectId, in: path, required: true, schema: {type: integer}}
-    get:
-      summary: 获取 PXE 配置
-      tags: [网络增强]
-      responses:
-        '200':
-          description: PXE 配置
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/PXEConfig'}
-    put:
-      summary: 更新 PXE 配置
-      tags: [网络增强]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/PXEConfigUpdate'}
-      responses:
-        '200':
-          description: 更新成功
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/PXEConfig'}
 
   # ==================== 告警增强 ====================
   /projects/{projectId}/alert-rules:

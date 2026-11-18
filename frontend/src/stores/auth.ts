@@ -1,5 +1,6 @@
+import { hasPermission } from '../utils/permissions'
 import { defineStore } from 'pinia'
-import { ref, onUnmounted } from 'vue'
+import { ref, onScopeDispose } from 'vue'
 import { api, unwrap, rows, clearProjectRequests, setupApi, type RecordData } from '../api'
 import dayjs from 'dayjs'
 
@@ -29,17 +30,6 @@ export const Permissions = {
   SETTINGS_WRITE: 'settings:write',
   PROJECTS_READ: 'projects:read',
   PROJECTS_WRITE: 'projects:write',
-  BILLING_READ: 'billing:read',
-  BILLING_WRITE: 'billing:write',
-  ORDERS_READ: 'orders:read',
-  ORDERS_WRITE: 'orders:write',
-  PRODUCTS_READ: 'products:read',
-  PRODUCTS_WRITE: 'products:write',
-  FINANCE_READ: 'finance:read',
-  FINANCE_WRITE: 'finance:write',
-  MARKETING_READ: 'marketing:read',
-  MARKETING_WRITE: 'marketing:write',
-  OPERATIONS_READ: 'operations:read',
   DEPARTMENTS_READ: 'departments:read',
   DEPARTMENTS_WRITE: 'departments:write',
   WORK_ORDERS_READ: 'work_orders:read',
@@ -60,14 +50,11 @@ export interface User {
   name?: string
   role?: string
   is_platform_admin?: boolean
+  can_manage_organization?: boolean
   project_ids?: number[]
   permissions?: string[]
   roles?: (string | { name: string; permissions?: string[] })[]
 }
-
-// 系统部署模式：与后端 GET /api/v1/setup/status 的 mode 字段一一对应。
-// 空串表示后端 system_modes 表尚无记录（未初始化）。
-export type SystemMode = 'self_use' | 'external_operation' | ''
 
 export const useAuth = defineStore('auth', () => {
   const token = ref(sessionStorage.getItem('bmm_token') || '')
@@ -78,8 +65,6 @@ export const useAuth = defineStore('auth', () => {
   const projects = ref<RecordData[]>([])
   const contextReady = ref(false)
   const contextError = ref('')
-  // 模式判定的唯一来源（'self_use' | 'external_operation' | ''）
-  const systemMode = ref<SystemMode>('')
   const setupStatus = ref<{ initialized: boolean; mode: string; locked: boolean } | null>(null)
 
   // === 系统初始化状态检查 ===
@@ -93,24 +78,10 @@ export const useAuth = defineStore('auth', () => {
         mode,
         locked: data.locked === true
       }
-      if (data.initialized && mode) {
-        systemMode.value = mode === 'external_operation' ? 'external_operation' : 'self_use'
-      } else {
-        systemMode.value = ''
-      }
     } catch {
-      // 检查初始化状态失败，模式置为未确定
+      // 检查失败时保留未确认状态
       setupStatus.value = null
-      systemMode.value = ''
     }
-  }
-
-  function canAccessMode(mode: string): boolean {
-    // 模式尚未确定（未初始化或状态接口不可用）时不放行任何模式化路由
-    if (!systemMode.value) return false
-    // 两种模式通用的功能（如工单）不受限制
-    if (mode === 'both') return true
-    return systemMode.value === mode
   }
 
   async function loadContext() {
@@ -197,18 +168,22 @@ export const useAuth = defineStore('auth', () => {
     }
   }
 
-  // 组件卸载时清理定时器
-  onUnmounted(() => {
+  // Store 的作用域销毁时清理定时器，兼容路由守卫中初始化 Store。
+  onScopeDispose(() => {
     stopExpiryCheck()
   })
 
   // 从 /auth/me 接口加载当前项目的权限列表
   async function loadProjectPermissions() {
+    const requestedProject = projectId.value
+    if (!requestedProject) { currentPermissions.value = []; return }
     try {
       const me = unwrap<User & { permissions?: string[]; memberships?: Membership[] }>(
         await api.get('/auth/me', { params: { project_id: projectId.value || undefined } })
       )
+      if (projectId.value !== requestedProject) return
       // 更新用户权限
+      user.value = me
       if (me.permissions) {
         currentPermissions.value = me.permissions
       }
@@ -258,6 +233,7 @@ export const useAuth = defineStore('auth', () => {
   async function loadUser() {
     user.value = unwrap<User>(await api.get('/auth/me'))
     syncProject()
+    await loadProjectPermissions()
   }
 
   function logout() {
@@ -282,49 +258,7 @@ export const useAuth = defineStore('auth', () => {
   // === 统一权限检查方法 ===
   // 使用 resource:action 格式，支持通配符和角色继承
   function can(permission?: string) {
-    if (!permission) return true
-
-    // 合并用户权限和项目权限
-    const allPermissions = new Set([
-      ...(user.value?.permissions || []),
-      ...currentPermissions.value
-    ])
-
-    const roles = user.value?.roles || []
-
-    // 超级管理员拥有所有权限
-    if (user.value?.is_platform_admin || user.value?.role === 'admin') return true
-
-    // 通配符权限
-    if (allPermissions.has('*')) return true
-
-    // 直接权限匹配
-    if (allPermissions.has(permission)) return true
-
-    // 只读权限的继承逻辑：拥有 write 权限自动拥有 read 权限
-    if (permission.endsWith(':read') && allPermissions.has(permission.replace(':read', ':write'))) {
-      return true
-    }
-
-    // 基于角色的权限判断
-    if (user.value?.role) {
-      if (user.value.role === 'admin') return true
-      if (permission.endsWith(':read')) return true
-      return (
-        user.value.role === 'operator' &&
-        !permission.startsWith('iam:') &&
-        !permission.startsWith('settings:')
-      )
-    }
-
-    // 检查角色列表中的权限
-    return roles.some(
-      role =>
-        role === 'admin' ||
-        role === 'super_admin' ||
-        (typeof role === 'object' &&
-          (role.name === 'admin' || role.permissions?.includes(permission)))
-    )
+    return hasPermission(user.value?.is_platform_admin === true, currentPermissions.value, permission)
   }
 
   return {
@@ -336,7 +270,7 @@ export const useAuth = defineStore('auth', () => {
     projects,
     contextReady,
     contextError,
-    systemMode,
+
     setupStatus,
     loadContext,
     loadProjects,
@@ -353,6 +287,5 @@ export const useAuth = defineStore('auth', () => {
     loadProjectPermissions,
     parseTokenExpiry,
     checkSetupStatus,
-    canAccessMode
   }
 })

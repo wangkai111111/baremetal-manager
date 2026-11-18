@@ -2120,6 +2120,10 @@ a:hover {
 
 /* === 响应式：≤520px === */
 @media (max-width: 520px) {
+  .global-resource-search {
+    display: none;
+  }
+
   .environment,
   .topbar-divider,
   .user-name {

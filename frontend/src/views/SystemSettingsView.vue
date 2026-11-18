@@ -14,7 +14,7 @@ import {
   NRadioButton,
   NColorPicker,
   NSwitch,
-  NTag,
+
   useMessage
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -52,14 +52,11 @@ const editValue = ref('')
 // === 权限控制：仅 admin 可访问 ===
 const isAdmin = computed(() => auth.user?.role === 'admin' || auth.can('settings:write'))
 
-// === 部署模式只读：模式在系统初始化（Setup 向导）时确定，此后不可更改 ===
-const isExternalMode = computed(() => auth.systemMode === 'external_operation')
-
 // === 按分类过滤设置项 ===
 const categoryPrefixes: Record<SettingCategory, string[]> = {
   theme: ['brand.', 'theme.'],
   app: ['app.'],
-  operation: ['platform.', 'registration.'],
+  operation: ['smtp.'],
   bmc: ['bmc.'],
   monitor: ['monitor.', 'scan.'],
   alert: ['alert.', 'notify.'],
@@ -96,8 +93,6 @@ const appFooterVisible = ref(footerVisible.value)
 const appLoginNotice = ref(loginNotice.value)
 const appSaving = ref(false)
 
-const registrationEnabled = ref(false)
-const emailVerification = ref(false)
 const operationSaving = ref(false)
 const smtpHost = ref('')
 const smtpPort = ref(587)
@@ -164,14 +159,11 @@ function resetTheme() {
 
 // === 从设置项同步应用配置 ===
 function syncOperation() {
-  const email = items.value.find(item => String(item.key) === 'registration.email_verification')
   smtpHost.value = String(items.value.find(item => String(item.key) === 'smtp.host')?.value || '')
   smtpPort.value = Number(items.value.find(item => String(item.key) === 'smtp.port')?.value || 587)
   smtpUsername.value = String(items.value.find(item => String(item.key) === 'smtp.username')?.value || '')
   smtpFrom.value = String(items.value.find(item => String(item.key) === 'smtp.from')?.value || '')
   smtpTls.value = String(items.value.find(item => String(item.key) === 'smtp.tls')?.value) !== 'false'
-  registrationEnabled.value = String(items.value.find(item => String(item.key) === 'registration.enabled')?.value) === 'true'
-  emailVerification.value = String(email?.value) === 'true'
 }
 
 async function saveOperationSettings() {
@@ -185,17 +177,8 @@ async function saveOperationSettings() {
       'smtp.from': smtpFrom.value,
       'smtp.tls': smtpTls.value
     }
-    // 部署模式 platform.operation_mode 为初始化时确定的只读项，此处不再提交；
-    // 自用管理模式下的注册策略不展示也不写入，避免覆盖隐藏的值。
-    const policyEntries: Record<string, unknown> = isExternalMode.value
-      ? {
-          'registration.enabled': registrationEnabled.value,
-          'registration.email_verification': emailVerification.value
-        }
-      : {}
     for (const [key, value] of Object.entries(smtpEntries)) await resource.update('/settings', key, { value })
-    for (const [key, value] of Object.entries(policyEntries)) await resource.update('/settings', key, { value })
-    message.success(isExternalMode.value ? '运营策略已保存' : 'SMTP 发信配置已保存')
+    message.success('SMTP 发信配置已保存')
     await load()
   } catch (e) {
     message.error(errorText(e))
@@ -518,7 +501,7 @@ async function saveAppSettings() {
 const tabLabels: Record<SettingCategory, string> = {
   theme: '主题设置',
   app: '应用设置',
-  operation: '运营策略',
+  operation: '邮件通知',
   bmc: 'BMC 配置',
   monitor: '监控配置',
   alert: '告警配置',
@@ -673,27 +656,9 @@ const tabLabels: Record<SettingCategory, string> = {
         </div>
       </div>
 
-      <!-- 运营设置：平台模式、租户隔离与注册策略 -->
+      <!-- 邮件通知配置 -->
       <div v-else-if="activeTab === 'operation'" class="theme-settings operation-settings">
-        <div class="operation-hero"><div><div class="operation-kicker">OPERATIONS CONTROL / 01—02</div><h2>运营策略</h2><p>集中管理部署边界、身份验证与系统发信通道，变更仅影响平台策略层。</p></div><div class="operation-status"><span class="status-dot" :class="{ external: isExternalMode }" />{{ isExternalMode ? '对外运营模式' : '自用管理模式' }}</div></div>
-        <section class="operation-card operation-mode-card"><div class="operation-card-head"><div><span class="operation-index">01</span><div><h3>部署模式</h3><p>平台的资产边界与租户组织方式，只读展示。</p></div></div><span class="card-meta locked-meta"><svg class="lock-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.6 7V4.9a3.4 3.4 0 0 1 6.8 0V7M3.4 7h9.2a.9.9 0 0 1 .9.9v5.3a.9.9 0 0 1-.9.9H3.4a.9.9 0 0 1-.9-.9V7.9A.9.9 0 0 1 3.4 7Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>READ ONLY</span></div>
-          <div class="mode-readout">
-            <div class="mode-readout-main">
-              <n-tag :type="isExternalMode ? 'info' : 'success'" size="large" :bordered="false" round class="mode-tag">{{ isExternalMode ? '对外运营模式' : '自用管理模式' }}</n-tag>
-              <div class="mode-readout-desc"><strong>{{ isExternalMode ? '租户隔离 · MULTI TENANT' : '单一组织 · SELF HOSTED' }}</strong><p>{{ isExternalMode ? '当前平台面向外部租户，租户仅可查看和操作自己创建的资产。' : '当前平台面向单一组织的内部基础设施管理。' }}</p></div>
-            </div>
-            <div class="mode-variants" aria-hidden="true">
-              <div class="mode-variant" :class="{ on: !isExternalMode }"><span>自用管理模式</span><span class="mode-code">SELF</span></div>
-              <div class="mode-variant" :class="{ on: isExternalMode }"><span>对外运营模式</span><span class="mode-code">MULTI</span></div>
-            </div>
-            <div class="mode-readonly-note">部署模式在系统初始化时确定，不可更改。如需变更模式，请联系运维人员执行数据迁移脚本。</div>
-          </div></section>
-        <section class="operation-card identity-card"><div class="operation-card-head"><div><span class="operation-index">02</span><div><h3>身份与邮件</h3><p>配置注册验证流程与系统发信通道。</p></div></div><span class="card-meta">IDENTITY / SMTP</span></div>
-          <template v-if="isExternalMode">
-            <div class="setting-toggle-row"><div><strong>开放注册</strong><p>默认关闭。控制是否允许访客自主创建账号，与邮箱验证独立配置。</p></div><n-switch v-model:value="registrationEnabled" :disabled="!isAdmin" /></div>
-            <div class="setting-toggle-row"><div><strong>注册邮箱验证</strong><p>开启后，新租户注册必须完成邮箱验证。</p></div><n-switch v-model:value="emailVerification" :disabled="!isAdmin" /></div>
-            <div v-if="emailVerification" class="operation-notice">启用邮箱验证前，请确认 SMTP 主机、端口、账号、密码和发件人均已填写。</div>
-          </template>
+        <section class="operation-card identity-card"><div class="operation-card-head"><div><h3>邮件通知</h3><p>配置系统通知使用的 SMTP 发信通道。</p></div></div>
           <div class="smtp-block"><div class="subsection-label">SMTP 发信配置</div><n-form label-placement="top" class="smtp-form">
             <n-form-item label="SMTP 主机"><n-input v-model:value="smtpHost" :disabled="!isAdmin" placeholder="smtp.example.com" /></n-form-item><n-form-item label="SMTP 端口"><n-input-number v-model:value="smtpPort" :disabled="!isAdmin" :min="1" :max="65535" /></n-form-item>
             <n-form-item label="SMTP 用户名"><n-input v-model:value="smtpUsername" :disabled="!isAdmin" placeholder="mailer@example.com" /></n-form-item><n-form-item label="SMTP 密码"><n-input v-model:value="smtpPassword" type="password" show-password-on="click" :disabled="!isAdmin" placeholder="留空表示保持原密码" /></n-form-item>
@@ -706,7 +671,7 @@ const tabLabels: Record<SettingCategory, string> = {
             <n-alert v-if="smtpTestResult" :type="smtpTestSucceeded ? 'success' : 'error'" role="status">{{ smtpTestResult }}</n-alert>
           </div></div>
         </section>
-        <div class="operation-savebar"><div><span class="savebar-mark" />{{ isExternalMode ? '保存后对平台策略生效' : '仅保存 SMTP 发信配置，部署模式只读不可更改' }}</div><div class="operation-actions"><n-button quaternary @click="syncOperation">重置</n-button><n-button v-if="isAdmin" type="primary" :loading="operationSaving" @click="saveOperationSettings">保存设置</n-button></div></div>
+        <div class="operation-savebar"><div><span class="savebar-mark" />保存 SMTP 发信配置</div><div class="operation-actions"><n-button quaternary @click="syncOperation">重置</n-button><n-button v-if="isAdmin" type="primary" :loading="operationSaving" @click="saveOperationSettings">保存设置</n-button></div></div>
       </div>
 
       <!-- 应用设置：侧边栏底部文案、登录页公告等 -->
@@ -816,35 +781,7 @@ const tabLabels: Record<SettingCategory, string> = {
 </template>
 
 <style scoped>
-.operation-settings { background: #f6f8f9; padding: 28px; color: #1f3038; }
-.operation-hero { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; }
-.operation-kicker,.card-meta,.subsection-label { color:#74838a; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-.operation-hero h2 { margin:8px 0 6px; font-size:28px; letter-spacing:-.03em; }.operation-hero p,.operation-card-head p,.setting-toggle-row p { margin:0; color:#74838a; font-size:13px; }
-.operation-status { display:flex; align-items:center; gap:8px; color:#69787e; font-size:12px; padding-top:8px; }.status-dot,.savebar-mark { width:7px; height:7px; display:inline-block; border-radius:50%; background:#d49644; }
-.status-dot { background:#3d9a6f; box-shadow:0 0 0 3px rgba(61,154,111,.14); }.status-dot.external { background:#2f6fd0; box-shadow:0 0 0 3px rgba(47,111,208,.14); }
-.operation-card { background:#fff; border:1px solid #dfe6e8; border-radius:4px; padding:24px; margin-bottom:16px; box-shadow:0 4px 14px rgba(31,48,56,.035); }.operation-card-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:22px; }.operation-card-head > div { display:flex; gap:14px; align-items:flex-start; }.operation-index { color:#c17a2d; font:700 11px/1.8 ui-monospace,SFMono-Regular,monospace; }.operation-card h3 { margin:0 0 5px; font-size:17px; }
-.locked-meta { display:inline-flex; align-items:center; gap:6px; color:#98a6ab; }.lock-icon { width:11px; height:11px; }
-.mode-readout { display:grid; gap:14px; }
-.mode-readout-main { display:flex; align-items:center; gap:18px; padding:18px 20px; border:1px solid #dfe6e8; border-left:3px solid #1f3038; background:#fff repeating-linear-gradient(135deg,rgba(31,48,56,.022) 0 1px,transparent 1px 7px); }
-.mode-tag { flex:0 0 auto; font-weight:700; letter-spacing:.02em; }
-.mode-tag :deep(.n-tag__content) { font-size:15px; }
-.mode-readout-desc strong { display:block; font:700 10px/1.8 ui-monospace,SFMono-Regular,monospace; letter-spacing:.14em; color:#74838a; text-transform:uppercase; }
-.mode-readout-desc p { margin:2px 0 0; color:#4c5f68; font-size:13px; }
-.mode-variants { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
-.mode-variant { display:flex; align-items:center; gap:10px; padding:11px 14px; border:1px dashed #dfe6e8; color:#98a6ab; font-size:12px; background:#fbfcfc; }
-.mode-variant .mode-code { color:#b3bec2; font:10px ui-monospace,monospace; }
-.mode-variant::after { content:'未启用'; margin-left:auto; color:#b3bec2; font:700 9px/1 ui-monospace,monospace; letter-spacing:.12em; }
-.mode-variant.on { border:1px solid #c17a2d; background:#fffaf4; color:#1f3038; font-weight:600; }
-.mode-variant.on .mode-code { color:#c17a2d; }
-.mode-variant.on::after { content:'当前生效'; color:#c17a2d; }
-.mode-readonly-note { position:relative; padding:12px 14px 12px 62px; border:1px solid #e6ecee; background:#f4f7f8; color:#647a83; font-size:12px; line-height:1.7; }
-.mode-readonly-note::before { content:'NOTE'; position:absolute; left:14px; top:13px; color:#a2adb1; font:700 9px/1.6 ui-monospace,SFMono-Regular,monospace; letter-spacing:.14em; }
-.setting-toggle-row strong { display:block; font-size:14px; }
-.setting-toggle-row { display:flex; justify-content:space-between; align-items:center; gap:20px; padding:15px 0; border-top:1px solid #edf0f1; }.operation-notice { margin:4px 0 20px; padding:11px 13px; border-left:3px solid #d49644; background:#fff8ed; color:#765a35; font-size:12px; }.smtp-block { border-top:1px solid #edf0f1; padding-top:18px; margin-top:10px; }.subsection-label { margin-bottom:14px; }.subsection-label span { color:#a2adb1; letter-spacing:0; text-transform:none; font-weight:400; }.smtp-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:18px; }.smtp-form :deep(.n-form-item) { margin-bottom:16px; }.smtp-form :deep(.n-input-number) { width:100%; }
-.operation-savebar { display:flex; justify-content:space-between; align-items:center; padding:15px 4px 2px; color:#75848a; font-size:12px; }.operation-savebar > div:first-child { display:flex; align-items:center; gap:8px; }.operation-actions { display:flex; gap:10px; }
-@media (min-width: 1050px) { .operation-settings { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }.operation-hero,.operation-savebar,.operation-mode-card,.identity-card { grid-column:1/-1; } }
-.mode-readout-main:focus-within { border-left-color:#c17a2d; }
-.smtp-test-panel { border-top: 1px solid #e4e9ed; padding-top: 18px; }
-.smtp-test-panel > p { color: #64748b; font-size: 12px; line-height: 1.7; margin: 12px 0; }
-@media (max-width: 680px) { .operation-settings { padding:18px 14px; }.operation-hero { display:block; }.operation-status { margin-top:14px; }.operation-card { padding:18px 16px; }.mode-variants,.smtp-form { grid-template-columns:1fr; }.mode-readout-main { flex-direction:column; align-items:flex-start; gap:10px; }.mode-readonly-note { padding-left:14px; }.mode-readonly-note::before { display:none; }.card-meta { display:none; }.operation-savebar { align-items:flex-start; gap:14px; flex-direction:column; } }
+.operation-settings { background: #f6f8f9; padding: 28px; color: #1f3038; }.subsection-label { color:#74838a; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.operation-card-head p { margin:0; color:#74838a; font-size:13px; }.savebar-mark { width:7px; height:7px; display:inline-block; border-radius:50%; background:#d49644; }.operation-card { background:#fff; border:1px solid #dfe6e8; border-radius:4px; padding:24px; margin-bottom:16px; box-shadow:0 4px 14px rgba(31,48,56,.035); }.operation-card-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:22px; }.operation-card-head > div { display:flex; gap:14px; align-items:flex-start; }.operation-card h3 { margin:0 0 5px; font-size:17px; }.smtp-block { border-top:1px solid #edf0f1; padding-top:18px; margin-top:10px; }.subsection-label { margin-bottom:14px; }.subsection-label span { color:#a2adb1; letter-spacing:0; text-transform:none; font-weight:400; }.smtp-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:18px; }.smtp-form :deep(.n-form-item) { margin-bottom:16px; }.smtp-form :deep(.n-input-number) { width:100%; }.operation-savebar { display:flex; justify-content:space-between; align-items:center; padding:15px 4px 2px; color:#75848a; font-size:12px; }.operation-savebar > div:first-child { display:flex; align-items:center; gap:8px; }.operation-actions { display:flex; gap:10px; }
+@media (min-width: 1050px) {.operation-settings { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }.operation-savebar,.identity-card { grid-column:1/-1; } }.smtp-test-panel { border-top: 1px solid #e4e9ed; padding-top: 18px; }.smtp-test-panel > p { color: #64748b; font-size: 12px; line-height: 1.7; margin: 12px 0; }
+@media (max-width: 680px) {.operation-settings { padding:18px 14px; }.operation-card { padding:18px 16px; }.smtp-form { grid-template-columns:1fr; }.operation-savebar { align-items:flex-start; gap:14px; flex-direction:column; } }
 </style>

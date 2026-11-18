@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, h } from 'vue'
+import { computed, ref, inject, onMounted, onUnmounted, h, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NButton, NIcon, NDropdown, NBadge, NDrawer, NDrawerContent,
@@ -14,10 +14,10 @@ import {
   ListOutline, ReceiptOutline, MenuOutline, ChevronDownOutline,
   NotificationsOutline, ChevronBackOutline, ChevronForwardOutline,
   SearchOutline, SunnyOutline, MoonOutline,
-  PersonOutline, AnalyticsOutline,
-  PricetagsOutline, CardOutline, WalletOutline, DocumentTextOutline,
-  TicketOutline, CubeOutline as CubeAltOutline,
-  CashOutline, CartOutline,
+
+     DocumentTextOutline,
+
+
   GitBranchOutline, CalculatorOutline, ShieldCheckmarkOutline
 } from '@vicons/ionicons5'
 import { useAuth } from '../stores/auth'
@@ -31,6 +31,12 @@ const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 const auth = useAuth()
+const resourceSearch = ref('')
+function searchResources() {
+  if (!auth.can('assets:read')) return
+  const path = '/assets'
+  router.push({ path, query: resourceSearch.value.trim() ? { search: resourceSearch.value.trim() } : {} })
+}
 
 // === 响应式状态 ===
 const mobileOpen = ref(false)
@@ -46,22 +52,11 @@ const passwordSaving = ref(false)
 const settingsModal = ref(false)
 
 // === 主题注入 ===
-const isDarkMode = ref(document.documentElement.getAttribute('data-theme') === 'dark')
-const toggleDarkMode = () => {
-  isDarkMode.value = !isDarkMode.value
-  document.documentElement.setAttribute(
-    'data-theme',
-    isDarkMode.value ? 'dark' : 'light'
-  )
-  localStorage.setItem('theme', isDarkMode.value ? 'dark' : 'light')
-}
+const isDarkMode = inject<Ref<boolean>>('isDarkMode', ref(false))
+const toggleDarkMode = inject<() => void>('toggleDarkMode', () => {})
 
 // === 计算属性 ===
 const projects = computed(() => auth.projects)
-// 模式判定的唯一来源：auth.systemMode 由 GET /setup/status 返回的 mode 字段决定。
-// brand.operationMode 属历史遗留字段（仅供其他页面兼容读取），不再参与模式判断。
-const isExternalMode = computed(() => auth.systemMode === 'external_operation')
-
 const sidebarTextColor = computed(() => navTextColor.value)
 
 const navStyle = computed<Record<string, string>>(() => ({
@@ -119,31 +114,8 @@ const userMenuOptions = computed(() => [
 const icon = (c: typeof GridOutline) => () => h(NIcon, null, { default: () => h(c) })
 
 // === 菜单组定义 ===
-// 两种模式通用的菜单分组：工单系统在后端 self_use / external_operation 下均开放，
-// 因此菜单也必须在两种模式中可见，仅文案随模式切换。
-const commonMenuGroups = computed(() => [
-  {
-    label: '运维工具',
-    items: [
-      {
-        label: isExternalMode.value ? '工单工作台' : '工单管理',
-        path: '/work-orders',
-        icon: DocumentTextOutline
-      }
-    ]
-  }
-])
-
-// 将通用分组插入到「系统设置」之前，保证两种模式的侧边栏都包含工单入口
-function withCommonGroups<T extends { label: string }>(groups: T[]) {
-  const settingsIndex = groups.findIndex(group => group.label === '系统设置')
-  const insertAt = settingsIndex >= 0 ? settingsIndex : groups.length
-  return [...groups.slice(0, insertAt), ...commonMenuGroups.value, ...groups.slice(insertAt)]
-}
-
 const allMenuGroups = computed(() => {
-  // 自用管理模式：围绕“自有资产生命周期”组织菜单，不出现任何对外运营入口
-  // （租户控制台 / 产品 / 订单 / 账单 / 账户 / 支付 / 发票 / 优惠券 / 运营大盘）。
+  // 以资产、交付、运维和系统管理组织导航。
   const selfHosted = [
     {
       label: '工作台',
@@ -166,7 +138,6 @@ const allMenuGroups = computed(() => {
       items: [
         { label: '镜像仓库', path: '/images', icon: DiscOutline },
         { label: '子网管理', path: '/subnets', icon: GitNetworkOutline },
-        { label: 'IP 地址', path: '/ip-addresses', icon: GitNetworkOutline },
         { label: '地址池', path: '/ip-pools', icon: GitNetworkOutline },
         { label: 'PXE 配置', path: '/pxe-config', icon: GitNetworkOutline }
       ]
@@ -174,6 +145,7 @@ const allMenuGroups = computed(() => {
     {
       label: '运维治理',
       items: [
+        { label: '工单工作台', path: '/work-orders', icon: DocumentTextOutline },
         { label: '告警记录', path: '/alerts', icon: WarningOutline },
         { label: '告警规则', path: '/alert-rules', icon: WarningOutline },
         { label: '推送渠道', path: '/alert-channels', icon: WarningOutline },
@@ -193,114 +165,10 @@ const allMenuGroups = computed(() => {
     }
   ]
 
-  // 自用模式分组固定为「工作台 / 资产管理 / 交付与网络 / 运维治理 / 系统设置」，
-  // 工单（两种模式共有的基础功能）在自用模式下并入「运维治理」而不另起分组；
-  // 运营模式仍由 withCommonGroups 在「系统设置」前插入「运维工具」，不受本次调整影响。
-  if (!isExternalMode.value) {
-    const governance = selfHosted.find(group => group.label === '运维治理')
-    if (governance) governance.items.unshift(...commonMenuGroups.value.flatMap(group => group.items))
-    return selfHosted
-  }
-
-  // 对外运营模式下必须区分“平台管理员”与“租户自助用户”两种视角：
-  // 管理员拥有全局运营权限，展示完整运营菜单；新注册租户即便拿到 manager 全量权限，
-  // 也只能看到与自身消费相关的精简菜单，否则会误见机房/产品/系统设置等平台运营入口。
-  if (!auth.user?.is_platform_admin) {
-    return [
-      {
-        label: '我的服务',
-        items: [
-          { label: '服务器管理', path: '/tenant-console', icon: ServerOutline }
-        ]
-      },
-      {
-        label: '购买与费用',
-        items: [
-          { label: '购买服务器', path: '/purchase', icon: CubeAltOutline },
-          { label: '费用中心', path: '/billing', icon: WalletOutline }
-        ]
-      },
-      {
-        label: '支持',
-        items: [
-          { label: '提交工单', path: '/work-orders', icon: DocumentTextOutline }
-        ]
-      }
-    ]
-  }
-
-  // 对外运营模式：在通用分组之外追加运营专属菜单
-  return withCommonGroups([
-    {
-      label: '工作台',
-      items: [{ label: '运行总览', path: '/', icon: GridOutline }]
-    },
-    {
-      label: '资产管理',
-      items: [
-        { label: '服务器管理', path: '/assets', icon: ServerOutline },
-        { label: '产品管理', path: '/products', icon: CubeAltOutline },
-        { label: '标签管理', path: '/tags', icon: PricetagsOutline }
-      ]
-    },
-    {
-      label: '基础设施',
-      items: [
-        { label: '机房管理', path: '/datacenters', icon: BusinessOutline }
-      ]
-    },
-    {
-      label: '交付与网络',
-      items: [
-        { label: '镜像仓库', path: '/images', icon: DiscOutline },
-        { label: '子网管理', path: '/subnets', icon: GitNetworkOutline },
-        { label: 'IP 地址', path: '/ip-addresses', icon: GitNetworkOutline },
-        { label: '地址池', path: '/ip-pools', icon: GitNetworkOutline },
-        { label: 'PXE 配置', path: '/pxe-config', icon: GitNetworkOutline }
-      ]
-    },
-    {
-      label: '计费中心',
-      // 运营侧财务入口：下单 / 订单 / 账单 / 账户 / 支付流水 / 发票 / 优惠券逐一对应后端路由，
-      // 每项仅出现一次（账单走 BillingView，/bills 只读台账不另设入口）。
-      items: [
-        { label: '采购下单', path: '/purchase', icon: CartOutline },
-        { label: '订单管理', path: '/orders', icon: CardOutline },
-        { label: '账单管理', path: '/billing', icon: WalletOutline },
-        { label: '账户管理', path: '/accounts', icon: PersonOutline },
-        { label: '支付记录', path: '/payments', icon: CashOutline },
-        { label: '发票管理', path: '/invoices', icon: DocumentTextOutline },
-        { label: '优惠券', path: '/coupons', icon: TicketOutline }
-      ]
-    },
-    {
-      label: '运维治理',
-      items: [
-        { label: '运营数据大盘', path: '/operations-dashboard', icon: AnalyticsOutline },
-        { label: '告警记录', path: '/alerts', icon: WarningOutline },
-        { label: '告警规则', path: '/alert-rules', icon: WarningOutline },
-        { label: '推送渠道', path: '/alert-channels', icon: WarningOutline },
-        { label: '固件升级', path: '/firmware', icon: HardwareChipOutline },
-        { label: '任务中心', path: '/tasks', icon: ListOutline },
-        { label: '审计日志', path: '/audit-logs', icon: ReceiptOutline }
-      ]
-    },
-    {
-      label: '租户控制台',
-      items: [
-        { label: '控制台概览', path: '/tenant-console', icon: GridOutline }
-      ]
-    },
-    {
-      label: '系统设置',
-      items: [
-        { label: '用户管理', path: '/user-management', icon: PeopleOutline },
-        { label: '角色权限', path: '/role-management', icon: PeopleOutline },
-        { label: 'API 密钥', path: '/api-keys', icon: SettingsOutline },
-        { label: '系统设置', path: '/system-settings', icon: SettingsOutline }
-      ]
-    }
-  ])
+  return selfHosted.map(group => ({ ...group, items: group.items.filter(item => {
+    const permission = router.resolve(item.path).meta.permission
+    return !permission || auth.can(String(permission))
+  }) })).filter(group => group.items.length)
 })
 
 // === 可展开的目录菜单 ===
@@ -517,18 +385,13 @@ function handleMenuSelect(key: string) {
             </template>
           </n-button>
 
-          <!-- 模式标签 -->
-          <n-tag
-            :type="isExternalMode ? 'info' : 'success'"
-            size="small"
-            :bordered="false"
-            round
-          >
-            {{ isExternalMode ? '对外运营模式' : '自用管理模式' }}
-          </n-tag>
-
           <!-- 全局资源搜索 -->
           <n-input
+            v-if="auth.can('assets:read')"
+            v-model:value="resourceSearch"
+            class="global-resource-search"
+            aria-label="搜索服务器、IP、SN，按回车查询"
+            @keyup.enter="searchResources"
             placeholder="搜索服务器、IP、SN"
             size="small"
             clearable
@@ -591,10 +454,10 @@ function handleMenuSelect(key: string) {
           {{ auth.contextError }}
           <n-button text @click="auth.loadContext">重试</n-button>
         </div>
-        <div v-else-if="!auth.contextReady" class="empty-hint">正在加载租户与项目…</div>
+        <div v-else-if="!auth.contextReady" class="empty-hint">正在加载组织与项目…</div>
         <template v-else>
           <div v-if="!auth.projectId" class="empty-hint">
-            尚无可用项目，请在租户和项目管理中创建或联系管理员授权。
+            尚无可用项目，请在组织和项目管理中创建或联系管理员授权。
           </div>
           <router-view :key="`${auth.tenantId}:${auth.projectId}:${route.fullPath}`" />
         </template>
@@ -602,7 +465,7 @@ function handleMenuSelect(key: string) {
     </div>
 
     <!-- ===== 通知抽屉 ===== -->
-    <n-drawer v-model:show="notificationOpen" placement="right" class="notification-drawer" :width="380">
+    <n-drawer v-model:show="notificationOpen" placement="right" class="notification-drawer" width="min(380px, 100vw)">
       <n-drawer-content title="告警通知" closable>
         <div class="notification-panel">
           <div v-if="!notifications.length" style="text-align: center; padding: 40px 0; color: #9caab0; font-size: 13px;">

@@ -127,18 +127,7 @@ const (
 	PermProjectsRead  = "projects:read"  // 项目查看
 	PermProjectsWrite = "projects:write" // 项目编辑
 
-	// 双模式新增权限
-	PermBillingRead      = "billing:read"      // 计费查看
-	PermBillingWrite     = "billing:write"     // 计费编辑
-	PermOrdersRead       = "orders:read"       // 订单查看
-	PermOrdersWrite      = "orders:write"      // 订单编辑
-	PermProductsRead     = "products:read"     // 产品查看
-	PermProductsWrite    = "products:write"    // 产品编辑
-	PermFinanceRead      = "finance:read"      // 财务查看
-	PermFinanceWrite     = "finance:write"     // 财务编辑
-	PermMarketingRead    = "marketing:read"    // 营销查看
-	PermMarketingWrite   = "marketing:write"   // 营销编辑
-	PermOperationsRead   = "operations:read"   // 运营数据查看
+	// 部门与工单权限
 	PermDepartmentsRead  = "departments:read"  // 部门查看
 	PermDepartmentsWrite = "departments:write" // 部门编辑
 	PermWorkOrdersRead   = "work_orders:read"  // 工单查看
@@ -154,13 +143,7 @@ var RolePermissions = map[string][]string{
 		PermAlertsRead, PermAlertsWrite, PermAlertsManage,
 		PermNetworkRead, PermNetworkWrite, PermFirmwareRead, PermFirmwareWrite,
 		PermIAMRead, PermAuditRead, PermProjectsRead, PermProjectsWrite,
-		// 双模式新增权限
-		PermBillingRead, PermBillingWrite,
-		PermOrdersRead, PermOrdersWrite,
-		PermProductsRead, PermProductsWrite,
-		PermFinanceRead, PermFinanceWrite,
-		PermMarketingRead, PermMarketingWrite,
-		PermOperationsRead,
+		// 部门与工单权限
 		PermDepartmentsRead, PermDepartmentsWrite,
 		PermWorkOrdersRead, PermWorkOrdersWrite,
 	},
@@ -169,8 +152,6 @@ var RolePermissions = map[string][]string{
 		PermImagesRead, PermTasksRead, PermAlertsRead,
 		PermNetworkRead, PermFirmwareRead, PermAuditRead, PermProjectsRead,
 		// 双模式新增只读权限
-		PermBillingRead, PermOrdersRead, PermProductsRead,
-		PermFinanceRead, PermMarketingRead, PermOperationsRead,
 		PermDepartmentsRead, PermWorkOrdersRead,
 	},
 	"viewer": { // 只读用户

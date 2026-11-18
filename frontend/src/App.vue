@@ -12,7 +12,7 @@ import {
 } from 'naive-ui'
 
 // 响应式暗色模式状态：初始化时从 localStorage 读取，默认 false
-const isDarkMode = ref(false)
+const isDarkMode = ref(document.documentElement.getAttribute('data-theme') === 'dark')
 
 onMounted(() => {
   const stored = localStorage.getItem('darkMode')
@@ -30,6 +30,7 @@ onMounted(() => {
 function toggleDarkMode() {
   isDarkMode.value = !isDarkMode.value
   localStorage.setItem('darkMode', String(isDarkMode.value))
+  localStorage.setItem('theme', isDarkMode.value ? 'dark' : 'light')
   updateThemeAttribute()
 }
 

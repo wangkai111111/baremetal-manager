@@ -1,7 +1,7 @@
 package platform
 
 // ============================================================
-// B4 任务中心详情与日志（两种模式通用）
+// 任务中心详情与执行日志
 // ============================================================
 //
 // 注册路由（routes.go）：
@@ -17,16 +17,11 @@ package platform
 import (
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
-
-// taskResource 是 tasks 列表沿用的通用资源定义（与迁移前 resources 白名单同构）。
-var taskResource = resource{table: "operations"}
-
-// listTasks 复用通用资源查询，保证既有前端契约不变（items/total/page/page_size）。
-func (a *App) listTasks(c *gin.Context) { a.listResource(taskResource)(c) }
 
 // getTask 返回单个任务详情：操作主体 + 资产快照 + 日志统计。
 func (a *App) getTask(c *gin.Context) {
@@ -80,18 +75,28 @@ func (a *App) getTask(c *gin.Context) {
 		logs = []gin.H{}
 	}
 	item["recent_logs"] = logs
+	if item["kind"] == "install" {
+		progress, err := a.installationTaskData(db, id)
+		if err != nil {
+			fail(c, 500, "安装步骤查询失败")
+			return
+		}
+		for key, value := range progress {
+			item[key] = value
+		}
+	}
 	ok(c, item)
 }
 
 // taskLogRows 读取任务日志（ascending by sequence,id）。
 func (a *App) taskLogRows(sc scope, operationID int64, limit int, offset int) ([]gin.H, error) {
 	var rows []struct {
-		ID         int64       `gorm:"column:id"`
-		Sequence   int64       `gorm:"column:sequence"`
-		Level      string      `gorm:"column:level"`
-		Message    string      `gorm:"column:message"`
-		OccurredAt interface{} `gorm:"column:occurred_at"`
-		CreateBy   *int64      `gorm:"column:create_by"`
+		ID         int64      `gorm:"column:id"`
+		Sequence   int64      `gorm:"column:sequence"`
+		Level      string     `gorm:"column:level"`
+		Message    string     `gorm:"column:message"`
+		OccurredAt *time.Time `gorm:"column:occurred_at"`
+		CreateBy   *int64     `gorm:"column:create_by"`
 	}
 	err := queryScope(a.store.db, resource{table: "operation_logs"}, sc).
 		Select("id, sequence, level, message, occurred_at, create_by").

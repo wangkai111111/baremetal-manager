@@ -166,7 +166,7 @@ function parameterType(parameter: Parameter) {
 
 onMounted(async () => {
   try {
-    const response = await fetch('/api/v1/openapi.json')
+    const response = await fetch('/api/v1/docs/openapi.json')
     if (!response.ok) throw new Error('failed')
     spec.value = await response.json()
   } catch {
@@ -186,8 +186,8 @@ onMounted(async () => {
         <p>基于 OpenAPI 规范自动生成的接口参考，可直接用于客户端集成</p>
       </div>
       <div class="head-actions">
-        <a class="doc-download" href="/api/v1/openapi.yaml" download>
-          <n-button quaternary>下载 OpenAPI YAML</n-button>
+        <a class="doc-download" href="/api/v1/docs/openapi.json" download>
+          <n-button quaternary>下载 OpenAPI JSON</n-button>
         </a>
       </div>
     </div>
@@ -216,7 +216,7 @@ onMounted(async () => {
       <div v-if="loading" class="doc-loading">正在加载接口规范…</div>
       <div v-else-if="failed" class="doc-loading">
         接口规范加载失败，可尝试
-        <a href="/api/v1/openapi.yaml" download>下载原始 YAML</a>
+        <a href="/api/v1/docs/openapi.json" download>下载原始 JSON</a>
       </div>
       <n-empty v-else-if="!filtered.length" description="没有匹配的接口" style="padding: 40px" />
 

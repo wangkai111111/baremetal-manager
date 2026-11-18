@@ -25,6 +25,7 @@ func enqueueAutomaticCollection(tx *gorm.DB, sc scope, asset int64) error {
 }
 
 const monitoredAssetSQL = `a.deleted_at IS NULL AND a.status <> 'retired' AND a.bmc_protocol='redfish'
+ AND NOT (COALESCE(a.manufacturer,'')='BMM Test VM' AND COALESCE(a.model,'')='QEMU PXE Lab' AND a.mac_address='52:54:00:77:00:10'::macaddr)
  AND EXISTS (SELECT 1 FROM projects p JOIN tenants t ON t.id=p.tenant_id
  WHERE p.id=a.project_id AND p.tenant_id=a.tenant_id AND p.deleted_at IS NULL AND p.status='active'
  AND t.deleted_at IS NULL AND t.status='active')
@@ -217,4 +218,38 @@ func queueMonitorDeliveries(tx *gorm.DB, op operation, eventID int64, metric, se
  JOIN tags t ON t.tenant_id=at.tenant_id AND t.project_id=at.project_id AND t.id=at.tag_id AND t.deleted_at IS NULL
  WHERE at.tenant_id=r.tenant_id AND at.project_id=r.project_id AND at.asset_id=? AND at.deleted_at IS NULL) @> (r.selector->'tags'))
  ON CONFLICT DO NOTHING`, eventID, value, op.TenantID, op.ProjectID, metric, severity, op.AssetID).Error
+}
+
+// discardAutomaticCollection removes terminal internal queue work atomically with
+// its result. Keep the per-device lease and fencing counter for the next claim.
+// The caller already holds the outbox/operation locks used by the worker.
+func discardAutomaticCollection(tx *gorm.DB, op operation) error {
+	if !op.Automatic || op.Kind != "collect" {
+		return nil
+	}
+	var terminal operation
+	err := tx.Table("operations").Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id=? AND tenant_id=? AND project_id=? AND automatic AND kind='collect' AND status IN ('succeeded','failed','cancelled','timeout','unknown')", op.ID, op.TenantID, op.ProjectID).Take(&terminal).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var active int64
+	if err := tx.Table("device_leases").Where("operation_id=? AND expires_at>now()", op.ID).Count(&active).Error; err != nil {
+		return err
+	}
+	if active > 0 {
+		return nil
+	}
+	if err := tx.Table("device_leases").Where("operation_id=?", op.ID).Update("operation_id", nil).Error; err != nil {
+		return err
+	}
+	for _, table := range []string{"operation_logs", "task_outbox"} {
+		if err := tx.Table(table).Where("tenant_id=? AND project_id=? AND operation_id=?", op.TenantID, op.ProjectID, op.ID).Delete(map[string]any{}).Error; err != nil {
+			return err
+		}
+	}
+	return tx.Table("operations").Where("id=? AND tenant_id=? AND project_id=? AND automatic AND kind='collect'", op.ID, op.TenantID, op.ProjectID).Delete(map[string]any{}).Error
 }

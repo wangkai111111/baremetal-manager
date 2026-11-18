@@ -2,8 +2,9 @@
 // 服务器管理页 —— 裸机资产 fleet 视图
 // 取代通用 ResourceView 的 /assets 页面：更贴合运维场景的筛选栏、批量操作栏与行内操作。
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
+  NAlert,
   NButton,
   NDataTable,
   NDropdown,
@@ -20,16 +21,25 @@ import {
   useMessage
 } from 'naive-ui'
 import type { DataTableColumns, DataTableRowKey, DropdownOption, SelectOption } from 'naive-ui'
-import { useWindowSize } from '@vueuse/core'
+import { useElementSize } from '@vueuse/core'
+import { CopyOutline, ChevronDownOutline, AddOutline, RefreshOutline, ServerOutline } from '@vicons/ionicons5'
 import dayjs from 'dayjs'
 import { api, batchOps, errorText, exportToExcel, resource, rows, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
+import TestVMLab from '../components/TestVMLab.vue'
+import InstallAccessSettings from '../components/InstallAccessSettings.vue'
+import { installAccessError, installAccessPayload, newInstallAccess } from '../utils/installAccess'
+import { flattenDepartments } from '../utils/departments'
+import { isTestVM as isTestVm } from '../utils/testVM'
+import { copyToClipboard } from '../utils/clipboard'
 
 const router = useRouter()
+const route = useRoute()
 const message = useMessage()
 const dialog = useDialog()
 const auth = useAuth()
-const { width: viewportWidth } = useWindowSize()
+const fleetElement = ref<HTMLElement | null>(null)
+const { width: fleetWidth } = useElementSize(fleetElement)
 
 // === 列表状态 ===
 const items = ref<RecordData[]>([])
@@ -42,6 +52,15 @@ const pageSize = ref(20)
 const checkedRowKeys = ref<DataTableRowKey[]>([])
 const batchLoading = ref(false)
 const powerLoading = ref<string | number | null>(null)
+const reinstallShowing = ref(false)
+const reinstallTarget = ref<RecordData | null>(null)
+const installPlans = ref<RecordData[]>([])
+const installPlan = ref<number | null>(null)
+const reinstallConfirmName = ref('')
+const reinstallLoading = ref(false)
+const reinstallAccess = ref(newInstallAccess())
+watch(reinstallShowing, () => { reinstallAccess.value = newInstallAccess() })
+const testVmShowing = ref(false)
 
 // === 筛选条件 ===
 const filterStatus = ref<string | null>(null)
@@ -58,7 +77,7 @@ const searchFieldOptions = [
   { label: '型号', value: 'model' }
 ]
 const filterTags = ref<string[]>([])
-const keyword = ref('')
+const keyword = ref(String(route.query.search || ''))
 
 // === 权限派生 ===
 const canWrite = computed(() => auth.can('assets:write'))
@@ -87,85 +106,35 @@ function openBmcConsole() {
   consoleShowing.value = false
   window.open(url, '_blank', 'noopener,noreferrer')
 }
-const canSubscriptions = computed(() => auth.systemMode === 'external_operation' && auth.can('orders:write'))
-const selectable = computed(() => canWrite.value || canOperate.value || canPower.value || canSubscriptions.value)
-const canSubscriptionFinance = computed(() => canSubscriptions.value && auth.can('finance:write'))
-const renewShowing = ref(false)
-const renewCycle = ref('monthly')
-const renewCount = ref<number | null>(1)
-const cycleOptions = [{ label: '小时', value: 'hourly' }, { label: '天', value: 'daily' }, { label: '月', value: 'monthly' }, { label: '年', value: 'yearly' }]
+const selectable = computed(() => canWrite.value || canOperate.value || canPower.value)
 const batchResults = ref<RecordData[]>([])
 const resultsShowing = ref(false)
 const resultColumns: DataTableColumns<RecordData> = [
   { title: '服务器 ID', key: 'asset_id' },
-  { title: '结果', key: 'status', render: row => ({ accepted: '任务已提交', pending: '待支付订单已生成', reclaim_pending: '已退订 / 待人工回收', failed: '失败' })[String(row.status)] || String(row.status) },
-  { title: '任务 / 订单', key: 'reference', render: row => String(row.operation_id || row.power_operation_id || row.order_id || '—') },
-  { title: '金额', key: 'amount', render: row => row.refund_cents != null ? `退款 ¥${(Number(row.refund_cents) / 100).toFixed(2)}` : row.paid_cents != null ? `已支付 ¥${(Number(row.paid_cents) / 100).toFixed(2)}` : row.payable_cents != null ? `待支付 ¥${(Number(row.payable_cents) / 100).toFixed(2)}` : '—' },
+  { title: '结果', key: 'status', render: row => ({ accepted: '任务已提交', failed: '失败' })[String(row.status)] || String(row.status) },
+  { title: '任务', key: 'reference', render: row => String(row.operation_id || '—') },
   { title: '说明', key: 'reason', render: row => String(row.reason || row.message || '已入任务队列，请在任务中心查看实际执行结果') }
 ]
 let pendingBatch: { fingerprint: string; key: string } | null = null
-async function submitBatchResult(kind: 'power' | 'renew' | 'unsubscribe', ids: number[], projectId: string, cycle = '', count = 1) {
+async function submitBatchResult(kind: 'power', ids: number[], projectId: string, cycle = '') {
   if (batchLoading.value || auth.projectId !== projectId || !ids.length) return
-  if (kind === 'power' ? !canPower.value : !canSubscriptions.value) return
-  const fingerprint = `${projectId}:${kind}:${ids.join(',')}:${cycle}:${count}`
+  if (!canPower.value) return
+  const fingerprint = `${projectId}:${kind}:${ids.join(',')}:${cycle}`
   if (pendingBatch?.fingerprint !== fingerprint) pendingBatch = { fingerprint, key: crypto.randomUUID() }
   const key = pendingBatch.key
   batchLoading.value = true
   try {
-    const response = kind === 'power' ? await batchOps.power(ids, cycle, key)
-      : kind === 'renew' ? await batchOps.renew(ids, cycle, count, key) : await batchOps.unsubscribe(ids, key)
+    const response = await batchOps.power(ids, cycle, key)
     if (auth.projectId !== projectId || disposed) return
     batchResults.value = unwrap<{ results: RecordData[] }>(response).results
     resultsShowing.value = true
-    renewShowing.value = false
+
     checkedRowKeys.value = []
     pendingBatch = null
     await load()
   } catch (e) {
     message.error(`${errorText(e)}；未收到可靠结果时再次提交将复用本次请求键，请勿更换选中项后重试。`)
   } finally { batchLoading.value = false }
-}
-function confirmPayment() {
-  if (!canSubscriptionFinance.value || batchLoading.value) return
-  const rows = batchResults.value.filter(row => row.status === 'pending' && row.order_id)
-  const projectId = auth.projectId
-  if (!rows.length) return
-  dialog.warning({
-    title: '确认余额支付',
-    content: `将逐笔支付 ${rows.length} 个续费订单，展示总额 ¥${(rows.reduce((sum, row) => sum + Number(row.payable_cents || 0), 0) / 100).toFixed(2)}。实际扣款以服务端订单为准，支付成功才延长租期；失败可重试，不重复扣款。`,
-    positiveText: '确认扣款并续期', negativeText: '取消',
-    onPositiveClick: async () => {
-      if (auth.projectId !== projectId) return
-      batchLoading.value = true
-      try {
-        for (const row of rows) {
-          if (auth.projectId !== projectId || disposed) return
-          try {
-            const paid = unwrap<RecordData>(await batchOps.paySubscription(Number(row.order_id)))
-            Object.assign(row, paid)
-          } catch (e) { row.message = errorText(e) }
-        }
-        if (auth.projectId === projectId && !disposed) await load()
-      } finally { batchLoading.value = false }
-    }
-  })
-}
-function confirmSubscriptions(kind: 'renew' | 'unsubscribe') {
-  if (kind === 'unsubscribe' && !canSubscriptionFinance.value) return
-  const ids = selectedIds()
-  if (!canSubscriptions.value || batchLoading.value || !ids.length) return
-  if (ids.length > 100) { message.warning('运营批量操作每次最多100台'); return }
-  const cycle = renewCycle.value
-  const count = renewCount.value || 1
-  const projectId = auth.projectId
-  dialog.warning({
-    title: kind === 'renew' ? '确认批量续费' : '确认立即退订',
-    content: kind === 'renew'
-      ? `将为 ${ids.length} 台服务器各生成 ${count} ${cycleOptions.find(option => option.value === cycle)?.label}的待支付续费订单，按产品当前价格计费，不会自动支付或延长到期时间。`
-      : `将立即退订 ${ids.length} 台服务器：按核验后的剩余已付租期退款至租户余额、提交关机、撤销客户使用权限并标记待人工回收。不清盘。缺少可靠租期或支付依据的服务器将逐台失败，不自动退款。此操作不可撤销。`,
-    positiveText: kind === 'renew' ? '确认生成订单' : '确认立即退订', negativeText: '取消',
-    onPositiveClick: () => submitBatchResult(kind, ids, projectId, cycle, count)
-  })
 }
 
 // === 运行状态元数据（display_status → 标签文案 / 色板） ===
@@ -198,6 +167,10 @@ const metaOf = (row: RecordData): StatusMeta => statusMeta[statusOf(row)] || sta
 const datacenterOptions = ref<SelectOption[]>([])
 const tagOptions = ref<SelectOption[]>([])
 const departments = ref<RecordData[]>([])
+const departmentOptions = computed(() => departments.value.map(dept => ({ label: String(dept.name), value: Number(dept.id), disabled: dept.can_manage !== true })))
+const departmentRequired = computed(() => !auth.user?.is_platform_admin && !auth.user?.can_manage_organization)
+const departmentLoadError = ref('')
+let filterSequence = 0
 
 function datacenterName(value: unknown) {
   if (value == null || value === '') return '未分配机房'
@@ -205,22 +178,24 @@ function datacenterName(value: unknown) {
   return hit ? String(hit.label) : `机房 #${value}`
 }
 
-// === 归属列：运营模式看租户，自用模式看部门 ===
-const currentTenantName = computed(
-  () => String(auth.tenants.find(tenant => String(tenant.id) === String(auth.tenantId))?.name || '')
-)
-function ownerLabel(row: RecordData): { primary: string; scope: string } {
-  if (auth.systemMode === 'external_operation') {
-    const id = row.tenant_id
-    const hit = auth.tenants.find(tenant => String(tenant.id) === String(id))
-    if (hit?.name) return { primary: String(hit.name), scope: '租户' }
-    if (String(id) === String(auth.tenantId)) return { primary: currentTenantName.value || '当前租户', scope: '租户' }
-    return { primary: id == null ? '—' : `租户 #${id}`, scope: '租户' }
-  }
+function projectName(row: RecordData): string {
+  const project = auth.projects.find(item => String(item.id) === String(row.project_id))
+  return String(row.project_name || project?.name || (row.project_id == null ? '未分配项目' : `项目 #${row.project_id}`))
+}
+
+function departmentName(row: RecordData): string {
   const id = row.department_id
   const hit = departments.value.find(dept => String(dept.id) === String(id))
-  if (hit?.name) return { primary: String(hit.name), scope: '部门' }
-  return { primary: id == null ? '未分配' : `部门 #${id}`, scope: '部门' }
+  return String(row.department_name || hit?.name || (id == null ? '未分配部门' : `部门 #${id}`))
+}
+
+const healthOf = (row: RecordData): { label: string; tag: 'success' | 'warning' | 'error' | 'default' } => {
+  switch (String(row.monitor_health || 'unknown').toLowerCase()) {
+    case 'ok': return { label: '健康', tag: 'success' }
+    case 'warning': return { label: '警告', tag: 'warning' }
+    case 'critical': return { label: '严重', tag: 'error' }
+    default: return { label: '未知', tag: 'default' }
+  }
 }
 
 // === 硬件规格：列表行仅有型号字段，规格明细来自逐台采集快照 ===
@@ -282,6 +257,7 @@ function composeSpec(dto: RecordData): SpecInfo {
 }
 
 function specOf(row: RecordData): SpecInfo {
+  if (isTestVm(row)) return { text: '2 vCPU · 8 GB · 40 GB', detail: 'QEMU PXE 测试 VM：2 vCPU、8 GB 内存、40 GB 虚拟磁盘' }
   const cached = specCache.value[String(row.id)]
   if (cached && (cached.text || cached.detail)) return cached
   const model = [String(row.manufacturer || ''), String(row.model || '')].filter(Boolean).join(' ')
@@ -295,6 +271,7 @@ function specOf(row: RecordData): SpecInfo {
 const SPEC_ENRICH_LIMIT = 40
 async function enrichSpecs(list: RecordData[]) {
   const queue = list
+    .filter(row => !isTestVm(row))
     .map(row => String(row.id))
     .filter(id => id && specCache.value[id] === undefined)
     .slice(0, SPEC_ENRICH_LIMIT)
@@ -354,27 +331,25 @@ function idempotencyKey(row: RecordData, action: string) {
 async function copyText(value: string) {
   if (!value) return
   try {
-    await navigator.clipboard.writeText(value)
+    await copyToClipboard(value)
     message.success(`已复制 ${value}`)
   } catch {
-    message.warning('当前浏览器不支持剪贴板，请手动复制')
+    message.error('复制失败，请选中地址后按 Ctrl/Cmd+C 复制')
   }
 }
 
 // === 列定义 ===
-const compactView = computed(() => viewportWidth.value < 1080)
-
 const columns = computed<DataTableColumns<RecordData>>(() => {
   const cols: DataTableColumns<RecordData> = []
-  if (selectable.value) cols.push({ type: 'selection', width: 44, align: 'center', fixed: 'left', disabled: () => batchLoading.value })
+  if (selectable.value) cols.push({ type: 'selection', width: 44, align: 'center', disabled: row => batchLoading.value || isTestVm(row) })
 
   cols.push({
     title: '服务器',
     key: 'name',
-    minWidth: 208,
+    width: 160,
     render: row =>
       h('div', { class: 'cell-server' }, [
-        h('span', { class: 'server-rack', 'aria-hidden': 'true' }),
+        h(ServerOutline, { class: 'server-rack', 'aria-hidden': true }),
         h('div', { class: 'server-id' }, [
           h(
             'a',
@@ -395,33 +370,29 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
   cols.push({
     title: '序列号',
     key: 'serial_number',
-    minWidth: 150,
-    ellipsis: { tooltip: true },
-    render: row => h('span', { class: 'mono' }, String(row.serial_number || '未登记'))
+    width: 166,
+    render: row => h('span', { class: 'server-sn' }, String(row.serial_number || '未登记'))
   })
 
   cols.push({
     title: 'IP 地址',
     key: 'ip_address',
-    minWidth: 168,
+    width: 220,
     render: row => {
-      const service = String(row.ip_address || row.management_ip || '')
-      const bmc = String(row.bmc_address || '')
+      const service = String(row.ip_address || row.management_ip || '').trim()
+      const bmc = isTestVm(row) ? '' : String(row.bmc_address || '').trim()
+      const addressLine = (label: string, value: string, dim = false) => h('div', { class: ['ip-line', { dim, empty: !value }] }, [
+        h('i', {}, label),
+        h('code', {}, value || (dim ? '—' : '未分配')),
+        value ? h('button', {
+          class: 'ip-copy-button', type: 'button', title: `复制${label} IP`,
+          'aria-label': `复制${label === 'BMC' ? ' BMC' : label} IP ${value}`,
+          onClick: () => copyText(value)
+        }, [h(CopyOutline, { class: 'copy-icon', 'aria-hidden': true })]) : null
+      ])
       return h('div', { class: 'cell-ip' }, [
-        service
-          ? h(
-              'button',
-              { class: 'ip-line', type: 'button', title: '点击复制业务/管理 IP', onClick: () => copyText(service) },
-              [h('i', {}, '管理'), h('code', {}, service)]
-            )
-          : h('div', { class: 'ip-line empty' }, [h('i', {}, '管理'), h('code', {}, '未分配')]),
-        bmc
-          ? h(
-              'button',
-              { class: 'ip-line dim', type: 'button', title: '点击复制 BMC 地址', onClick: () => copyText(bmc) },
-              [h('i', {}, 'BMC'), h('code', {}, bmc)]
-            )
-          : h('div', { class: 'ip-line dim empty' }, [h('i', {}, 'BMC'), h('code', {}, '—')])
+        addressLine('管理', service),
+        addressLine('BMC', bmc, true)
       ])
     }
   })
@@ -429,7 +400,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
   cols.push({
     title: '配置规格',
     key: 'spec',
-    minWidth: 150,
+    width: 172,
     render: row => {
       const info = specOf(row)
       if (specPending.value[String(row.id)]) return h('span', { class: 'spec-skeleton' })
@@ -444,27 +415,29 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
   cols.push({
     title: '运行状态',
     key: 'status',
-    width: 116,
+    width: 108,
     render: row => h(NTag, { size: 'small', bordered: false, type: metaOf(row).tag }, { default: () => metaOf(row).label })
   })
 
-  if (!compactView.value) {
-    cols.push({
-      title: '所属租户/部门',
-      key: 'owner',
-      minWidth: 150,
-      render: row => {
-        const owner = ownerLabel(row)
-        return h('div', { class: 'cell-owner' }, [h('span', {}, owner.primary), h('small', {}, owner.scope)])
-      }
-    })
-    cols.push({
-      title: '机房',
-      key: 'datacenter_id',
-      minWidth: 118,
-      render: row => h('span', { class: 'cell-muted' }, datacenterName(row.datacenter_id))
-    })
-  }
+  cols.push({
+    title: '设备健康',
+    key: 'monitor_health',
+    width: 108,
+    render: row => h(NTag, { size: 'small', bordered: false, type: healthOf(row).tag }, { default: () => healthOf(row).label })
+  }, {
+    title: '项目/部门',
+    key: 'owner',
+    width: 160,
+    render: row => h('div', { class: 'cell-owner' }, [
+      h('span', { title: `项目：${projectName(row)}` }, projectName(row)),
+      h('small', { title: `部门：${departmentName(row)}` }, departmentName(row))
+    ])
+  }, {
+    title: '机房',
+    key: 'datacenter_id',
+    width: 130,
+    render: row => h('span', { class: 'cell-muted' }, datacenterName(row.datacenter_id))
+  })
 
   cols.push({
     title: '创建时间',
@@ -476,10 +449,14 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
   cols.push({
     title: '操作',
     key: 'actions',
-    width: 246,
-    fixed: 'right',
+    width: 204,
+    fixed: fleetWidth.value >= 760 ? 'right' : undefined,
     render: row => {
       const intent = powerIntent(row)
+      if (isTestVm(row)) return h('div', { class: 'table-actions row-actions' }, [
+        h(NButton, { text: true, type: 'primary', onClick: openTestVm }, { default: () => 'PXE 实验室' }),
+        h(NButton, { text: true, onClick: () => router.push(`/assets/${row.id}`) }, { default: () => '详情' })
+      ])
       const menu = rowMenuOptions(row)
       return h('div', { class: 'table-actions row-actions' }, [
         canPower.value
@@ -495,7 +472,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
               { default: () => intent.label }
             )
           : null,
-        canPower.value
+        canPower.value && intent.action !== 'restart'
           ? h(NButton, { text: true, type: 'warning', disabled: powerLoading.value === row.id, loading: powerLoading.value === row.id, onClick: () => confirmSinglePower(row, 'restart', '重启') }, { default: () => '重启' })
           : null,
         canConsole.value
@@ -504,7 +481,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
         h(
           NDropdown,
           { trigger: 'click', options: menu, onSelect: (key: string) => handleRowMenu(key, row) },
-          { default: () => h(NButton, { text: true, 'aria-label': '更多操作' }, { default: () => '更多 ▾' }) }
+          { default: () => h(NButton, { text: true, 'aria-label': '更多操作' }, { default: () => ['更多', h(ChevronDownOutline, { class: 'menu-chevron', 'aria-hidden': true })] }) }
         )
       ])
     }
@@ -512,16 +489,17 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
   return cols
 })
 
-const scrollX = computed(() => (compactView.value ? 1198 : 1466) + (selectable.value ? 44 : 0))
+const scrollX = computed(() => columns.value.reduce((width, column) => width + Number(column.width || 0), 0))
 
 // 行主键：资产 id 为后端必填数值主键
 const rowKey = (row: RecordData) => row.id as string | number
 
 function rowMenuOptions(row: RecordData): DropdownOption[] {
-  const options: DropdownOption[] = [{ label: '详情', key: 'detail' }, { label: '重装', key: 'reinstall' }]
+  const options: DropdownOption[] = [{ label: '查看详情', key: 'detail' }]
+  if (canOperate.value) options.push({ label: '重装系统', key: 'reinstall' })
   if (canOperate.value) options.push({ label: '采集硬件信息', key: 'collect' })
   options.push({ label: '打开 BMC 界面', key: 'bmc', disabled: !bmcWebUrl(row) })
-  if (canWrite.value) options.push({ type: 'divider', key: 'divider' }, { label: '编辑', key: 'edit' }, { label: '删除', key: 'delete' })
+  if (canWrite.value && row.can_manage === true) options.push({ type: 'divider', key: 'divider' }, { label: '编辑', key: 'edit' }, { label: '删除', key: 'delete' })
   return options
 }
 
@@ -574,23 +552,36 @@ async function load(silent = false) {
 
 async function loadFilterOptions() {
   if (!auth.projectId) return
+  const sequence = ++filterSequence
+  departmentLoadError.value = ''
   try {
     const result = rows(await resource.list('/datacenters', { page_size: 200 }))
+    if (sequence !== filterSequence) return
     datacenterOptions.value = result.items.map(dc => ({ label: String(dc.name || dc.id), value: Number(dc.id) }))
   } catch (e) {
+    if (sequence !== filterSequence) return
     message.warning(`机房选项加载失败：${errorText(e)}`)
   }
   try {
     const result = rows(await resource.list('/tags', { page_size: 200 }))
+    if (sequence !== filterSequence) return
     tagOptions.value = result.items.map(tag => ({ label: String(tag.name || tag.id), value: String(tag.name || tag.id) }))
   } catch {
+    if (sequence !== filterSequence) return
     // 标签加载失败不阻塞主流程
   }
-  if (auth.systemMode === 'self_use') {
+  if (auth.can('departments:read')) {
     try {
-      departments.value = rows(await resource.list('/departments', { page_size: 200 })).items
-    } catch {
+      const result = rows(await resource.list('/departments'))
+      if (sequence !== filterSequence) return
+      const managed = new Set<number>()
+      const visit = (nodes: RecordData[]) => nodes.forEach(d => {if (d.can_manage === true) managed.add(Number(d.id));if (Array.isArray(d.children)) visit(d.children as RecordData[])})
+      visit(result.items)
+      departments.value = flattenDepartments(result.items).map(d => ({...d, can_manage:managed.has(d.id)}))
+    } catch (e) {
+      if (sequence !== filterSequence) return
       departments.value = []
+      departmentLoadError.value = `部门加载失败：${errorText(e)}`
     }
   }
 }
@@ -617,7 +608,7 @@ function resetFilters() {
 
 // === 本页状态统计（点击快捷筛选） ===
 const fleetChips = computed(() => {
-  const order = ['running', 'in_use', 'stopped', 'error', 'maintenance', 'offline']
+  const order = ['running', 'stopped', 'error', 'maintenance', 'offline']
   return order.map(key => ({
     key,
     label: statusMeta[key].label,
@@ -634,18 +625,14 @@ const batchActions = [
   { key: 'scan', label: '扫描', action: '' },
   { key: 'delete', label: '删除', action: '' }
 ]
-const canBatch = computed(() => checkedRowKeys.value.length > 0 && !batchLoading.value)
-const batchMenuOptions = computed<DropdownOption[]>(() => batchActions
-  .filter(action => action.key !== 'delete' || auth.systemMode !== 'external_operation')
-  .map(action => ({
-    label: action.label,
-    key: action.key,
-    disabled: action.key === 'delete' ? !canWrite.value : action.key === 'scan' ? !canOperate.value : ['on', 'off', 'restart'].includes(action.key) ? !canPower.value : false
-  })))
+const listToolOptions = computed<DropdownOption[]>(() => [
+  ...(canWrite.value ? [{ key: 'register', label: '批量登记服务器' }] : []),
+  ...(auth.user?.is_platform_admin ? [{ key: 'test-vm', label: '创建测试 VM' }] : [])
+])
 
-function handleBatchMenuSelect(key: string) {
-  const action = batchActions.find(item => item.key === key)
-  if (action) runBatch(action)
+function handleListTool(key: string) {
+  if (key === 'register') openBatchAdding()
+  if (key === 'test-vm') openTestVm()
 }
 
 function selectedIds() {
@@ -703,7 +690,7 @@ async function submit(task: () => Promise<unknown>, success: string) {
 
 async function confirmBatchDelete() {
   const ids = selectedIds()
-  if (!ids.length || !canWrite.value || batchLoading.value || auth.systemMode === 'external_operation') return
+  if (!ids.length || !canWrite.value || batchLoading.value) return
   batchLoading.value = true
   try {
     await batchOps.remove('/assets', ids)
@@ -755,18 +742,37 @@ async function collectAsset(row: RecordData) {
   }
 }
 
-function startReinstall(row: RecordData) {
-  dialog.info({
-    title: 'PXE 重装预检',
-    content: `${row.name || row.id}：检查当前项目绑定、DHCP/TFTP 实际状态及引导文件。装机执行尚未实现，即使预检通过也不会重启或清盘。`,
-    positiveText: '执行预检',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      try { await api.post(`/assets/${encodeURIComponent(String(row.id))}/install`) }
-      catch (e) { message.warning(errorText(e)) }
-    }
-  })
+async function startReinstall(row: RecordData) {
+  reinstallTarget.value = row
+  installPlan.value = null
+  reinstallConfirmName.value = ''
+  reinstallShowing.value = true
+  try {
+    const result = rows(await resource.list('/install-plans', { page_size: 200 }))
+    installPlans.value = result.items
+  } catch (e) {
+    installPlans.value = []
+    message.error(`装机方案加载失败：${errorText(e)}`)
+  }
 }
+
+async function submitReinstall() {
+  const target = reinstallTarget.value
+  if (!target || installPlan.value == null || reinstallConfirmName.value !== String(target.name || target.id)) return
+  const accessError = installAccessError(reinstallAccess.value)
+  if (accessError) { message.error(accessError); return }
+  reinstallLoading.value = true
+  try {
+    const result = unwrap<RecordData>(await api.post(`/assets/${encodeURIComponent(String(target.id))}/install`, { install_plan_id: Number(installPlan.value), confirmed: true, access: installAccessPayload(reinstallAccess.value) }))
+    message.success(`装机任务已提交：${result.task_id || result.installation_id || result.id || '请到任务中心查看'}`)
+    reinstallShowing.value = false
+    await load(true)
+  } catch (e) { message.error(errorText(e)) }
+  finally { reinstallLoading.value = false }
+}
+
+function openTestVm() { testVmShowing.value = true }
+
 
 function removeAsset(row: RecordData) {
   if (!canWrite.value) return
@@ -827,6 +833,7 @@ type AssetForm = {
   serial_number?: string
   model?: string
   datacenter_id?: number | null
+  department_id?: number | null
 }
 const editing = ref(false)
 const saving = ref(false)
@@ -840,7 +847,7 @@ const protocols = [
 const toText = (value: unknown) => (value == null ? '' : String(value))
 
 function openEdit(row?: RecordData) {
-  if (!canWrite.value) return
+  if (!canWrite.value || (row && row.can_manage !== true)) return
   currentId.value = row?.id ?? null
   form.value = row
     ? {
@@ -854,7 +861,8 @@ function openEdit(row?: RecordData) {
         management_ip: toText(row.management_ip),
         serial_number: toText(row.serial_number),
         model: toText(row.model),
-        datacenter_id: row.datacenter_id == null ? null : Number(row.datacenter_id)
+        datacenter_id: row.datacenter_id == null ? null : Number(row.datacenter_id),
+        department_id: row.department_id == null ? null : Number(row.department_id)
       }
     : { bmc_protocol: 'redfish', bmc_port: 443 }
   editing.value = true
@@ -871,6 +879,7 @@ async function saveAsset() {
   if (!canWrite.value) return
   const name = String(form.value.name || '').trim()
   const address = String(form.value.bmc_address || '').trim()
+  if (departmentRequired.value && !form.value.department_id) return message.warning('请选择管理范围内的部门')
   if (!name) return message.warning('请填写服务器名称')
   if (!address || (!isIPv4(address) && !isIPv6(address))) return message.warning('BMC 地址需为合法 IPv4 / IPv6 地址')
   const management = String(form.value.management_ip || '').trim()
@@ -891,6 +900,7 @@ async function saveAsset() {
     model: String(form.value.model || '').trim(),
     datacenter_id: form.value.datacenter_id == null ? null : Number(form.value.datacenter_id)
   }
+  if (auth.can('departments:read')) payload.department_id = form.value.department_id ?? null
   if (String(form.value.bmc_secret || '').trim()) payload.bmc_secret = String(form.value.bmc_secret).trim()
   saving.value = true
   try {
@@ -911,7 +921,7 @@ async function saveAsset() {
 // === 批量登记（CIDR 网段） ===
 const batchAdding = ref(false)
 const batchSubmitting = ref(false)
-const batchForm = ref({ cidr: '', username: '', password: '', protocol: 'redfish', port: 443 as number | null, prefix: '', datacenterId: null as number | null })
+const batchForm = ref({ cidr: '', username: '', password: '', protocol: 'redfish', port: 443 as number | null, prefix: '', datacenterId: null as number | null, departmentId: null as number | null })
 type RegisterResult = { address: string; status: 'queued' | 'pending' | 'success' | 'failed' | 'unknown' | 'stopped'; detail: string }
 const registerResults = ref<RegisterResult[]>([])
 let registerRun: { stopped: boolean } | null = null
@@ -967,6 +977,7 @@ function openBatchAdding() {
 
 async function confirmBatchAdd() {
   if (batchSubmitting.value || !auth.projectId || !canWrite.value) return
+  if (departmentRequired.value && !batchForm.value.departmentId) return message.warning('请选择管理范围内的部门')
   let addresses: string[]
   try {
     addresses = registrationAddresses(batchForm.value.cidr)
@@ -990,7 +1001,7 @@ async function registerAssets(addresses: string[]) {
   const run = { stopped: false }
   registerRun = run
   batchSubmitting.value = true
-  const { username, protocol, port, prefix, datacenterId } = batchForm.value
+  const { username, protocol, port, prefix, datacenterId, departmentId } = batchForm.value
   const projectId = auth.projectId
   const password = batchForm.value.password
   registerResults.value = addresses.map(address => ({ address, status: 'queued' as const, detail: '' }))
@@ -1010,7 +1021,8 @@ async function registerAssets(addresses: string[]) {
             bmc_secret: password,
             bmc_protocol: protocol,
             bmc_port: port,
-            datacenter_id: datacenterId
+            datacenter_id: datacenterId,
+            department_id: departmentId
           },
           { projectId, sensitive: true }
         )
@@ -1062,13 +1074,15 @@ async function handleExport() {
   try {
     const exportRows = items.value.map(row => ({
       服务器名称: row.name ?? '',
+      序列号: String(row.serial_number || ''),
       内网IP: String(row.ip_address || row.management_ip || ''),
       BMC地址: String(row.bmc_address || ''),
       配置规格: specOf(row).text,
       运行状态: metaOf(row).label,
-      [ownerLabel(row).scope]: ownerLabel(row).primary,
+      设备健康: healthOf(row).label,
+      项目: projectName(row),
+      部门: departmentName(row),
       机房: datacenterName(row.datacenter_id),
-      序列号: String(row.serial_number || ''),
       创建时间: formatTime(row.created_at)
     }))
     const first = exportRows[0] || {}
@@ -1080,16 +1094,32 @@ async function handleExport() {
 }
 
 // === 生命周期与上下文切换 ===
+watch(() => route.query.search, value => {
+  keyword.value = typeof value === 'string' ? value : ''
+  filterStatus.value = null
+  searchField.value = 'auto'
+  filterTags.value = []
+  applyFilter()
+})
 watch(
-  [() => auth.projectId, () => auth.tenantId, () => auth.systemMode],
+  [() => auth.projectId, () => auth.tenantId],
   () => {
     page.value = 1
     checkedRowKeys.value = []
     specCache.value = {}
     batchResults.value = []
     resultsShowing.value = false
-    renewShowing.value = false
+
     pendingBatch = null
+    editing.value = false
+    form.value = {}
+    stopRegistration()
+    batchAdding.value = false
+    batchForm.value.datacenterId = null
+    batchForm.value.departmentId = null
+    departments.value = []
+    datacenterOptions.value = []
+    tagOptions.value = []
     load()
     loadFilterOptions()
   },
@@ -1098,6 +1128,7 @@ watch(
 
 onBeforeUnmount(() => {
   disposed = true
+  filterSequence++
   loadSequence++
   clearTimeout(refreshTimer)
   stopRegistration()
@@ -1105,25 +1136,35 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page server-list">
+  <div ref="fleetElement" class="page server-list">
     <div class="page-head">
       <div>
         <div class="eyebrow dark">SERVER FLEET / ASSETS</div>
         <h1>服务器管理</h1>
-        <p>按机房、状态与标签筛选裸机；支持批量电源操作、硬件采集与 BMC 凭据登记。</p>
+        <p>集中查看服务器配置、网络地址与运行状态。</p>
       </div>
       <div class="head-actions">
         <n-space :size="10" align="center">
-          <span class="sync-state" :class="{ failed: !!loadError }">
-            <i class="sync-dot" aria-hidden="true" />
-            {{ lastSyncedLabel }}
-          </span>
-          <n-button :disabled="!auth.projectId" :loading="loading" @click="load()">刷新列表</n-button>
+          <n-button :disabled="!auth.projectId" :loading="loading" @click="load()">
+            <template #icon><RefreshOutline /></template>
+            刷新列表
+          </n-button>
+          <n-button v-if="canWrite" type="primary" :disabled="!auth.projectId" @click="openEdit()">
+            <template #icon><AddOutline /></template>
+            新增服务器
+          </n-button>
         </n-space>
       </div>
     </div>
 
     <div class="data-table-wrapper">
+      <div class="list-heading">
+        <div class="list-title"><h2>服务器列表</h2><span class="list-total">{{ total }} 台</span></div>
+        <span class="sync-state" :class="{ failed: !!loadError }" title="每 15 秒自动同步">
+          <i class="sync-dot" aria-hidden="true" />
+          {{ lastSyncedLabel }}
+        </span>
+      </div>
       <!-- 顶部筛选工具栏 -->
       <div class="table-toolbar">
         <div class="filter-cluster">
@@ -1142,7 +1183,7 @@ onBeforeUnmount(() => {
                 v-model:value="keyword"
                 :input-props="{ 'aria-labelledby': 'fleet-keyword-label' }"
                 size="small"
-                placeholder="输入搜索内容"
+                placeholder="名称、IP 或序列号"
                 clearable
                 class="search-content"
                 @keyup.enter="applyFilter"
@@ -1175,40 +1216,25 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="batch-cluster">
-          <span class="selection-hint">{{ checkedRowKeys.length ? `已选 ${checkedRowKeys.length} 台` : '勾选行后可批量操作' }}</span>
-          <n-dropdown
-            trigger="click"
-            placement="bottom-start"
-            :options="batchMenuOptions"
-            :disabled="!canBatch"
-            @select="handleBatchMenuSelect"
-          >
-            <n-button size="small" :disabled="!canBatch">
-              批量操作
-              <span class="more-dots" aria-hidden="true">•••</span>
-            </n-button>
-          </n-dropdown>
-        </div>
-
         <div class="primary-cluster">
           <n-button size="small" :disabled="!items.length" @click="handleExport">导出 Excel</n-button>
-          <n-button v-if="canWrite" size="small" tertiary @click="openBatchAdding">批量登记</n-button>
-          <n-button v-if="canWrite" size="small" type="primary" :disabled="!auth.projectId" @click="openEdit()">
-            + 新增服务器
-          </n-button>
+          <n-dropdown v-if="listToolOptions.length" trigger="click" :options="listToolOptions" @select="handleListTool">
+            <n-button size="small">更多工具 <ChevronDownOutline class="menu-chevron" aria-hidden="true" /></n-button>
+          </n-dropdown>
         </div>
       </div>
 
       <!-- 本页状态分布：点击即筛选 -->
       <div class="fleet-strip">
-        <span class="strip-label">本页分布</span>
+        <span class="strip-label">本页状态</span>
+        <button type="button" class="fleet-chip" :class="{ active: !filterStatus }" :aria-pressed="!filterStatus" @click="filterStatus = null; applyFilter()">全部状态</button>
         <button
           v-for="chip in fleetChips"
           :key="chip.key"
           type="button"
           class="fleet-chip"
           :class="{ active: filterStatus === chip.key }"
+          :aria-pressed="filterStatus === chip.key"
           :title="`筛选${chip.label}的服务器`"
           @click="filterStatus = filterStatus === chip.key ? null : chip.key; applyFilter()"
         >
@@ -1216,7 +1242,7 @@ onBeforeUnmount(() => {
           {{ chip.label }}
           <strong>{{ chip.count }}</strong>
         </button>
-        <span class="strip-note">共 {{ total }} 台 · 每 15 秒静默刷新</span>
+        <span v-if="fleetWidth < scrollX" class="strip-note">左右滑动查看完整信息</span>
       </div>
 
       <!-- 选中后浮出的批量操作条 -->
@@ -1226,18 +1252,16 @@ onBeforeUnmount(() => {
         <n-button v-if="canPower" size="tiny" tertiary @click="runBatch(batchActions[1])">关机</n-button>
         <n-button v-if="canPower" size="tiny" tertiary @click="runBatch(batchActions[2])">重启</n-button>
         <n-button v-if="canOperate" size="tiny" tertiary @click="runBatch(batchActions[3])">扫描</n-button>
-        <n-button v-if="canSubscriptions" size="tiny" tertiary :disabled="batchLoading" @click="renewShowing = true">批量续费</n-button>
-        <n-button v-if="canSubscriptionFinance" size="tiny" tertiary :disabled="batchLoading" @click="confirmSubscriptions('unsubscribe')">立即退订</n-button>
-        <n-popconfirm v-if="canWrite && auth.systemMode !== 'external_operation'" @positive-click="confirmBatchDelete">
-          <template #trigger>
-            <n-button size="tiny" tertiary type="error">删除</n-button>
-          </template>
+        <n-popconfirm v-if="canWrite" @positive-click="confirmBatchDelete">
+          <template #trigger><n-button size="tiny" tertiary type="error">删除</n-button></template>
           确认删除 {{ checkedRowKeys.length }} 台服务器记录？不可撤销。
         </n-popconfirm>
         <n-button size="tiny" text class="bar-cancel" :disabled="batchLoading" @click="checkedRowKeys = []">取消选择</n-button>
       </div>
 
       <n-data-table
+        class="fleet-table"
+        :bordered="false"
         remote
         size="small"
         :columns="columns"
@@ -1278,19 +1302,30 @@ onBeforeUnmount(() => {
         <n-button @click="openSolConsole">打开 SOL 控制台 →</n-button>
       </div>
     </n-modal>
-    <n-modal v-model:show="renewShowing" preset="card" title="批量续费" style="width: min(460px, 94vw)">
-      <p>已选 {{ checkedRowKeys.length }} 台。逐台生成待支付订单，不自动扣款或延长到期时间。</p>
-      <n-form label-placement="top">
-        <n-form-item label="续费周期"><n-select v-model:value="renewCycle" :options="cycleOptions" :disabled="batchLoading" /></n-form-item>
-        <n-form-item label="周期数量"><n-input-number v-model:value="renewCount" :min="1" :max="36" :precision="0" :disabled="batchLoading" /></n-form-item>
-      </n-form>
-      <n-button type="primary" :loading="batchLoading" :disabled="batchLoading || !renewCount" @click="confirmSubscriptions('renew')">确认续费方案</n-button>
-    </n-modal>
     <n-modal v-model:show="resultsShowing" preset="card" title="逐台操作结果" style="width: min(1050px, 96vw)">
-      <n-button v-if="canSubscriptionFinance && batchResults.some(row => row.status === 'pending' && row.order_id)" type="primary" :loading="batchLoading" :disabled="batchLoading" @click="confirmPayment">确认余额支付续费订单</n-button>
-      <p>共 {{ batchResults.length }} 台；失败 {{ batchResults.filter(row => row.status === 'failed').length }} 台。电源操作异步执行，请到任务中心核对实际执行结果；退订后待人工回收，不清盘。</p>
+      <p>共 {{ batchResults.length }} 台；失败 {{ batchResults.filter(row => row.status === 'failed').length }} 台。电源操作异步执行，请到任务中心核对实际执行结果。</p>
       <n-data-table :columns="resultColumns" :data="batchResults" :row-key="row => row.asset_id" :scroll-x="850" :pagination="{ pageSize: 20 }" />
     </n-modal>
+    <n-modal v-model:show="reinstallShowing" preset="card" title="确认重装系统" style="width: min(620px, 94vw)">
+      <n-alert type="warning" :bordered="false">重装将清空服务器磁盘上的现有数据并重新安装系统。当前仅支持 BMM Test VM，物理服务器会明确拒绝。
+        <p><n-button text type="primary" @click="router.push('/pxe-config')">去 PXE 配置页查看启动指引</n-button></p>
+      </n-alert>
+      <n-form label-placement="top" style="margin-top: 16px">
+        <n-form-item label="装机方案" required>
+          <n-select v-model:value="installPlan" :options="installPlans.map(plan => ({ label: String(plan.name || `方案 #${plan.id}`), value: Number(plan.id) }))" :disabled="reinstallLoading" placeholder="请选择已有装机方案" />
+          <small v-if="!installPlans.length">暂无可用方案。测试 VM 可在“PXE 实验室”自动创建 Ubuntu 安装方案。</small>
+        </n-form-item>
+        <InstallAccessSettings v-model="reinstallAccess" :disabled="reinstallLoading" />
+        <n-form-item label="输入服务器名称确认" required>
+          <n-input v-model:value="reinstallConfirmName" :placeholder="String(reinstallTarget?.name || reinstallTarget?.id || '')" :disabled="reinstallLoading" />
+        </n-form-item>
+      </n-form>
+      <div class="modal-actions">
+        <n-button @click="reinstallShowing = false">取消</n-button>
+        <n-button type="error" :loading="reinstallLoading" :disabled="reinstallLoading || !installPlans.length || installPlan == null || reinstallConfirmName !== String(reinstallTarget?.name || reinstallTarget?.id || '') || !!installAccessError(reinstallAccess)" @click="submitReinstall">确认清盘并提交</n-button>
+      </div>
+    </n-modal>
+    <TestVMLab v-model:show="testVmShowing" @updated="load(true)" />
     <!-- 新增 / 编辑服务器 -->
     <n-modal v-model:show="editing" preset="card" :title="currentId != null ? '编辑服务器' : '新增服务器'" style="width: min(560px, 94vw)">
       <n-form label-placement="top">
@@ -1324,6 +1359,9 @@ onBeforeUnmount(() => {
           </n-form-item>
           <n-form-item label="管理 IP">
             <n-input v-model:value="form.management_ip" placeholder="留空表示未分配" />
+          </n-form-item>
+          <n-form-item v-if="auth.can('departments:read')" label="所属部门" :feedback="departmentLoadError" :validation-status="departmentLoadError ? 'error' : undefined">
+            <n-select v-model:value="form.department_id" :options="departmentOptions" :disabled="!!departmentLoadError" :clearable="!departmentRequired" filterable :placeholder="departmentRequired ? '请选择管理范围内的部门' : '未分配部门（可选）'" />
           </n-form-item>
           <n-form-item label="所属机房">
             <n-select v-model:value="form.datacenter_id" :options="datacenterOptions" clearable filterable placeholder="未分配机房" />
@@ -1377,6 +1415,9 @@ onBeforeUnmount(() => {
           <n-form-item label="命名前缀">
             <n-input v-model:value="batchForm.prefix" placeholder="名称 = 前缀 + IP，例如 server-" />
           </n-form-item>
+          <n-form-item v-if="auth.can('departments:read')" label="所属部门" :feedback="departmentLoadError" :validation-status="departmentLoadError ? 'error' : undefined">
+            <n-select v-model:value="batchForm.departmentId" :options="departmentOptions" :disabled="!!departmentLoadError" :clearable="!departmentRequired" filterable :placeholder="departmentRequired ? '请选择管理范围内的部门' : '统一分配部门（可选）'" />
+          </n-form-item>
           <n-form-item label="所属机房">
             <n-select v-model:value="batchForm.datacenterId" :options="datacenterOptions" clearable filterable placeholder="未分配机房" />
           </n-form-item>
@@ -1399,541 +1440,98 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* === 工具栏：筛选独立成行，批量与主操作分区 === */
-.table-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 14px 16px;
+.server-list { container-type: inline-size; }
+.server-list .page-head { align-items: center; }
+.list-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 20px 0; flex-wrap: wrap; }
+.list-title { display: flex; align-items: center; gap: 10px; }
+.list-title h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.list-total { padding: 2px 8px; border-radius: var(--radius-sm); background: var(--color-surface-hover); color: var(--color-text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.table-toolbar { display: flex; align-items: flex-end; gap: 14px; padding: 18px 20px; flex-wrap: wrap; }
+.filter-cluster { display: flex; gap: 12px; align-items: end; flex: 1; min-width: 0; }
+.filter-search { flex: 0 0 calc((100cqw - 40px) / 3); }
+.filter-tags { flex: 0 0 140px; }
+.filter-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.filter-label { font-size: 12px; color: var(--color-text-secondary); }
+.filter-field :deep(.n-select), .filter-field :deep(.n-input) { width: 100%; min-width: 0; }
+.search-composer { display: grid; grid-template-columns: 105px minmax(0, 1fr) 32px; align-items: center; }
+.search-composer :deep(.n-base-selection), .search-composer :deep(.n-input), .search-submit { border-radius: 0; }
+.search-field-select :deep(.n-base-selection) { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.search-composer .search-content, .search-submit { margin-left: -1px; width: calc(100% + 1px); }
+.search-submit { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.search-composer :deep(.n-base-selection--focus), .search-composer :deep(.n-input--focus), .search-submit:focus-visible { z-index: 1; }
+.primary-cluster { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.menu-chevron, :deep(.menu-chevron) { width: 13px; height: 13px; margin-left: 5px; }
+.sync-state { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--color-text-tertiary); white-space: nowrap; }
+.sync-state.failed { color: var(--color-error); }
+.sync-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-success); }
+.sync-state.failed .sync-dot { background: var(--color-error); }
+.fleet-strip { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--color-border-light); background: var(--color-surface); }
+.strip-label { margin-right: 8px; font-size: 12px; color: var(--color-text-tertiary); }
+.fleet-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid transparent; border-radius: var(--radius-md); background: transparent; color: var(--color-text-secondary); font: inherit; font-size: 12px; cursor: pointer; transition: background var(--transition-fast), color var(--transition-fast); }
+.fleet-chip:hover { background: var(--color-surface-hover); color: var(--color-text-primary); }
+.fleet-chip.active { color: var(--color-primary); background: var(--color-primary-light); }
+.fleet-chip:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.fleet-chip strong { font-weight: 600; font-variant-numeric: tabular-nums; color: inherit; }
+.chip-dot { width: 6px; height: 6px; border-radius: 50%; }
+.dot-running { background: var(--color-success); }
+.dot-stopped { background: var(--color-text-tertiary); }
+.dot-fault { background: var(--color-error); }
+.dot-maintenance { background: var(--color-warning); }
+.strip-note { margin-left: auto; font-size: 11px; color: var(--color-text-tertiary); }
+.fleet-table :deep(.n-data-table-th) { font-size: 12px; font-weight: 500; background: var(--color-surface-hover); color: var(--color-text-secondary); }
+.fleet-table :deep(.n-data-table-td) { padding-top: 18px; padding-bottom: 18px; }
+.fleet-table :deep(.n-data-table__pagination) { padding: 12px 16px; margin: 0; border-top: 1px solid var(--color-border-light); }
+:deep(.cell-server) { display: flex; gap: 12px; align-items: flex-start; min-width: 0; }
+:deep(.server-rack) { width: 30px; height: 30px; padding: 6px; flex: 0 0 30px; box-sizing: border-box; border-radius: var(--radius-md); color: var(--color-primary); background: var(--color-primary-light); }
+:deep(.server-id) { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+:deep(.server-name) { font-size: 14px; font-weight: 600; color: var(--color-text-primary); overflow-wrap: anywhere; }
+:deep(.server-name):hover { color: var(--color-primary); }
+:deep(.server-name):focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+:deep(.server-sn) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+:deep(.cell-ip) { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+:deep(.ip-line) { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding: 2px 0; text-align: left; }
+:deep(.ip-line) i { flex: 0 0 32px; font-size: 10px; font-weight: 500; font-style: normal; line-height: 20px; text-align: center; border-radius: 3px; color: var(--color-primary); background: var(--color-primary-light); }
+:deep(.ip-line).dim i { color: var(--color-text-secondary); background: var(--color-surface-hover); }
+:deep(.ip-line) code { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--color-text-primary); }
+:deep(.copy-icon) { width: 13px; height: 13px; flex: 0 0 13px; color: var(--color-text-tertiary); }
+:deep(.ip-line).empty code { color: var(--color-text-tertiary); font-family: inherit; }
+:deep(.ip-copy-button) { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 24px; width: 24px; height: 24px; padding: 0; border: 1px solid var(--color-border-light); border-radius: var(--radius-sm); background: transparent; cursor: pointer; transition: background var(--transition-fast); }
+:deep(.ip-copy-button):hover { background: var(--color-primary-light); }
+:deep(.ip-copy-button):focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+:deep(.ip-copy-button):hover .copy-icon { color: var(--color-primary); }
+:deep(.spec-code) { font-size: 12px; line-height: 1.6; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+:deep(.spec-skeleton) { display: inline-block; width: 84px; height: 10px; border-radius: var(--radius-xs); background: var(--color-border-light); }
+:deep(.cell-owner) { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+:deep(.cell-owner) span { overflow-wrap: anywhere; color: var(--color-text-primary); }
+:deep(.cell-owner) small { font-size: 12px; color: var(--color-text-tertiary); overflow-wrap: anywhere; }
+:deep(.cell-muted) { color: var(--color-text-tertiary); }
+:deep(.mono) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+:deep(.row-actions) { gap: 10px; flex-wrap: nowrap; }
+:deep(.row-actions .n-button) { font-size: 12px; }
+.batch-action-bar { position: static; box-shadow: none; border-radius: 0; padding: 12px 20px; flex-wrap: wrap; }
+.batch-action-bar :deep(.n-button) { background: rgba(255, 255, 255, 0.16); color: #fff; }
+.batch-action-bar :deep(.n-button:hover) { background: rgba(255, 255, 255, 0.28); }
+.bar-cancel { margin-left: auto; }
+.console-picker-target { margin: 0 0 16px; color: var(--color-text-secondary); }
+.console-option { padding: 18px; margin-top: 12px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
+.console-option strong { display: block; font-size: 15px; }
+.console-option p { margin: 8px 0; line-height: 1.7; }
+.console-option small { display: block; margin-bottom: 14px; color: var(--color-text-secondary); line-height: 1.6; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 16px; }
+.form-grid .form-wide { grid-column: 1 / -1; }
+.result-summary { margin: 12px 0 8px; font-size: 12px; color: var(--color-text-secondary); }
+@container (max-width: 760px) {
+  .filter-cluster { display: grid; width: 100%; min-width: 100%; grid-template-columns: minmax(0, 1fr) auto; }
+  .filter-search { grid-column: 1 / -1; }
+  .filter-tags { max-width: 240px; }
+  .list-heading { padding: 16px 16px 0; }
+  .table-toolbar { padding: 16px; }
+  .strip-label { flex-basis: 100%; margin: 0 0 3px; }
+  .strip-note { flex-basis: 100%; margin: 4px 0 0; }
 }
-
-.filter-cluster {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(0, 620px) minmax(100px, 140px) auto;
-  justify-content: start;
-  gap: 12px;
-  align-items: end;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--color-border-light);
-}
-
-.filter-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
-.filter-label {
-  font-size: var(--font-size-xs);
-  font-weight: 500;
-  color: var(--color-text-secondary);
-}
-
-.filter-field :deep(.n-select),
-.filter-field :deep(.n-input) {
-  width: 100%;
-  min-width: 0;
-}
-
-.filter-search {
-  grid-column: auto;
-}
-
-.filter-tags {
-  min-width: 0;
-  justify-self: start;
-  width: 100%;
-}
-
-.search-composer {
-  display: grid;
-  grid-template-columns: 148px minmax(0, 1fr) 44px;
-  width: min(100%, 620px);
-  align-items: center;
-}
-
-.search-composer :deep(.n-base-selection),
-.search-composer :deep(.n-input),
-.search-submit {
-  border-radius: 0;
-}
-
-.search-field-select :deep(.n-base-selection) {
-  border-radius: var(--radius-sm, 4px) 0 0 var(--radius-sm, 4px);
-}
-
-.search-composer .search-content,
-.search-submit {
-  margin-left: -1px;
-  width: calc(100% + 1px);
-}
-
-.search-submit {
-  border-radius: 0 var(--radius-sm, 4px) var(--radius-sm, 4px) 0;
-}
-
-.search-composer :deep(.n-base-selection--focus),
-.search-composer :deep(.n-input--focus),
-.search-submit:focus-visible {
-  z-index: 1;
-}
-
-.filter-actions,
-.batch-cluster,
-.primary-cluster {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  min-width: 0;
-}
-
-.filter-actions {
-  flex-wrap: nowrap;
-}
-
-.server-meta {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  min-width: 0;
-}
-
-.server-id-code {
-  color: var(--color-text-tertiary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.console-picker-target {
-  margin: 0 0 16px;
-  color: var(--color-text-secondary);
-}
-
-.console-option {
-  padding: 18px;
-  margin-top: 12px;
-  border: 1px solid var(--color-border, #dce1e8);
-  border-radius: 10px;
-}
-
-.console-option strong {
-  display: block;
-  font-size: 15px;
-}
-
-.console-option p {
-  margin: 8px 0;
-  line-height: 1.7;
-}
-
-.console-option small {
-  display: block;
-  margin-bottom: 14px;
-  color: var(--color-text-secondary);
-  line-height: 1.6;
-}
-
-.more-dots {
-  margin-left: 6px;
-  letter-spacing: 1px;
-}
-
-.batch-cluster {
-  justify-content: flex-start;
-}
-
-.batch-cluster :deep(.n-button-group) {
-  flex-wrap: wrap;
-}
-
-.primary-cluster {
-  justify-content: flex-end;
-}
-
-.selection-hint {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-}
-
-/* === 列表同步状态 === */
-.sync-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-}
-
-.sync-state.failed {
-  color: var(--color-error);
-}
-
-.sync-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 18%, transparent);
-}
-
-.sync-state.failed .sync-dot {
-  background: var(--color-error);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-error) 18%, transparent);
-}
-
-/* === 本页状态分布条 === */
-.fleet-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--color-border-light);
-  background: linear-gradient(180deg, var(--color-surface-raised), var(--color-surface));
-}
-
-.strip-label {
-  font-size: 10px;
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  color: var(--color-text-tertiary);
-  font-weight: 600;
-}
-
-.fleet-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-full);
-  background: var(--color-surface);
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-xs);
-  cursor: pointer;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
-}
-
-.fleet-chip:hover {
-  border-color: var(--color-primary);
-  transform: translateY(-1px);
-}
-
-.fleet-chip.active {
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px var(--color-primary-light);
-  color: var(--color-primary);
-}
-
-.fleet-chip strong {
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-  color: var(--color-text-primary);
-}
-
-.chip-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.chip-dot.dot-running {
-  background: var(--color-success);
-}
-
-.chip-dot.dot-stopped {
-  background: var(--color-text-disabled);
-}
-
-.chip-dot.dot-fault {
-  background: var(--color-error);
-}
-
-.chip-dot.dot-maintenance {
-  background: var(--color-warning);
-}
-
-.strip-note {
-  margin-left: auto;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-tertiary);
-}
-
-/* === 批量操作条按钮在品牌蓝底上的反色处理 === */
-.batch-action-bar :deep(.n-button) {
-  background: rgba(255, 255, 255, 0.16);
-  color: #fff;
-}
-
-.batch-action-bar :deep(.n-button:hover) {
-  background: rgba(255, 255, 255, 0.28);
-}
-
-.bar-cancel {
-  margin-left: auto;
-}
-
-/* === 表格单元格 === */
-.data-table-wrapper :deep(.cell-server) {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.server-rack {
-  position: relative;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-  border-radius: 6px;
-  background: var(--color-primary-light);
-  border: 1px solid var(--color-border);
-}
-
-.server-rack::before {
-  content: '';
-  position: absolute;
-  inset: 6px 5px;
-  background: repeating-linear-gradient(
-    to bottom,
-    var(--color-primary) 0 2px,
-    transparent 2px 5px
-  );
-  opacity: 0.75;
-}
-
-.server-rack::after {
-  content: '';
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--color-primary);
-}
-
-.server-id {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.server-name {
-  font-weight: 600;
-  color: var(--color-text-primary);
-  font-size: var(--font-size-sm);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.server-name:hover {
-  color: var(--color-primary);
-}
-
-.server-sn {
-  font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-:deep(.cell-ip) {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
-:deep(.ip-line) {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  max-width: 100%;
-  padding: 3px 6px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  transition: background 0.15s;
-}
-
-:deep(.ip-line) i {
-  flex: 0 0 32px;
-  box-sizing: border-box;
-  padding: 2px 0;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--color-primary) 9%, transparent);
-  color: var(--color-primary);
-  text-align: center;
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 600;
-  line-height: 16px;
-}
-
-:deep(.ip-line).dim i {
-  background: color-mix(in srgb, var(--color-text-secondary) 9%, transparent);
-  color: var(--color-text-secondary);
-}
-
-:deep(.ip-line) code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text-primary);
-}
-
-:deep(.ip-line).empty {
-  cursor: default;
-}
-
-:deep(.ip-line).empty code {
-  color: var(--color-text-tertiary);
-  font-family: inherit;
-  font-size: 11px;
-}
-
-:deep(button.ip-line):hover,
-:deep(button.ip-line):focus-visible {
-  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-}
-
-:deep(button.ip-line):hover code {
-  color: var(--color-primary);
-}
-
-.spec-code {
-  font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-primary);
-  letter-spacing: 0.2px;
-}
-
-.spec-skeleton {
-  display: inline-block;
-  width: 84px;
-  height: 10px;
-  border-radius: var(--radius-xs);
-  background: linear-gradient(90deg, var(--color-border-light), var(--color-border), var(--color-border-light));
-  background-size: 200% 100%;
-  animation: spec-shimmer 1.2s linear infinite;
-}
-
-@keyframes spec-shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
-}
-
-.cell-owner {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.cell-owner span {
-  color: var(--color-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cell-owner small {
-  font-size: 10px;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  color: var(--color-text-tertiary);
-}
-
-.cell-muted {
-  color: var(--color-text-tertiary);
-}
-
-.mono {
-  font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: var(--font-size-xs);
-}
-
-.row-actions {
-  gap: 10px;
-}
-
-/* === 表单栅格 === */
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px 16px;
-}
-
-.form-grid .form-wide,
-.form-grid :deep(.n-form-item):first-child.form-wide {
-  grid-column: 1 / -1;
-}
-
-.result-summary {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
-  margin: 12px 0 8px;
-}
-
-[data-theme='dark'] .spec-skeleton {
-  opacity: 0.6;
-}
-
-@media (max-width: 1080px) {
-  .table-toolbar {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .primary-cluster {
-    justify-content: flex-start;
-  }
-}
-
 @media (max-width: 580px) {
-  .filter-cluster {
-    grid-template-columns: minmax(0, 620px) minmax(100px, 140px) auto;
-  justify-content: start;
-  }
-  .filter-actions {
-    justify-content: flex-start;
-  }
-}
-
-@media (max-width: 780px) {
-  .strip-note {
-    width: 100%;
-    margin-left: 0;
-  }
-  .form-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spec-skeleton {
-    animation: none;
-  }
+  .search-composer { grid-template-columns: 105px minmax(0, 1fr) 36px; }
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .server-list .head-actions { width: 100%; }
 }
 </style>

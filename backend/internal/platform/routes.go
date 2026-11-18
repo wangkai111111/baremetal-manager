@@ -11,7 +11,7 @@ func permissionResource(table string) string {
 		return "tasks"
 	case "sol_sessions":
 		return "sol"
-	case "networks", "ip_pools", "ip_allocations", "pxe_configs":
+	case "networks", "ip_pools":
 		return "network"
 	case "images", "image_templates":
 		return "images"
@@ -27,39 +27,22 @@ func permissionResource(table string) string {
 		return "audit"
 	case "asset_tags", "asset_hardwares", "discovery_candidates":
 		return "assets"
-	// 双模式新增表权限映射
+	// 组织与工单权限映射
 	case "departments":
 		return "departments"
-	case "products":
-		return "products"
-	case "orders":
-		return "orders"
-	case "bills":
-		return "billing"
-	case "accounts", "payments", "invoices":
-		return "finance"
-	case "coupons":
-		return "marketing"
 	case "work_orders":
 		return "work_orders"
 	}
 	return table
 }
 
-// resourceMode 返回资源所需的访问模式
-// 返回空字符串表示两种模式都可访问。
-// 注意：工单 work_orders 是两种模式共有的基础功能，不得在此登记为模式专有资源。
-func resourceMode(table string) string {
-	switch table {
-	case "departments":
-		return ModeSelfUse // 部门管理仅自用模式
-	case "products", "orders", "bills", "accounts", "payments", "invoices", "coupons":
-		return ModeExternalOperation // 产品/订单/账单/账户/支付/发票/优惠券仅运营模式
-	}
-	return "" // 两种模式都可访问
-}
 func (a *App) routes() *gin.Engine {
 	r := gin.New()
+	// New validated these values; tests/direct deployments default to no trusted proxies.
+	if err := r.SetTrustedProxies(a.trustedProxies); err != nil {
+		panic(err)
+	}
+	r.RemoteIPHeaders = []string{"X-Forwarded-For"}
 	r.Use(gin.Recovery())
 	r.GET("/health", func(c *gin.Context) { ok(c, gin.H{"status": "alive"}) })
 	r.GET("/ready", a.readiness)
@@ -71,8 +54,6 @@ func (a *App) routes() *gin.Engine {
 	// 系统初始化设置状态接口（公开访问）
 	v.GET("/setup/status", a.setupStatus)
 	v.POST("/setup/config", a.setupConfig)
-	// 租户自助注册接口（公开访问，无需认证）
-	v.POST("/auth/register", a.registerTenant)
 	// ============================================================
 	// PXE 交付接口：正在网络引导的机器不持有任何凭据，必须在 auth guard 之前公开注册。
 	// 磁盘侧文件位于 {cfg.PXE.TFTPRoot}，下发范围由处理器限定在 netboot/iso/nocloud 三个子目录。
@@ -81,12 +62,16 @@ func (a *App) routes() *gin.Engine {
 	prov.GET("/netboot/*filepath", a.serveNetbootFile)
 	prov.GET("/iso/*filepath", a.serveISOFile)
 	prov.GET("/nocloud/:mac/:file", a.serveAutoinstall)
+	prov.GET("/nocloud-token/:seedToken/:mac/:file", a.serveAutoinstall)
+	prov.GET("/ipxe/:mac", a.serveIPXEScript)
+	prov.GET("/media-token/:seedToken/:kind/:file", a.serveInstallationMedia)
 	prov.POST("/install-callback/:token", a.installCallback)
 	// 共享路径契约要求这些文件同时可直接以 {cfg.PXE.HTTPBase}/netboot|iso|nocloud 访问，
 	// 因此在不加任何中间件的引擎根上再挂一组等价别名（iPXE 脚本里写死的就是这些短路径）。
 	r.GET("/netboot/*filepath", a.serveNetbootFile)
 	r.GET("/iso/*filepath", a.serveISOFile)
 	r.GET("/nocloud/:mac/:file", a.serveAutoinstall)
+	r.GET("/nocloud-token/:seedToken/:mac/:file", a.serveAutoinstall)
 	auth := v.Group("")
 	auth.Use(a.guard)
 	auth.GET("/auth/me", a.authMe)
@@ -105,119 +90,77 @@ func (a *App) routes() *gin.Engine {
 	p := auth.Group("/projects/:projectId")
 	p.Use(a.project)
 	a.iamRoutes(auth, p)
+	p.GET("/users/:id/access-grants", a.userAccessGrants)
+	p.PUT("/users/:id/access-grants", a.userAccessGrants)
+	p.GET("/dashboard/resources", a.require("assets:read"), a.resourceDashboard)
+	p.GET("/dashboard/metrics/trend", a.require("monitor:read"), a.metricsTrend)
 	p.POST("/switch", func(c *gin.Context) { ok(c, contextScope(c)) })
+	p.POST("/assets/test-vm", a.testVM)
+	p.GET("/assets/test-vm", a.testVM)
+	p.POST("/assets/test-vm/:action", a.testVM)
 	for _, res := range resources {
 		resource := res
 		code := permissionResource(res.table)
-		// 根据资源模式要求添加中间件
-		modeMiddleware := a.getModeMiddleware(res.table)
-		p.GET("/"+res.path, append(modeMiddleware, a.require(code+":read"), a.listResource(resource))...)
-		p.GET("/"+res.path+"/:id", append(modeMiddleware, a.require(code+":read"), a.getResource(resource))...)
+		p.GET("/"+res.path, a.require(code+":read"), a.listResource(resource))
+		if res.path == "tasks" {
+			p.GET("/tasks/:id", a.require("tasks:read"), a.getTask)
+			p.GET("/tasks/:id/logs", a.require("tasks:read"), a.listTaskLogs)
+		} else {
+			p.GET("/"+res.path+"/:id", a.require(code+":read"), a.getResource(resource))
+		}
 		if !res.readonly {
 			if res.table == "alert_channels" {
 				p.POST("/"+res.path, a.require("alerts:write"), a.writeChannel(true))
 			} else if res.table == "images" {
-				p.POST("/"+res.path, append(modeMiddleware, a.require("images:write"), a.createImage)...)
+				p.POST("/"+res.path, a.require("images:write"), a.createImage)
 			} else {
-				p.POST("/"+res.path, append(modeMiddleware, a.require(code+":write"), a.writeResource(resource, true))...)
+				p.POST("/"+res.path, a.require(code+":write"), a.writeResource(resource, true))
 			}
 			if res.table == "alert_channels" {
 				p.PUT("/"+res.path+"/:id", a.require("alerts:write"), a.writeChannel(false))
 				p.POST("/"+res.path+"/:id/test", a.require("alerts:write"), a.testChannel)
 			} else {
-				p.PUT("/"+res.path+"/:id", append(modeMiddleware, a.require(code+":write"), a.writeResource(resource, false))...)
+				p.PUT("/"+res.path+"/:id", a.require(code+":write"), a.writeResource(resource, false))
 			}
-			p.DELETE("/"+res.path+"/:id", append(modeMiddleware, a.require(code+":write"), a.deleteResource(resource))...)
+			p.DELETE("/"+res.path+"/:id", a.require(code+":write"), a.deleteResource(resource))
 		}
 	}
 
 	// ============================================================
 	// 部门管理自定义路由（自用模式）
 	// ============================================================
-	deptSelfUse := []gin.HandlerFunc{a.requireSelfUse()}
-	p.GET("/departments", append(deptSelfUse, a.require("departments:read"), a.listDepartments)...)
-	p.POST("/departments", append(deptSelfUse, a.require("departments:write"), a.createDepartment)...)
-	p.PUT("/departments/:id", append(deptSelfUse, a.require("departments:write"), a.updateDepartment)...)
-	p.DELETE("/departments/:id", append(deptSelfUse, a.require("departments:write"), a.deleteDepartment)...)
-	p.GET("/departments/:id/stats", append(deptSelfUse, a.require("departments:read"), a.getDepartmentStats)...)
+	p.GET("/departments", a.require("departments:read"), a.listDepartments)
+	p.POST("/departments", a.require("departments:write"), a.createDepartment)
+	p.PUT("/departments/:id", a.require("departments:write"), a.updateDepartment)
+	p.DELETE("/departments/:id", a.require("departments:write"), a.deleteDepartment)
+	p.GET("/departments/:id/stats", a.require("departments:read"), a.getDepartmentStats)
 
 	// ============================================================
 	// 资产折旧与维保告警路由（自用模式）
 	// ============================================================
-	p.GET("/assets/depreciation", append(deptSelfUse, a.require("assets:read"), a.listAssetDepreciation)...)
-	p.GET("/assets/:id/depreciation", append(deptSelfUse, a.require("assets:read"), a.getAssetDepreciation)...)
-	p.GET("/assets/warranty-alerts", append(deptSelfUse, a.require("assets:read"), a.listWarrantyAlerts)...)
+	p.GET("/assets/depreciation", a.require("assets:read"), a.listAssetDepreciation)
+	p.PUT("/assets/:id/depreciation", a.require("assets:write"), a.saveAssetDepreciation)
+	p.PUT("/assets/:id/lifecycle", a.require("assets:write"), a.saveAssetLifecycle)
+	p.GET("/assets/:id/depreciation", a.require("assets:read"), a.getAssetDepreciation)
+	p.GET("/assets/warranty-alerts", a.require("assets:read"), a.listWarrantyAlerts)
 
 	// ============================================================
 	// 资产分配至部门路由（自用模式）
 	// ============================================================
-	p.POST("/assets/:id/assign", append(deptSelfUse, a.require("assets:write"), a.assignAssetToDepartment)...)
-	p.POST("/assets/batch-assign", append(deptSelfUse, a.require("assets:write"), a.batchAssignAssets)...)
+	p.POST("/assets/:id/assign", a.require("assets:write"), a.assignAssetToDepartment)
+	p.POST("/assets/batch-assign", a.require("assets:write"), a.batchAssignAssets)
 
 	// ============================================================
-	// 产品管理路由（运营模式，租户级作用域）
-	// ============================================================
-	externalOp := []gin.HandlerFunc{a.requireExternalOperation()}
-	p.GET("/products", append(externalOp, a.require("products:read"), a.listProducts)...)
-	p.POST("/products", append(externalOp, a.require("products:write"), a.createProduct)...)
-	p.GET("/products/:id", append(externalOp, a.require("products:read"), a.getProduct)...)
-	p.PUT("/products/:id", append(externalOp, a.require("products:write"), a.updateProduct)...)
-	p.DELETE("/products/:id", append(externalOp, a.require("products:write"), a.deleteProduct)...)
-
-	// ============================================================
-	// 订单管理路由（运营模式，租户级作用域）
-	// ============================================================
-	p.GET("/orders", append(externalOp, a.require("orders:read"), a.listOrders)...)
-	p.POST("/orders", append(externalOp, a.require("orders:write"), a.createOrder)...)
-	p.GET("/orders/:id", append(externalOp, a.require("orders:read"), a.getOrder)...)
-	p.PUT("/orders/:id/:transition", append(externalOp, a.require("orders:write"), a.transitionOrder)...)
-	p.GET("/orders/:id/export", append(externalOp, a.require("orders:read"), a.exportOrder)...)
-
-	// ============================================================
-	// 账户与支付管理路由（运营模式）
-	// ============================================================
-	p.GET("/accounts", append(externalOp, a.require("finance:read"), a.getAccount)...)
-	p.POST("/accounts/recharge", append(externalOp, a.require("finance:write"), a.rechargeAccount)...)
-	p.GET("/payments", append(externalOp, a.require("finance:read"), a.listPayments)...)
-	p.POST("/payments", append(externalOp, a.require("finance:write"), a.createPayment)...)
-
-	// ============================================================
-	// 账单管理路由（运营模式）
-	// ============================================================
-	p.GET("/bills", append(externalOp, a.require("billing:read"), a.listBills)...)
-	p.GET("/bills/:id", append(externalOp, a.require("billing:read"), a.getBill)...)
-	p.GET("/bills/:id/export", append(externalOp, a.require("billing:read"), a.exportBill)...)
-	p.POST("/bills/generate", append(externalOp, a.require("billing:write"), a.generateBills)...)
-
-	// ============================================================
-	// 发票管理路由（运营模式）
-	// ============================================================
-	p.GET("/invoices", append(externalOp, a.require("finance:read"), a.listInvoices)...)
-	p.POST("/invoices", append(externalOp, a.require("finance:write"), a.createInvoice)...)
-	p.PUT("/invoices/:id/:status", append(externalOp, a.require("finance:write"), a.updateInvoice)...)
-
-	// ============================================================
-	// 优惠券管理路由（运营模式）
-	// ============================================================
-	p.GET("/coupons", append(externalOp, a.require("marketing:read"), a.listCoupons)...)
-	p.POST("/coupons", append(externalOp, a.require("marketing:write"), a.createCoupon)...)
-	p.PUT("/coupons/:id", append(externalOp, a.require("marketing:write"), a.updateCoupon)...)
-	p.DELETE("/coupons/:id", append(externalOp, a.require("marketing:write"), a.deleteCoupon)...)
-	p.POST("/coupons/:code/redeem", append(externalOp, a.require("orders:write"), a.redeemCoupon)...)
-
-	// ============================================================
-	// 工单管理路由（两种模式通用：只保留认证 + 权限中间件，不加任何模式门禁）
+	// 工单管理路由
 	// ============================================================
 	p.GET("/work-orders", a.require("work_orders:read"), a.listWorkOrders)
 	p.POST("/work-orders", a.require("work_orders:write"), a.createWorkOrder)
 	p.GET("/work-orders/:id", a.require("work_orders:read"), a.getWorkOrder)
 	p.PUT("/work-orders/:id", a.require("work_orders:write"), a.updateWorkOrder)
+	p.PUT("/work-orders/:id/assign", a.require("work_orders:write"), a.assignWorkOrder)
+	p.GET("/work-orders/:id/messages", a.require("work_orders:read"), a.listWorkOrderMessages)
+	p.POST("/work-orders/:id/messages", a.require("work_orders:write"), a.createWorkOrderMessage)
 	p.PUT("/work-orders/:id/:transition", a.require("work_orders:write"), a.transitionWorkOrder)
-
-	// ============================================================
-	// 运营看板路由（运营模式，管理员专用）
-	// ============================================================
-	p.GET("/admin/operations-dashboard", append(externalOp, a.require("operations:read"), a.getOperationsDashboard)...)
 
 	p.GET("/images/catalog", a.require("images:read"), a.imageCatalog)
 	p.POST("/images/catalog/:catalogId/download", a.require("images:write"), a.queueCatalogImage)
@@ -225,11 +168,6 @@ func (a *App) routes() *gin.Engine {
 	p.POST("/alerts/:id/:transition", a.require("alerts:write"), a.alertTransition)
 	p.POST("/assets/:id/actions", a.action)
 	p.POST("/assets/batch-actions", a.batchActions)
-	p.GET("/assets/:id/subscription/preview", append(externalOp, a.require("orders:read"), a.subscriptionPreview)...)
-	p.POST("/assets/:id/subscription/unsubscribe", append(externalOp, a.require("orders:write"), a.require("finance:write"), a.unsubscribeAsset)...)
-	p.POST("/orders/:id/pay-balance", append(externalOp, a.require("orders:write"), a.require("finance:write"), a.paySubscriptionOrder)...)
-	p.POST("/assets/subscription/batch-renew", append(externalOp, a.require("orders:write"), a.batchRenewSubscriptions)...)
-	p.POST("/assets/subscription/batch-unsubscribe", append(externalOp, a.require("orders:write"), a.require("finance:write"), a.batchUnsubscribeSubscriptions)...)
 	p.POST("/assets/:id/collect", a.require("assets:operate"), a.collect)
 	p.GET("/assets/:id/collection", a.require("assets:read"), a.collection)
 	p.GET("/assets/:id/sol", a.require("sol:access"), a.sol)

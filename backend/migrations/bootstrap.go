@@ -22,7 +22,7 @@ func Bootstrap(db *gorm.DB) error {
 		if err := tx.Raw("INSERT INTO projects(tenant_id,name,code) VALUES (?,'默认项目','default') RETURNING id", tenant).Scan(&project).Error; err != nil {
 			return err
 		}
-		resources := []string{"assets", "bmc", "sol", "images", "tasks", "alerts", "network", "firmware", "iam", "audit", "settings", "projects", "datacenters", "tags", "install", "monitor", "work_orders", "products", "orders", "billing", "finance", "marketing", "departments"}
+		resources := []string{"assets", "bmc", "sol", "images", "tasks", "alerts", "network", "firmware", "iam", "audit", "settings", "projects", "datacenters", "tags", "install", "monitor", "work_orders", "departments"}
 		for _, resource := range resources {
 			for _, action := range []string{"read", "write", "operate", "access", "manage"} {
 				code := resource + ":" + action

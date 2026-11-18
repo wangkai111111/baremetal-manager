@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  NAlert,
+  NSwitch,
   NButton,
   NInput,
   NDataTable,
@@ -19,10 +21,12 @@ import {
 import type { DataTableColumns, DataTableRowKey, DropdownOption } from 'naive-ui'
 import { h } from 'vue'
 import dayjs from 'dayjs'
-import type { Section } from '../catalog'
+import { hostIP, dnsAddresses, networkLabel } from '../utils/networkOptions'
+import type { Field, Section } from '../catalog'
 import { labels } from '../catalog'
 import { errorText, resource, rows, type RecordData, api, exportToExcel, batchOps, unwrap, AssetRegistrationError } from '../api'
 import { useAuth } from '../stores/auth'
+import TaskDetail from '../components/TaskDetail.vue'
 
 const props = defineProps<{ section: Section }>()
 const route = useRoute()
@@ -30,6 +34,9 @@ const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const auth = useAuth()
+const selectedTask = computed(() => props.section.api === '/tasks' && /^\d+$/.test(String(route.query.task || '')) ? Number(route.query.task) : null)
+function openTask(id: unknown) {router.replace({ query: {...route.query, task: String(id)} })}
+function closeTask() {const query={...route.query};delete query.task;router.replace({query})}
 
 const items = ref<RecordData[]>([])
 const total = ref(0)
@@ -57,19 +64,19 @@ const assetStatusLabels: Record<string, string> = {
 }
 const assetStatus = (row: RecordData) => String(row.display_status || 'unknown')
 
-// === 运营/财务枚举的中文标签 ===
-// 仅覆盖仍由通用 ResourceView 承载的运营 section（账单 / 账户 / 支付记录 / 产品），
-// 键值与后端 DDL CHECK 逐值对齐；订单 / 发票 / 优惠券 / 工单已由专用视图承载。
-const enumLabelApis = ['/bills', '/accounts', '/payments', '/products']
+// === 资源状态的中文标签 ===
+const enumLabelApis = ['/alerts', '/tasks', '/audit']
 const enumValueLabels: Record<string, Record<string, string>> = {
   status: {
-    unpaid: '未付款', paid: '已付款', overdue: '逾期',
+    firing: '告警中', acknowledged: '已确认', resolved: '已解决',
+    running: '执行中', retry_wait: '等待重试', succeeded: '成功', timeout: '超时', unknown: '结果未知',
     pending: '待处理', success: '成功', failed: '失败',
-    requested: '待开具', issued: '已开具', cancelled: '已作废',
-    active: '启用', inactive: '停用', expired: '已过期', sold_out: '已售罄'
+    cancelled: '已取消',
+    active: '启用', inactive: '停用', expired: '已过期'
   },
-  method: { alipay: '支付宝', wechat: '微信支付', transfer: '银行转账', balance: '余额支付' },
-  billing_cycle: { hourly: '按小时', daily: '按天', monthly: '按月', yearly: '按年' }
+  severity: { info: '提示', warning: '警告', critical: '严重', emergency: '紧急' },
+  kind: { power_on: '开机', power_off: '关机', power_cycle: '重启', collect: '硬件采集', install: '系统安装', firmware_upgrade: '固件升级' },
+  outcome: { success: '成功', failure: '失败', failed: '失败', denied: '已拒绝' },
 }
 function enumLabel(key: string, value: unknown): string {
   const raw = String(value ?? '')
@@ -123,20 +130,13 @@ const checkedRowKeys = ref<DataTableRowKey[]>([])
 const batchLoading = ref(false)
 const powerLoading = ref<string | number | null>(null)
 const canOperatePower = computed(() => auth.can('bmc:operate'))
-const canManageSubscriptions = computed(() => props.section.api === '/assets' && auth.systemMode === 'external_operation' && auth.can('orders:write'))
-const canSelectAssets = computed(() => props.section.api === '/assets' && (canWrite.value || auth.can('assets:operate') || canOperatePower.value || canManageSubscriptions.value))
-const canSubscriptionFinance = computed(() => canManageSubscriptions.value && auth.can('finance:write'))
-const renewShowing = ref(false)
-const renewCycle = ref('monthly')
-const renewCount = ref<number | null>(1)
-const cycleOptions = [{ label: '小时', value: 'hourly' }, { label: '天', value: 'daily' }, { label: '月', value: 'monthly' }, { label: '年', value: 'yearly' }]
+const canSelectAssets = computed(() => props.section.api === '/assets' && (canWrite.value || auth.can('assets:operate') || canOperatePower.value))
 const batchResults = ref<RecordData[]>([])
 const resultsShowing = ref(false)
 const resultColumns: DataTableColumns<RecordData> = [
   { title: '服务器 ID', key: 'asset_id' },
-  { title: '结果', key: 'status', render: row => ({ accepted: '任务已提交', pending: '待支付订单已生成', reclaim_pending: '已退订 / 待人工回收', failed: '失败' })[String(row.status)] || String(row.status) },
-  { title: '任务 / 订单', key: 'reference', render: row => String(row.operation_id || row.power_operation_id || row.order_id || '—') },
-  { title: '金额', key: 'amount', render: row => row.refund_cents != null ? `退款 ¥${(Number(row.refund_cents) / 100).toFixed(2)}` : row.paid_cents != null ? `已支付 ¥${(Number(row.paid_cents) / 100).toFixed(2)}` : row.payable_cents != null ? `待支付 ¥${(Number(row.payable_cents) / 100).toFixed(2)}` : '—' },
+  { title: '结果', key: 'status', render: row => ({ accepted: '任务已提交', failed: '失败' })[String(row.status)] || String(row.status) },
+  { title: '任务', key: 'reference', render: row => String(row.operation_id || '—') },
   { title: '说明', key: 'reason', render: row => String(row.reason || row.message || '已入任务队列，请在任务中心查看实际执行结果') }
 ]
 let pendingBatch: { fingerprint: string; key: string } | null = null
@@ -145,18 +145,17 @@ function batchKey(kind: string, ids: number[]) {
   if (pendingBatch?.fingerprint !== fingerprint) pendingBatch = { fingerprint, key: crypto.randomUUID() }
   return pendingBatch.key
 }
-async function submitSelectedBatch(kind: string, ids: number[], projectId: string, cycle = '', count = 1) {
+async function submitSelectedBatch(kind: string, ids: number[], projectId: string, cycle = '') {
   if (batchLoading.value || auth.projectId !== projectId || !ids.length) return
-  if (kind === 'power' ? !canOperatePower.value : !canManageSubscriptions.value) return
+  if (!canOperatePower.value) return
   batchLoading.value = true
   try {
-    const key = batchKey(`${kind}:${cycle}:${count}`, ids)
-    const response = kind === 'power' ? await batchOps.power(ids, cycle, key)
-      : kind === 'renew' ? await batchOps.renew(ids, cycle, count, key) : await batchOps.unsubscribe(ids, key)
+    const key = batchKey(`${kind}:${cycle}`, ids)
+    const response = await batchOps.power(ids, cycle, key)
     if (auth.projectId !== projectId || disposed) return
     batchResults.value = unwrap<{ results: RecordData[] }>(response).results
     resultsShowing.value = true
-    renewShowing.value = false
+
     pendingBatch = null
     checkedRowKeys.value = []
     await load()
@@ -164,50 +163,37 @@ async function submitSelectedBatch(kind: string, ids: number[], projectId: strin
     message.error(`${errorText(e)}；未收到可靠结果时再次提交将复用本次请求键，勿切换选中项后重试。`)
   } finally { batchLoading.value = false }
 }
-function confirmPayment() {
-  if (!canSubscriptionFinance.value || batchLoading.value) return
-  const rows = batchResults.value.filter(row => row.status === 'pending' && row.order_id)
-  const projectId = auth.projectId
-  if (!rows.length) return
-  dialog.warning({
-    title: '确认余额支付',
-    content: `将逐笔支付 ${rows.length} 个续费订单，展示总额 ¥${(rows.reduce((sum, row) => sum + Number(row.payable_cents || 0), 0) / 100).toFixed(2)}。实际扣款以服务端订单为准，支付成功才延长租期；失败可重试，不重复扣款。`,
-    positiveText: '确认扣款并续期', negativeText: '取消',
-    onPositiveClick: async () => {
-      if (auth.projectId !== projectId) return
-      batchLoading.value = true
-      try {
-        for (const row of rows) {
-          if (auth.projectId !== projectId || disposed) return
-          try {
-            const paid = unwrap<RecordData>(await batchOps.paySubscription(Number(row.order_id)))
-            Object.assign(row, paid)
-          } catch (e) { row.message = errorText(e) }
-        }
-        if (auth.projectId === projectId && !disposed) await load()
-      } finally { batchLoading.value = false }
-    }
-  })
-}
-function confirmSubscriptions(kind: 'renew' | 'unsubscribe') {
-  if (kind === 'unsubscribe' && !canSubscriptionFinance.value) return
-  const ids = checkedRowKeys.value.map(Number)
-  if (!canManageSubscriptions.value || batchLoading.value || !ids.length) return
-  if (ids.length > 100) { message.warning('运营批量操作每次最多100台'); return }
-  const cycle = renewCycle.value
-  const count = renewCount.value || 1
-  const projectId = auth.projectId
-  dialog.warning({
-    title: kind === 'renew' ? '确认批量续费' : '确认立即退订',
-    content: kind === 'renew'
-      ? `将为 ${ids.length} 台服务器各生成 ${count} ${cycleOptions.find(option => option.value === cycle)?.label}的待支付续费订单，按产品当前价格计费，不会自动支付或延长到期时间。`
-      : `将立即退订 ${ids.length} 台服务器：按核验后的剩余已付租期退款至租户余额、提交关机、撤销客户使用权限并标记待人工回收。不清盘。缺少可靠租期或支付依据的服务器将逐台失败，不自动退款。此操作不可撤销。`,
-    positiveText: kind === 'renew' ? '确认生成订单' : '确认立即退订', negativeText: '取消',
-    onPositiveClick: () => submitSelectedBatch(kind, ids, projectId, cycle, count)
-  })
-}
 
-// === 机房选项列表 ===
+const networkItems = ref<RecordData[]>([])
+const relationLoading = ref(false)
+const relationError = ref('')
+let relationSequence = 0
+const networkResource = computed(() => ['/networks', '/ip-pools'].includes(props.section.api))
+const selectedNetwork = computed(() => networkItems.value.find(row => Number(row.id) === Number(form.value.network_id)))
+function fieldOptions(field: Field) {
+  if (field.key === 'datacenter_id') return datacenterOptions.value
+  if (field.key === 'network_id') return networkItems.value.map(row => ({label: networkLabel(row), value: Number(row.id)}))
+  return field.options?.map(value => ({label: value, value})) || []
+}
+async function loadNetworkOptions() {
+  const sequence = ++relationSequence
+  networkItems.value = []; relationError.value = ''
+  if (!networkResource.value || props.section.api === '/networks' || !auth.projectId) return
+  relationLoading.value = true
+  try {
+    const all = async (path: string) => {
+      const result: RecordData[] = []
+      for (let page = 1; ; page++) {
+        const data = rows(await resource.list(path, {page, page_size: 200}))
+        result.push(...data.items)
+        if (!data.items.length || result.length >= data.total) return result
+      }
+    }
+    const networks = await all('/networks')
+    if (sequence === relationSequence) { networkItems.value = networks }
+  } catch (e) { if (sequence === relationSequence) relationError.value = errorText(e) }
+  finally { if (sequence === relationSequence) relationLoading.value = false }
+}
 const datacenterOptions = ref<{ label: string; value: number }[]>([])
 
 function datacenterName(value: unknown) {
@@ -297,21 +283,28 @@ const sectionStatusOptions = computed(() => {
 })
 const statusOptions = computed(() => props.section.api === '/assets'
   ? Object.entries(assetStatusLabels).map(([value, label]) => ({ label, value }))
-  : props.section.api === '/tasks' ? ['pending', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'timeout', 'unknown'].map(value => ({ label: value, value })) : sectionStatusOptions.value ?? [
-  { label: '在线', value: 'online' },
-  { label: '离线', value: 'offline' },
-  { label: '活跃', value: 'active' },
-  { label: '就绪', value: 'ready' },
-  { label: '故障', value: 'error' },
-  { label: '维护中', value: 'maintenance' }
-])
+  : props.section.api === '/tasks' ? ['pending', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'timeout', 'unknown'].map(value => ({ label: enumLabel('status', value), value }))
+  : props.section.api === '/alerts' ? ['firing', 'acknowledged', 'resolved'].map(value => ({ label: enumLabel('status', value), value }))
+  : sectionStatusOptions.value ?? [])
 
 const canWrite = computed(() =>
   (['/projects', '/tenants'].includes(props.section.api)
     ? auth.can('projects:write')
     : auth.can(props.section.permission.replace(':read', ':write'))) &&
-  ['/tenants', '/projects', '/assets', '/networks', '/ip-allocations', '/tags', '/ip-pools', '/images', '/pxe-configs', '/install-plans', '/firmware-packages', '/firmware-baselines', '/image-templates', '/partition-templates', '/post-install-scripts', '/products'].includes(props.section.api)
+  ['/tenants', '/projects', '/assets', '/networks', '/tags', '/ip-pools', '/images', '/install-plans', '/firmware-packages', '/firmware-baselines', '/image-templates', '/partition-templates', '/post-install-scripts'].includes(props.section.api)
 )
+
+const installationStageLabels: Record<string, string> = {
+  pending: '等待准备',
+  preparing: '准备引导文件',
+  booting: '启动安装环境',
+  installing: '安装操作系统',
+  post_install: '安装后配置',
+  succeeded: '安装完成',
+  failed: '安装失败',
+  cancelled: '已取消',
+  unknown: '阶段待确认'
+}
 
 // === 列定义（含排序） ===
 const columns = computed<DataTableColumns<RecordData>>(() => {
@@ -345,13 +338,18 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
             { size: 'small', bordered: false, type: key === 'status' && props.section.api === '/assets' && assetStatus(row) === 'running' ? 'success' : tagType(key === 'status' && props.section.api === '/assets' ? assetStatus(row) : row[key]) },
             { default: () => key === 'status' && props.section.api === '/assets' ? assetStatusLabels[assetStatus(row)] || '状态未知' : (useEnumLabels ? enumLabel(key, row[key]) : String(row[key] ?? '—')) }
           )
-        : key === 'datacenter_id' ? datacenterName(row[key])
-          : key === 'created_at' && props.section.api === '/assets' ? formatCreatedAt(row[key])
+        : key === 'installation_stage' ? String(row.installation_step || installationStageLabels[String(row[key])] || row[key] || '—')
+          : key === 'network_id' && networkResource.value ? (networkItems.value.find(n => Number(n.id) === Number(row[key])) ? networkLabel(networkItems.value.find(n => Number(n.id) === Number(row[key]))!) : `子网 #${row[key]}`)
+          : key === 'dns_servers' ? dnsAddresses(row[key]).join(', ') || '未配置'
+          : ['gateway','start_address','end_address'].includes(key) && networkResource.value ? hostIP(row[key]) || '—'
+          : key === 'datacenter_id' ? datacenterName(row[key])
+          : /_at$/.test(key) ? formatCreatedAt(row[key])
+          : typeof row[key] === 'boolean' ? (row[key] ? '已启用' : '已关闭')
           : useEnumLabels ? enumLabel(key, row[key]) : String(row[key] ?? '—')
   }))
   if (
     props.section.api === '/assets' ||
-    props.section.api === '/images' ||
+    props.section.api === '/images' || props.section.api === '/tasks' ||
     props.section.api === '/alerts' || (canWrite.value && !['/projects', '/tenants'].includes(props.section.api))
   ) {
     cols.push({
@@ -374,11 +372,11 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
               { default: () => h(NButton, { text: true, 'aria-label': '更多操作' }, { default: () => '⋯' }) }
             )
           ])
-        : h('div', { class: 'table-actions' }, [
+        : props.section.api === '/tasks' ? h(NButton, {text:true,type:'primary',onClick:()=>openTask(row.id)}, {default:()=> '查看步骤与日志'}) : h('div', { class: 'table-actions' }, [
             props.section.api === '/alert-channels' && auth.can('alerts:write')
               ? h(NButton, { text: true, loading: testingChannel.value === row.id, disabled: testingChannel.value != null, onClick: () => testChannel(row) }, { default: () => '发送测试' })
               : null,
-            props.section.api === '/alerts' && !row.resolved && auth.can('alerts:write')
+            props.section.api === '/alerts' && row.status !== 'resolved' && auth.can('alerts:write')
               ? h(NButton, { text: true, type: 'primary', onClick: () => resolveAlert(row) }, { default: () => '处理' })
               : null,
             canWrite.value && !props.section.readonly
@@ -466,7 +464,7 @@ async function load(silent = false) {
   } finally {
     if (sequence === loadSequence && !disposed) {
       loading.value = false
-      if (loaded && props.section.api === '/assets' && auth.projectId) {
+      if (loaded && ['/assets', '/tasks', '/operations'].includes(props.section.api) && auth.projectId) {
         refreshTimer = setTimeout(() => load(true), 10000)
       }
     }
@@ -510,11 +508,13 @@ watch(
     checkedRowKeys.value = []
     batchResults.value = []
     resultsShowing.value = false
-    renewShowing.value = false
+
     pendingBatch = null
     datacenterOptions.value = []
     load()
     loadFilterOptions()
+    editing.value = false
+    loadNetworkOptions()
   },
   { immediate: true }
 )
@@ -526,12 +526,17 @@ watch([filterStatus, filterTag, filterDatacenter], () => {
 })
 
 function openEdit(row?: RecordData) {
+  editing.value = false
   currentId.value = row?.id ?? null
   form.value = row ? { ...row, bmc_secret: undefined } : {}
   if (props.section.api === '/assets') {
     form.value.datacenter_id = row?.datacenter_id == null ? null : Number(row.datacenter_id)
   }
   for (const field of props.section.fields) {
+    if (!row && field.default !== undefined) form.value[field.key] = field.default
+    if (networkResource.value && ['gateway','start_address','end_address'].includes(field.key)) form.value[field.key] = hostIP(row?.[field.key])
+    if (networkResource.value && ['network_id'].includes(field.key)) form.value[field.key] = row?.[field.key] == null ? null : Number(row[field.key])
+    if (field.key === 'dns_servers') form.value[field.key] = dnsAddresses(row?.[field.key]).join('\n')
     if (field.type === 'json' && row?.[field.key] != null) form.value[field.key] = JSON.stringify(row[field.key], null, 2)
   }
   editing.value = true
@@ -688,7 +693,7 @@ function validateIP(value: string): boolean {
 function validateCIDR(value: string): boolean {
   if (!value) return true
   const cidrRegex = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/
-  return cidrRegex.test(value)
+  return value.includes(':') ? /^[0-9a-f:]+\/\d{1,3}$/i.test(value) : cidrRegex.test(value)
 }
 
 const testingChannel = ref<unknown>(null)
@@ -719,7 +724,7 @@ async function save() {
         return
       }
     }
-    if (field.key === 'cidr') {
+    if (field.key === 'cidr' || field.key === 'subnet') {
       if (!validateCIDR(val)) {
         message.warning(`${field.label} 格式不正确，请输入有效的 CIDR 格式（如 192.168.1.0/24）`)
         return
@@ -733,11 +738,16 @@ async function save() {
         .filter(f => form.value[f.key] !== undefined && form.value[f.key] !== '')
         .map(f => [f.key, f.type === 'json' && typeof form.value[f.key] === 'string' ? JSON.parse(String(form.value[f.key])) : form.value[f.key]])
     )
+    if (props.section.api === '/networks') {
+      payload.gateway = String(form.value.gateway || '').trim() || null
+      payload.vlan_id = form.value.vlan_id ?? null
+      payload.dns_servers = String(form.value.dns_servers || '').split(/[,\s]+/).filter(Boolean)
+    }
     if (props.section.api === '/assets') {
       payload.datacenter_id = form.value.datacenter_id == null ? null : Number(form.value.datacenter_id)
     }
     if (props.section.api === '/projects') {
-      if (!auth.tenantId) throw new Error('请先选择租户')
+      if (!auth.tenantId) throw new Error('请先选择组织')
       payload.tenant_id = Number(auth.tenantId)
     }
     if (currentId.value != null) {
@@ -855,11 +865,12 @@ function handleBatchPower(action: string) {
 </script>
 
 <template>
+  <TaskDetail :task-id="selectedTask" @close="closeTask" />
   <div class="page">
     <div class="page-head">
       <div>
         <div class="eyebrow dark">
-          RESOURCE MANAGEMENT / {{ section.api.toUpperCase() }}
+          RESOURCE MANAGEMENT / {{ section.api.replace(/^\//, '').toUpperCase() }}
         </div>
         <h1>{{ section.title }}</h1>
         <p>{{ section.subtitle }}</p>
@@ -881,7 +892,7 @@ function handleBatchPower(action: string) {
           type="primary"
           @click="openEdit()"
         >
-          + 新建{{ section.title.replace('管理', '') }}
+          + 新建{{ section.title.replace('IPAM · ', '').replace('管理', '') }}
         </n-button>
       </div>
     </div>
@@ -891,7 +902,7 @@ function handleBatchPower(action: string) {
           <div class="panel-title">
             资源列表 <span class="count">{{ total }}</span>
           </div>
-          <p class="panel-caption">{{ section.readonly ? '只读视图：后端未提供单条增删改路由，请在对应业务流程中操作' : '筛选、查看当前资源与操作记录' }}</p>
+          <p class="panel-caption">{{ section.readonly ? '查看记录与处理进度' : '筛选、查看当前资源与操作记录' }}</p>
         </div>
         <div v-if="section.api === '/assets'" class="asset-filter-toolbar">
           <div class="asset-field-search">
@@ -930,6 +941,7 @@ function handleBatchPower(action: string) {
           <!-- 高级筛选 -->
           <div class="advanced-filters">
             <n-select
+              v-if="statusOptions.length"
               v-model:value="filterStatus"
               placeholder="状态筛选"
               :options="statusOptions"
@@ -970,7 +982,7 @@ function handleBatchPower(action: string) {
         >
           采集已选资产
         </n-button>
-        <n-button v-if="canWrite && auth.systemMode !== 'external_operation'" size="small" type="error" :disabled="batchLoading" :loading="batchLoading" @click="handleBatchDelete">
+        <n-button v-if="canWrite" size="small" type="error" :disabled="batchLoading" :loading="batchLoading" @click="handleBatchDelete">
           批量删除
         </n-button>
         <n-button
@@ -1002,11 +1014,7 @@ function handleBatchPower(action: string) {
         >
           批量关机
         </n-button>
-        <n-button v-if="canManageSubscriptions" size="small" type="primary" :disabled="batchLoading" @click="renewShowing = true">批量续费</n-button>
-        <n-button v-if="canSubscriptionFinance" size="small" type="error" :disabled="batchLoading" @click="confirmSubscriptions('unsubscribe')">立即退订</n-button>
-        <n-button size="small" quaternary :disabled="batchLoading" @click="checkedRowKeys = []">
-          取消选择
-        </n-button>
+        <n-button size="small" quaternary :disabled="batchLoading" @click="checkedRowKeys = []">取消选择</n-button>
       </div>
 
       <n-data-table
@@ -1032,25 +1040,22 @@ function handleBatchPower(action: string) {
         {{ loadError ? `加载失败：${loadError}` : '当前没有数据，或尚未创建相关资源。' }}
       </div>
     </div>
-    <n-modal v-model:show="renewShowing" preset="card" title="批量续费" style="width: min(460px, 94vw)">
-      <p>已选 {{ checkedRowKeys.length }} 台服务器。逐台生成待支付订单；不会自动支付或直接修改到期时间。</p>
-      <n-form label-placement="top">
-        <n-form-item label="续费周期"><n-select v-model:value="renewCycle" :options="cycleOptions" :disabled="batchLoading" /></n-form-item>
-        <n-form-item label="周期数量"><n-input-number v-model:value="renewCount" :min="1" :max="36" :precision="0" :disabled="batchLoading" /></n-form-item>
-      </n-form>
-      <n-button type="primary" :loading="batchLoading" :disabled="batchLoading || !renewCount" @click="confirmSubscriptions('renew')">确认续费方案</n-button>
-    </n-modal>
     <n-modal v-model:show="resultsShowing" preset="card" title="逐台操作结果" style="width: min(1050px, 96vw)">
-      <n-button v-if="canSubscriptionFinance && batchResults.some(row => row.status === 'pending' && row.order_id)" type="primary" :loading="batchLoading" :disabled="batchLoading" @click="confirmPayment">确认余额支付续费订单</n-button>
-      <p>共 {{ batchResults.length }} 台；失败 {{ batchResults.filter(row => row.status === 'failed').length }} 台。电源与退订关机均异步执行，请根据任务 ID 核对真实结果；待回收资产需要人工处理。</p>
+      <p>共 {{ batchResults.length }} 台；失败 {{ batchResults.filter(row => row.status === 'failed').length }} 台。电源操作异步执行，请根据任务 ID 核对实际结果。</p>
       <n-data-table :columns="resultColumns" :data="batchResults" :row-key="row => row.asset_id" :scroll-x="850" :pagination="{ pageSize: 20 }" />
     </n-modal>
     <n-modal
       v-model:show="editing"
       preset="card"
-      :title="currentId != null ? '编辑资源' : '新建资源'"
-      style="width: min(520px, 94vw)"
+      :title="`${currentId != null ? '编辑' : '新建'}${section.title.replace('IPAM · ', '')}`"
+      class="resource-editor"
+      style="width: min(580px, 94vw); max-height: 88vh"
+      :content-style="{ overflowY: 'auto', minHeight: '0', maxHeight: 'calc(88vh - 150px)' }"
     >
+      <n-alert v-if="networkResource && section.api !== '/networks'" :type="relationError ? 'error' : 'info'" style="margin-bottom: 16px" :bordered="false">
+        {{ relationError || (selectedNetwork ? `当前子网：${selectedNetwork.subnet}；网关：${hostIP(selectedNetwork.gateway) || '未配置'}` : '请先选择所属子网；没有选项时请先在子网管理中创建。') }}
+        <n-button v-if="relationError" text @click="loadNetworkOptions">重新加载选项</n-button>
+      </n-alert>
       <n-form label-placement="top">
         <div class="resource-form-grid">
           <n-form-item
@@ -1058,24 +1063,30 @@ function handleBatchPower(action: string) {
             :key="field.key"
             :label="field.label"
             :required="field.required && !(currentId != null && field.type === 'password')"
-            :class="{ 'form-item-wide': field.type === 'textarea' || field.key === 'description' }"
+            :class="{ 'form-item-wide': field.type === 'textarea' || field.key === 'description' || field.type === 'switch' }"
           >
+            <div class="field-control">
             <n-select
               v-if="field.type === 'select'"
               v-model:value="form[field.key] as string | number | null"
-              :options="field.key === 'datacenter_id' ? datacenterOptions : field.options?.map(v => ({ label: v, value: v }))"
-              :clearable="field.key === 'datacenter_id' && !field.required"
-              :filterable="field.key === 'datacenter_id'"
+              :options="fieldOptions(field)"
+              :clearable="!field.required"
+              filterable
+              :loading="field.key === 'network_id' && relationLoading"
               :placeholder="field.key === 'datacenter_id' ? '请选择机房（可留空）' : `请选择${field.label}`"
             />
             <n-input-number
               v-else-if="field.type === 'number'"
               v-model:value="form[field.key] as number"
+              :min="field.min" :max="field.max" :precision="field.key === 'vlan_id' ? 0 : undefined"
+              :placeholder="field.placeholder || (field.required ? `请输入${field.label}` : '可留空')"
               style="width: 100%"
             />
+            <n-switch v-else-if="field.type === 'switch'" v-model:value="form[field.key] as boolean" />
             <n-input
               v-else
               v-model:value="form[field.key] as string"
+              :autosize="field.type === 'textarea' ? { minRows: 2, maxRows: 4 } : undefined"
               :type="
                 field.type === 'password'
                   ? 'password'
@@ -1083,15 +1094,19 @@ function handleBatchPower(action: string) {
                     ? 'textarea'
                     : 'text'
               "
-              :placeholder="currentId != null && field.type === 'password' ? '留空保留现有密钥' : `请输入${field.label}`"
+              :placeholder="currentId != null && field.type === 'password' ? '留空保留现有密钥' : field.placeholder || `请输入${field.label}`"
             />
+            <p v-if="field.help" class="field-help">{{ field.help }}</p>
+            </div>
           </n-form-item>
         </div>
-        <div class="modal-actions">
-          <n-button @click="editing = false">取消</n-button>
+      </n-form>
+      <template #footer>
+        <div class="modal-actions editor-actions">
+          <n-button :disabled="saving" @click="editing = false">取消</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>
         </div>
-      </n-form>
+      </template>
     </n-modal>
     <n-modal
       :show="batchAdding"
@@ -1146,6 +1161,11 @@ function handleBatchPower(action: string) {
 </template>
 
 <style scoped>
+.resource-editor .resource-form-grid { align-items: start; }
+.editor-actions { margin-top: 0; padding-top: 0; border-top: 0; }
+.field-control { width: 100%; min-width: 0; }
+.field-help { margin: 6px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; text-wrap: pretty; }
+.form-item-wide { grid-column: 1 / -1; }
 .asset-filter-toolbar {
   display: flex;
   flex: 1;

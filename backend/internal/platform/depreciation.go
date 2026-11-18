@@ -1,7 +1,11 @@
 package platform
 
 import (
+	"errors"
 	"fmt"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"math"
 	"strings"
 	"time"
 
@@ -21,7 +25,7 @@ func (a *App) listAssetDepreciation(c *gin.Context) {
 	sc := contextScope(c)
 	q := a.store.db.Table("asset_depreciation AS d").
 		Joins("JOIN assets AS a ON a.id=d.asset_id AND a.tenant_id=d.tenant_id").
-		Where("d.tenant_id=? AND a.project_id=? AND d.deleted_at IS NULL AND a.deleted_at IS NULL", sc.Tenant, sc.Project)
+		Where("d.tenant_id=? AND a.project_id=? AND d.deleted_at IS NULL AND a.deleted_at IS NULL", sc.Tenant, sc.Project).Where(departmentAccessSQL(sc, "a.department_id", false))
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		q = q.Where("a.name ILIKE ?", "%"+search+"%")
 	}
@@ -35,6 +39,9 @@ func (a *App) listAssetDepreciation(c *gin.Context) {
 	if err := q.Select("d.*, a.name AS asset_name").Order("d.id DESC").Limit(n).Offset((p - 1) * n).Find(&items).Error; err != nil {
 		fail(c, 500, "depreciation query failed")
 		return
+	}
+	for _, item := range items {
+		calculateDepreciation(item)
 	}
 	ok(c, gin.H{"items": items, "total": total, "page": p, "page_size": n})
 }
@@ -52,9 +59,11 @@ func (a *App) getAssetDepreciation(c *gin.Context) {
 	}
 	// 验证资产存在且属于当前项目
 	var assetCount int64
-	a.store.db.Table("assets").
-		Where("id=? AND project_id=? AND deleted_at IS NULL", assetID, sc.Project).
-		Count(&assetCount)
+	result := queryScope(a.store.db, resource{table: "assets"}, sc).Where("id=?", assetID).Count(&assetCount)
+	if result.Error != nil {
+		fail(c, 500, "资产查询失败")
+		return
+	}
 	if assetCount == 0 {
 		fail(c, 404, "资产不存在")
 		return
@@ -64,6 +73,10 @@ func (a *App) getAssetDepreciation(c *gin.Context) {
 	e := a.store.db.Table("asset_depreciation").
 		Where("asset_id=? AND tenant_id=? AND deleted_at IS NULL", assetID, sc.Tenant).
 		Take(&dep).Error
+	if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
+		fail(c, 500, "折旧查询失败")
+		return
+	}
 	if e != nil {
 		// 无折旧记录时，返回空数据
 		ok(c, gin.H{
@@ -80,45 +93,9 @@ func (a *App) getAssetDepreciation(c *gin.Context) {
 		})
 		return
 	}
-	// 动态计算当前累计折旧和净值
-	purchaseCost := toFloat64(dep["purchase_cost"])
-	salvageValue := toFloat64(dep["salvage_value"])
-	usefulLifeMonths := toFloat64(dep["useful_life_months"])
-	monthlyDepreciation := toFloat64(dep["monthly_depreciation"])
-	startDate := dep["start_date"]
-
-	// 如果月折旧额未设置，按直线法计算
-	if monthlyDepreciation == 0 && usefulLifeMonths > 0 {
-		monthlyDepreciation = (purchaseCost - salvageValue) / usefulLifeMonths
-	}
-
-	// 计算已使用月数
-	usedMonths := calculateUsedMonths(startDate)
-	accumulatedDepreciation := monthlyDepreciation * usedMonths
-	// 累计折旧不超过原值减残值
-	maxDepreciation := purchaseCost - salvageValue
-	if accumulatedDepreciation > maxDepreciation && maxDepreciation > 0 {
-		accumulatedDepreciation = maxDepreciation
-	}
-	netValue := purchaseCost - accumulatedDepreciation
-	if netValue < salvageValue {
-		netValue = salvageValue
-	}
-
-	ok(c, gin.H{
-		"asset_id":                 assetID,
-		"has_depreciation":         true,
-		"depreciation_method":      dep["depreciation_method"],
-		"purchase_cost":            purchaseCost,
-		"salvage_value":            salvageValue,
-		"useful_life_months":       usefulLifeMonths,
-		"monthly_depreciation":     monthlyDepreciation,
-		"accumulated_depreciation": accumulatedDepreciation,
-		"net_value":                netValue,
-		"start_date":               startDate,
-		"status":                   dep["status"],
-		"updated_at":               dep["updated_at"],
-	})
+	calculateDepreciation(dep)
+	dep["has_depreciation"] = true
+	ok(c, dep)
 }
 
 // calculateUsedMonths 计算从起始日期到当前的月数
@@ -139,18 +116,12 @@ func calculateUsedMonths(startDate any) float64 {
 	default:
 		return 0
 	}
-	now := time.Now()
-	if start.After(now) {
-		return 0
-	}
+	now := time.Now().UTC()
+	// Deterministic calendar-month fraction, shared by list and detail. Use dates
+	// only so the calculation never depends on the browser's local clock/timezone.
 	months := float64(now.Year()-start.Year())*12 + float64(now.Month()-start.Month())
-	// 按天数比例修正
-	dayRatio := float64(now.Day()) / float64(daysInMonth(now))
-	months += dayRatio - float64(start.Day())/float64(daysInMonth(start))
-	if months < 0 {
-		return 0
-	}
-	return months
+	months += float64(now.Day())/float64(daysInMonth(now)) - float64(start.Day())/float64(daysInMonth(start))
+	return math.Max(months, 0)
 }
 
 // daysInMonth 返回指定月份的总天数
@@ -192,16 +163,14 @@ func (a *App) listWarrantyAlerts(c *gin.Context) {
 	if days <= 0 || days > 365 {
 		days = 90
 	}
-	alertDeadline := time.Now().Add(time.Duration(days) * 24 * time.Hour)
+	alertDeadline := time.Now().UTC().AddDate(0, 0, int(days)).Format("2006-01-02")
 	// 查询在告警窗口内到保的资产
 	var rows []map[string]any
-	e := a.store.db.Table("assets").
-		Select(`id, name, serial_number, manufacturer, model, status, warranty_expiry,
-				CEIL(EXTRACT(EPOCH FROM (warranty_expiry - NOW())) / 86400) AS days_remaining`).
+	e := queryScope(a.store.db, resource{table: "assets"}, sc).
+		Select(`id, name, serial_number, manufacturer, model, status, warranty_expiry, (warranty_expiry::date-CURRENT_DATE) AS days_remaining, (`+departmentAccessSQL(sc, "assets.department_id", true)+`) AS can_manage`).
 		Where(`tenant_id=? AND project_id=? AND deleted_at IS NULL
 			   AND warranty_expiry IS NOT NULL
-			   AND warranty_expiry <= ?
-			   AND warranty_expiry > NOW()`,
+			   AND warranty_expiry <= ?`,
 			sc.Tenant, sc.Project, alertDeadline).
 		Order("warranty_expiry ASC").
 		Find(&rows).Error
@@ -212,6 +181,7 @@ func (a *App) listWarrantyAlerts(c *gin.Context) {
 	// 格式化输出
 	type warrantyAlert struct {
 		AssetID        int64  `json:"asset_id"`
+		CanManage      bool   `json:"can_manage"`
 		Name           string `json:"name"`
 		SerialNumber   string `json:"serial_number"`
 		Manufacturer   string `json:"manufacturer"`
@@ -224,6 +194,7 @@ func (a *App) listWarrantyAlerts(c *gin.Context) {
 	for _, row := range rows {
 		alerts = append(alerts, warrantyAlert{
 			AssetID:        toInt64(row["id"]),
+			CanManage:      row["can_manage"] == true,
 			Name:           toString(row["name"]),
 			SerialNumber:   toString(row["serial_number"]),
 			Manufacturer:   toString(row["manufacturer"]),
@@ -253,4 +224,165 @@ func toString(v any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func calculateDepreciation(dep map[string]any) {
+	cost, salvage, months := toFloat64(dep["purchase_cost"]), toFloat64(dep["salvage_value"]), toFloat64(dep["useful_life_months"])
+	base := math.Max(cost-salvage, 0)
+	monthly := float64(0)
+	if months > 0 {
+		monthly = base / months
+	}
+	accumulated := math.Min(base, monthly*calculateUsedMonths(dep["start_date"]))
+	// Use the unrounded monthly rate so rounding cannot accumulate over the life.
+	dep["monthly_depreciation"] = math.Round(monthly*100) / 100
+	dep["accumulated_depreciation"] = math.Round(accumulated*100) / 100
+	dep["net_value"] = math.Round(math.Max(cost-accumulated, salvage)*100) / 100
+	status := toString(dep["status"])
+	if status != "scrapped" && status != "retired" {
+		status = "active"
+		if accumulated >= base {
+			status = "completed"
+		}
+	}
+	dep["status"] = status
+}
+
+type depreciationInput struct {
+	PurchaseCost     *float64 `json:"purchase_cost"`
+	SalvageValue     *float64 `json:"salvage_value"`
+	UsefulLifeMonths int      `json:"useful_life_months"`
+	StartDate        string   `json:"start_date"`
+	Method           string   `json:"depreciation_method"`
+	Status           string   `json:"status"`
+}
+
+func (in depreciationInput) validate() error {
+	if in.PurchaseCost == nil || in.SalvageValue == nil {
+		return errors.New("请填写资产原值和残值")
+	}
+	for _, v := range []float64{*in.PurchaseCost, *in.SalvageValue} {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 9999999999.99 || math.Abs(v*100-math.Round(v*100)) > 0.0001 {
+			return errors.New("金额须为非负数，最多两位小数")
+		}
+	}
+	if *in.SalvageValue > *in.PurchaseCost {
+		return errors.New("残值不能大于资产原值")
+	}
+	if in.UsefulLifeMonths < 1 || in.UsefulLifeMonths > 1200 {
+		return errors.New("折旧年限须为1至1200个月")
+	}
+	if _, err := time.Parse("2006-01-02", in.StartDate); err != nil {
+		return errors.New("请输入有效的折旧起始日期")
+	}
+	if in.Method != "" && in.Method != "straight_line" {
+		return errors.New("当前支持直线法折旧")
+	}
+	if in.Status != "" && in.Status != "active" && in.Status != "scrapped" {
+		return errors.New("折旧状态无效，是否折完由系统自动计算")
+	}
+	return nil
+}
+func (a *App) saveAssetDepreciation(c *gin.Context) {
+	sc := contextScope(c)
+	id := number(c.Param("id"))
+	var in depreciationInput
+	if c.ShouldBindJSON(&in) != nil {
+		fail(c, 400, "折旧参数无效")
+		return
+	}
+	if err := in.validate(); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	err := a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockDepartments(tx, sc); err != nil {
+			return err
+		}
+		if !(&store{tx}).managesAsset(sc, id) {
+			return errAccessDenied
+		}
+		var asset struct{ ID int64 }
+		if err := queryScope(tx, resource{table: "assets"}, sc).Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", id).Take(&asset).Error; err != nil {
+			return err
+		}
+		row := map[string]any{"tenant_id": sc.Tenant, "asset_id": id, "purchase_cost": *in.PurchaseCost, "salvage_value": *in.SalvageValue, "useful_life_months": in.UsefulLifeMonths, "start_date": in.StartDate, "depreciation_method": "straight_line", "status": in.Status}
+		if in.Status == "" {
+			row["status"] = "active"
+		}
+		if err := tx.Table("asset_depreciation").Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "asset_id"}}, TargetWhere: clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "deleted_at IS NULL"}}}, DoUpdates: clause.Assignments(map[string]any{"purchase_cost": *in.PurchaseCost, "salvage_value": *in.SalvageValue, "useful_life_months": in.UsefulLifeMonths, "start_date": in.StartDate, "depreciation_method": "straight_line", "status": row["status"], "monthly_depreciation": nil, "accumulated_depreciation": nil, "net_value": nil})}).Create(&row).Error; err != nil {
+			return err
+		}
+		return a.store.audit(tx, sc, "depreciation:write", "assets", id)
+	})
+	if err != nil {
+		if errors.Is(err, errAccessDenied) {
+			fail(c, 403, err.Error())
+		} else {
+			fail(c, 409, "折旧保存失败")
+		}
+		return
+	}
+	a.getAssetDepreciation(c)
+}
+
+type lifecycleInput struct {
+	PurchaseDate   *string `json:"purchase_date"`
+	WarrantyExpiry *string `json:"warranty_expiry"`
+	Vendor         string  `json:"vendor"`
+}
+
+func (in lifecycleInput) validate() error {
+	for _, d := range []*string{in.PurchaseDate, in.WarrantyExpiry} {
+		if d != nil {
+			if _, e := time.Parse("2006-01-02", *d); e != nil {
+				return errors.New("日期格式须为 YYYY-MM-DD；清空请传 null")
+			}
+		}
+	}
+	if len(strings.TrimSpace(in.Vendor)) > 255 {
+		return errors.New("供应商名称过长")
+	}
+	if in.PurchaseDate != nil && in.WarrantyExpiry != nil && *in.WarrantyExpiry < *in.PurchaseDate {
+		return errors.New("维保到期日期不能早于采购日期")
+	}
+	return nil
+}
+func (a *App) saveAssetLifecycle(c *gin.Context) {
+	sc := contextScope(c)
+	id := number(c.Param("id"))
+	var in lifecycleInput
+	if c.ShouldBindJSON(&in) != nil {
+		fail(c, 400, "采购/维保信息无效")
+		return
+	}
+	if err := in.validate(); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	err := a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockDepartments(tx, sc); err != nil {
+			return err
+		}
+		if !(&store{tx}).managesAsset(sc, id) {
+			return errAccessDenied
+		}
+		r := queryScope(tx, resource{table: "assets"}, sc).Where("id=?", id).Updates(map[string]any{"purchase_date": in.PurchaseDate, "warranty_expiry": in.WarrantyExpiry, "vendor": strings.TrimSpace(in.Vendor), "update_by": sc.User})
+		if r.Error != nil {
+			return r.Error
+		}
+		if r.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return a.store.audit(tx, sc, "lifecycle:write", "assets", id)
+	})
+	if err != nil {
+		if errors.Is(err, errAccessDenied) {
+			fail(c, 403, err.Error())
+		} else {
+			fail(c, 409, "采购/维保信息保存失败")
+		}
+		return
+	}
+	ok(c, gin.H{"id": id})
 }

@@ -1,13 +1,13 @@
 <script setup lang="ts">
-// 系统初始化向导 — 四步流程：选择模式 → 基础配置 → 资源接入 → 完成
+// 系统初始化向导 — 基础配置 → 资源接入 → 完成
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  NButton, NInput, NForm, NFormItem, NTag, NSpin,
+  NButton, NInput, NForm, NFormItem,  NSpin,
   NAlert, NIcon, useMessage
 } from 'naive-ui'
 import {
-  CheckmarkCircleOutline, ServerOutline, GlobeOutline,
+  CheckmarkCircleOutline,
   BuildOutline, CloudUploadOutline, ColorWandOutline,
   FlashOutline, LockClosedOutline
 } from '@vicons/ionicons5'
@@ -20,34 +20,11 @@ const message = useMessage()
 
 // === 步骤定义 ===
 const stepDefs = [
-  { title: '选择模式', desc: '确定系统运行模式' },
   { title: '基础配置', desc: '管理员与平台设置' },
   { title: '资源接入', desc: '接入裸机资源（可选）' },
   { title: '完成', desc: '确认并进入系统' }
 ]
 const currentStep = ref(0)
-
-// === 模式选择 ===
-const selectedMode = ref<'self_use' | 'external_operation' | null>(null)
-
-const modeCards = [
-  {
-    key: 'self_use' as const,
-    title: '自用管理模式',
-    desc: '适合企业内部运维、资产统一管理、团队协作',
-    features: ['资产管理', '自动化装机', '监控告警', '批量运维'],
-    icon: ServerOutline,
-    iconClass: 'icon-self-use'
-  },
-  {
-    key: 'external_operation' as const,
-    title: '对外运营模式',
-    desc: '适合IDC运营商、云服务商、对外售卖裸机资源',
-    features: ['租户管理', '计费系统', '订单财务', '运营后台'],
-    icon: GlobeOutline,
-    iconClass: 'icon-external'
-  }
-]
 
 // === 基础配置表单 ===
 const formData = reactive({
@@ -137,16 +114,7 @@ onMounted(async () => {
 
 // === 步骤导航 ===
 function goToStep(step: number) {
-  if (step >= 0 && step <= 3) currentStep.value = step
-}
-
-// === Step 1: 确认模式 ===
-function confirmMode() {
-  if (!selectedMode.value) {
-    message.warning('请选择一种运行模式')
-    return
-  }
-  goToStep(1)
+  if (step >= 0 && step <= 2) currentStep.value = step
 }
 
 // === Step 2: 提交配置 ===
@@ -158,7 +126,6 @@ async function submitConfig() {
   submitting.value = true
   try {
     const payload: Record<string, any> = {
-      mode: selectedMode.value,
       admin_username: formData.admin_username.trim(),
       admin_password: formData.admin_password,
       admin_email: formData.admin_email || undefined,
@@ -170,7 +137,7 @@ async function submitConfig() {
     generatedPassword.value = result.generated_password || ''
     formData.admin_password = ''
     formData.admin_password_confirm = ''
-    goToStep(2)
+    goToStep(1)
   } catch (e) {
     message.error(errorText(e))
   } finally {
@@ -180,7 +147,7 @@ async function submitConfig() {
 
 // === Step 3: 资源接入（可跳过） ===
 function continueResource() {
-  goToStep(3)
+  goToStep(2)
 }
 
 // === Step 4: 完成 ===
@@ -197,10 +164,6 @@ async function finishSetup() {
   }
 }
 
-// === 选择模式卡片 ===
-function selectMode(mode: 'self_use' | 'external_operation') {
-  selectedMode.value = mode
-}
 </script>
 
 <template>
@@ -230,65 +193,8 @@ function selectMode(mode: 'self_use' | 'external_operation') {
         </div>
       </div>
 
-      <!-- === Step 1: 模式选择 === -->
-      <div v-if="currentStep === 0" class="wizard-body">
-        <h2 class="wizard-heading">选择运行模式</h2>
-        <p class="wizard-subtext">确定后不可更改，请根据业务场景选择</p>
-
-        <div class="setup-cards">
-          <div
-            v-for="card in modeCards"
-            :key="card.key"
-            class="setup-card"
-            :class="{ selected: selectedMode === card.key }"
-            @click="selectMode(card.key)"
-          >
-            <div class="card-top">
-              <div class="card-icon" :class="card.iconClass">
-                <n-icon :size="28"><component :is="card.icon" /></n-icon>
-              </div>
-              <div v-if="selectedMode === card.key" class="card-badge">
-                <n-icon :size="20" color="#165DFF"><CheckmarkCircleOutline /></n-icon>
-              </div>
-            </div>
-            <h3 class="card-title">{{ card.title }}</h3>
-            <p class="card-desc">{{ card.desc }}</p>
-            <div class="card-features">
-              <n-tag
-                v-for="f in card.features"
-                :key="f"
-                size="small"
-                :type="selectedMode === card.key ? 'info' : 'default'"
-                :bordered="false"
-                round
-              >{{ f }}</n-tag>
-            </div>
-            <div class="card-action">
-              <n-button
-                :type="selectedMode === card.key ? 'primary' : 'default'"
-                size="small"
-                @click.stop="selectMode(card.key)"
-              >
-                {{ selectedMode === card.key ? '已选择' : (card.key === 'self_use' ? '选择自用模式' : '选择运营模式') }}
-              </n-button>
-            </div>
-          </div>
-        </div>
-
-        <div class="wizard-footer">
-          <div></div>
-          <n-button
-            type="primary"
-            size="large"
-            :disabled="!selectedMode"
-            :loading="submitting"
-            @click="confirmMode"
-          >确认并继续</n-button>
-        </div>
-      </div>
-
       <!-- === Step 2: 基础配置 === -->
-      <div v-else-if="currentStep === 1" class="wizard-body">
+      <div v-if="currentStep === 0" class="wizard-body">
         <h2 class="wizard-heading">基础配置</h2>
         <p class="wizard-subtext">设置管理员账户与平台基础设施信息</p>
 
@@ -356,7 +262,7 @@ function selectMode(mode: 'self_use' | 'external_operation') {
         </n-form>
 
         <div class="wizard-footer">
-          <n-button quaternary @click="goToStep(0)" :disabled="submitting">上一步</n-button>
+          <span />
           <n-button
             type="primary"
             size="large"
@@ -368,7 +274,7 @@ function selectMode(mode: 'self_use' | 'external_operation') {
       </div>
 
       <!-- === Step 3: 资源接入 === -->
-      <div v-else-if="currentStep === 2" class="wizard-body">
+      <div v-else-if="currentStep === 1" class="wizard-body">
         <h2 class="wizard-heading">资源接入</h2>
         <p class="wizard-subtext">选择如何接入您的裸机服务器资源（此步骤可跳过）</p>
 
@@ -405,7 +311,7 @@ function selectMode(mode: 'self_use' | 'external_operation') {
         </div>
 
         <div class="wizard-footer">
-          <n-button quaternary @click="goToStep(1)" :disabled="submitting">上一步</n-button>
+          <n-button quaternary @click="goToStep(0)" :disabled="submitting">上一步</n-button>
           <div class="footer-actions">
             <n-button quaternary @click="continueResource">跳过此步</n-button>
             <n-button type="primary" size="large" @click="continueResource">继续</n-button>
@@ -426,12 +332,7 @@ function selectMode(mode: 'self_use' | 'external_operation') {
         <p class="wizard-subtext">系统已初始化完毕，下方为配置摘要</p>
 
         <div class="summary-panel">
-          <div class="summary-item">
-            <span class="summary-label">运行模式</span>
-            <n-tag type="info" size="small" round>
-              {{ selectedMode === 'self_use' ? '自用管理模式' : '对外运营模式' }}
-            </n-tag>
-          </div>
+
           <div class="summary-item">
             <span class="summary-label">管理员</span>
             <span class="summary-value">{{ formData.admin_username || 'admin' }}</span>
@@ -450,13 +351,6 @@ function selectMode(mode: 'self_use' | 'external_operation') {
             <span class="summary-value">{{ formData.bmc_network }}</span>
           </div>
         </div>
-
-        <n-alert type="warning" :bordered="false" class="mode-warning">
-          <template #icon>
-            <n-icon><FlashOutline /></n-icon>
-          </template>
-          模式选定后不可切换。如需更改，请重置系统数据库。
-        </n-alert>
 
         <div class="wizard-footer center">
           <n-button
@@ -594,94 +488,6 @@ function selectMode(mode: 'self_use' | 'external_operation') {
   line-height: 1.5;
 }
 
-/* === Step 1: 模式卡片 === */
-.setup-cards {
-  display: flex;
-  gap: 28px;
-  justify-content: center;
-  margin-top: 8px;
-}
-.setup-card {
-  flex: 1;
-  max-width: 380px;
-  padding: 32px 28px 24px;
-  cursor: pointer;
-  border: 2px solid #e5e8f0;
-  border-radius: 16px;
-  background: #fff;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  position: relative;
-  display: flex;
-  flex-direction: column;
-}
-.setup-card:hover {
-  border-color: #a0b4ff;
-  transform: translateY(-3px);
-  box-shadow: 0 8px 32px rgba(22, 93, 255, 0.08);
-}
-.setup-card.selected {
-  border-color: #165DFF;
-  background: #f8faff;
-  box-shadow: 0 0 0 3px rgba(22, 93, 255, 0.1), 0 8px 32px rgba(22, 93, 255, 0.08);
-}
-.card-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-.card-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.card-icon.icon-self-use {
-  background: rgba(22, 93, 255, 0.08);
-  color: #165DFF;
-}
-.card-icon.icon-external {
-  background: rgba(0, 180, 42, 0.08);
-  color: #00B42A;
-}
-.card-badge {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  animation: badge-pop 0.3s ease;
-}
-@keyframes badge-pop {
-  from { transform: scale(0); }
-  to { transform: scale(1); }
-}
-.card-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: #1a1a2e;
-  margin: 0 0 8px;
-}
-.card-desc {
-  font-size: 14px;
-  color: #6b7280;
-  line-height: 1.6;
-  margin: 0 0 20px;
-}
-.card-features {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: auto;
-  margin-bottom: 20px;
-}
-.card-action {
-  padding-top: 16px;
-  border-top: 1px solid #f0f2f5;
-}
-
 /* === Step 2: 配置表单 === */
 .config-form {
   max-width: 640px;
@@ -804,11 +610,6 @@ function selectMode(mode: 'self_use' | 'external_operation') {
   font-weight: 500;
   color: #1a1a2e;
 }
-.mode-warning {
-  max-width: 420px;
-  margin: 0 auto 28px;
-  text-align: left;
-}
 
 /* === 底部操作栏 === */
 .wizard-footer {
@@ -849,15 +650,6 @@ function selectMode(mode: 'self_use' | 'external_operation') {
   }
   .step-label small {
     display: none;
-  }
-  .setup-cards {
-    flex-direction: column;
-    align-items: center;
-    gap: 16px;
-  }
-  .setup-card {
-    max-width: 100%;
-    width: 100%;
   }
   .form-row {
     grid-template-columns: 1fr;

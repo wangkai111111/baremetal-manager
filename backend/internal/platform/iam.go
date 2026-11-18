@@ -131,7 +131,7 @@ func (a *App) iamScope(c *gin.Context) {
 		q = q.Where("p.id=?", id)
 	}
 	if !u.IsPlatformAdmin {
-		q = q.Where("EXISTS (SELECT 1 FROM memberships m JOIN tenant_memberships tm ON tm.tenant_id=m.tenant_id AND tm.user_id=m.user_id AND tm.status='active' AND tm.deleted_at IS NULL JOIN roles r ON r.id=m.role_id AND r.tenant_id=m.tenant_id AND r.deleted_at IS NULL WHERE m.project_id=p.id AND m.tenant_id=p.tenant_id AND m.user_id=? AND m.deleted_at IS NULL)", u.ID)
+		q = q.Where(projectAccessSQL("p", u.ID))
 	}
 	var projects []struct{ ID, TenantID int64 }
 	if q.Limit(2).Find(&projects).Error != nil {
@@ -175,7 +175,7 @@ func (a *App) iamAdmin(c *gin.Context) {
 	c.Next()
 }
 func (a *App) iamUsers(c *gin.Context) {
-	q := a.store.db.Table("users").Select("users.id,username,name,email,status,is_platform_admin,created_at,updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role").Where("users.deleted_at IS NULL")
+	q := a.store.db.Table("users").Select("users.id,username,name,email,status,is_platform_admin,last_login_at,created_at,updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role").Where("users.deleted_at IS NULL")
 	if !current(c).IsPlatformAdmin || c.Param("projectId") != "" {
 		if _, exists := c.Get("scope"); !exists {
 			a.iamScope(c)
@@ -190,6 +190,26 @@ func (a *App) iamUsers(c *gin.Context) {
 		}
 		q = q.Where("EXISTS (SELECT 1 FROM tenant_memberships tm WHERE tm.tenant_id=? AND tm.user_id=users.id AND tm.status='active' AND tm.deleted_at IS NULL)", sc.Tenant)
 	}
+	tenantID := int64(0)
+	if value, exists := c.Get("scope"); exists {
+		tenantID = value.(scope).Tenant
+	} else {
+		projectID := number(c.GetHeader("X-Project-ID"))
+		if projectID == 0 {
+			projectID = number(c.Query("project_id"))
+		}
+		if err := a.store.db.Table("projects").Select("tenant_id").Where("id=? AND deleted_at IS NULL", projectID).Scan(&tenantID).Error; err != nil {
+			fail(c, 500, "组织查询失败")
+			return
+		}
+	}
+	summaryAccess := "TRUE"
+	if value, exists := c.Get("scope"); exists {
+		summaryAccess = departmentAccessSQL(value.(scope), "summary_grant.department_id", true)
+	}
+	q = q.Select(`users.id,username,name,email,status,is_platform_admin,last_login_at,users.created_at,users.updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role,
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('department_id',summary_grant.department_id,'is_admin',summary_grant.is_admin) ORDER BY summary_grant.id)
+ FROM user_access_grants summary_grant WHERE summary_grant.user_id=users.id AND summary_grant.tenant_id=? AND (`+summaryAccess+`) AND (summary_grant.department_id IS NULL OR EXISTS(SELECT 1 FROM departments d WHERE d.id=summary_grant.department_id AND d.tenant_id=summary_grant.tenant_id AND d.deleted_at IS NULL))),'[]'::jsonb) AS access_grants`, tenantID)
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		q = q.Where("(lower(username) LIKE lower(?) OR lower(name) LIKE lower(?))", "%"+search+"%", "%"+search+"%")
 	}

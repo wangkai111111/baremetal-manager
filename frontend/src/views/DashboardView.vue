@@ -4,15 +4,14 @@ import { useRouter } from 'vue-router'
 import { NAlert, NButton, NEmpty, NRadioButton, NRadioGroup, NSelect, NSpin, NSwitch, NTag, useMessage } from 'naive-ui'
 import * as echarts from 'echarts'
 import dayjs, { type Dayjs } from 'dayjs'
-import { api, errorText, operationsApi, resource, rows, taskStatusType, unwrap, type RecordData } from '../api'
+import { errorText, resource, rows, taskStatusType, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
-import { operationMode } from '../stores/brand'
+import { usageTrend, type TrendPoint } from '../utils/usageTrend'
 
 const router = useRouter()
 const message = useMessage()
 const auth = useAuth()
 const isDarkMode = inject<Ref<boolean>>('isDarkMode', ref(false))
-const isOperationMode = computed(() => auth.systemMode === 'external_operation' || operationMode.value === 'external')
 
 // === 原始数据 ===
 const assets = ref<RecordData[]>([])
@@ -111,7 +110,7 @@ function taskKindLabel(kind: unknown): string {
 const visibleTotal = computed(() => assets.value.length)
 const bucketCounts = computed<Record<BucketKey, number>>(() => {
   const out: Record<BucketKey, number> = { running: 0, idle: 0, fault: 0, maintenance: 0 }
-  assets.value.forEach(item => { out[bucketOf(item.status)]++ })
+  assets.value.forEach(item => { out[bucketOf(item.display_status || item.status)]++ })
   return out
 })
 const serverTotal = computed(() => assetTotal.value || visibleTotal.value)
@@ -129,6 +128,7 @@ function useTween(source: () => number, duration = 700) {
   const display = ref(source())
   let raf = 0
   watch(source, target => {
+    cancelAnimationFrame(raf)
     const from = display.value
     const delta = target - from
     if (!Number.isFinite(delta) || Math.abs(delta) < 0.01) { display.value = target; return }
@@ -156,9 +156,6 @@ const ICONS = {
   pulse: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 8-4-16-3 8H2"/></svg>',
   layers: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>',
   bell: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>',
-  coin: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M15 9.5a3 3 0 0 0-3-1.5c-1.7 0-3 .9-3 2.2 0 2.9 6 1.4 6 4.2 0 1.4-1.4 2.3-3.2 2.3A3.3 3.3 0 0 1 9 15"/></svg>',
-  user: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>',
-  cart: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1.4"/><circle cx="19" cy="21" r="1.4"/><path d="M2 3h3l2.4 11.4a2 2 0 0 0 2 1.6h8.4a2 2 0 0 0 2-1.6L22 7H6"/></svg>'
 }
 
 const metrics = computed(() => [
@@ -225,7 +222,7 @@ const alertRows = computed(() => recentAlerts.value.map(alert => {
   const stamp = alert.last_seen_at || alert.created_at
   const severity = severityOf(alert.severity)
   const asset = assetById(alert.asset_id)
-  return { id: alert.id, message: String(alert.message || alert.title || '告警事件'), time: formatTime(stamp), relative: relativeTime(stamp), severityLabel: severity.label, severityColor: severity.color, severityBg: severity.bg, assetName: assetName(alert.asset_id), assetStatus: asset ? statusLabel(asset.status) : '', assetStatusClass: asset ? statusClass(asset.status) : '' }
+  return { id: alert.id, message: String(alert.message || alert.title || '告警事件'), time: formatTime(stamp), relative: relativeTime(stamp), severityLabel: severity.label, severityColor: severity.color, severityBg: severity.bg, assetName: assetName(alert.asset_id), assetStatus: asset ? statusLabel(asset.display_status || asset.status) : '', assetStatusClass: asset ? statusClass(asset.display_status || asset.status) : '' }
 }))
 
 const taskRows = computed(() => recentTasks.value.map(task => ({
@@ -236,74 +233,9 @@ const taskRows = computed(() => recentTasks.value.map(task => ({
 // ============================================================
 // 资源使用率趋势
 // ============================================================
-interface TrendPoint { label: string; cpu: number | null; mem: number | null }
 const trendPoints = ref<TrendPoint[]>([])
-const trendEstimated = ref(false)
-
-function clamp(v: number, min = 3, max = 97) { return Math.min(max, Math.max(min, v)) }
-function noise(seed: number) { const x = Math.sin(seed * 12.9898) * 43758.5453; return x - Math.floor(x) }
-
-function trendSlots(): { key: string; label: string }[] {
-  const now = dayjs()
-  const slots: { key: string; label: string }[] = []
-  if (timeRange.value === 'today') {
-    for (let h = 0; h <= now.hour(); h++) slots.push({ key: now.format('YYYY-MM-DDTHH'), label: `${String(h).padStart(2, '0')}:00` })
-  } else {
-    const days = timeRange.value === 'week' ? 7 : 30
-    for (let i = days - 1; i >= 0; i--) { const d = now.startOf('day').subtract(i, 'day'); slots.push({ key: d.format('YYYY-MM-DD'), label: d.format('M/D') }) }
-  }
-  return slots
-}
-
-function classifySensor(row: RecordData): 'cpu' | 'mem' | null {
-  const key = `${String(row.metric || '')} ${String(row.sensor_key || '')}`.toLowerCase()
-  if (/cpu|processor|compute/.test(key)) return 'cpu'
-  if (/mem|ram/.test(key)) return 'mem'
-  return null
-}
-
-function buildTrend() {
-  const slots = trendSlots()
-  const acc = new Map<string, { cpu: number[]; mem: number[] }>()
-  slots.forEach(s => acc.set(s.key, { cpu: [], mem: [] }))
-  for (const row of sensorRows.value) {
-    const kind = classifySensor(row)
-    if (!kind) continue
-    const value = Number(row.value)
-    if (!Number.isFinite(value)) continue
-    const unit = String(row.unit || '').toLowerCase()
-    if (!(unit.includes('%') || (value >= 0 && value <= 100 && !unit))) continue
-    const at = dayjs(String(row.sampled_at || row.created_at || ''))
-    if (!at.isValid() || at.isBefore(rangeFrom.value)) continue
-    const key = timeRange.value === 'today' ? at.format('YYYY-MM-DDTHH') : at.format('YYYY-MM-DD')
-    const bucket = acc.get(key)
-    if (!bucket) continue
-    bucket[kind].push(value)
-  }
-  const avg = (list: number[]) => list.length ? list.reduce((a, b) => a + b, 0) / list.length : null
-  const real = slots.map(s => ({ label: s.label, cpu: avg(acc.get(s.key)!.cpu), mem: avg(acc.get(s.key)!.mem) }))
-  const hit = real.filter(p => p.cpu !== null || p.mem !== null).length
-  if (hit >= 2) {
-    let lastCpu: number | null = null; let lastMem: number | null = null
-    trendPoints.value = real.map(p => {
-      if (p.cpu !== null) lastCpu = p.cpu; else p.cpu = lastCpu
-      if (p.mem !== null) lastMem = p.mem; else p.mem = lastMem
-      return { label: p.label, cpu: p.cpu === null ? null : Number(p.cpu.toFixed(1)), mem: p.mem === null ? null : Number(p.mem.toFixed(1)) }
-    })
-    trendEstimated.value = false
-    return
-  }
-  const seedBase = dayjs().startOf('day').valueOf() / 86400000
-  const rate = onlineRate.value
-  const cpuBase = visibleTotal.value ? clamp(14 + rate * 0.4, 8, 72) : 5
-  const memBase = visibleTotal.value ? clamp(24 + rate * 0.42, 14, 80) : 8
-  trendPoints.value = slots.map((s, i) => ({
-    label: s.label,
-    cpu: Number(clamp(cpuBase + (noise(seedBase + i * 1.31) - 0.5) * 16 + Math.sin(i / 3.4 + noise(seedBase) * 6) * 4).toFixed(1)),
-    mem: Number(clamp(memBase + (noise(seedBase + 91 + i * 1.13) - 0.5) * 12 + Math.cos(i / 4.1 + noise(seedBase + 7) * 6) * 3.5).toFixed(1))
-  }))
-  trendEstimated.value = true
-}
+const hasTrendSamples = computed(() => trendPoints.value.some(point => point.cpu !== null || point.mem !== null))
+function buildTrend() { trendPoints.value = usageTrend(sensorRows.value, timeRange.value) }
 
 // ============================================================
 // 机房容量分布
@@ -321,43 +253,12 @@ const dcRows = computed<DcRow[]>(() => {
     const id = asset.datacenter_id == null ? 'unassigned' : String(asset.datacenter_id)
     const known = datacenters.value.find(dc => String(dc.id) === id)
     const row = ensure(id, known ? String(known.name || id) : (id === 'unassigned' ? '未分配机房' : `机房 #${id}`))
-    row.total++; row.counts[bucketOf(asset.status)]++
+    row.total++; row.counts[bucketOf(asset.display_status || asset.status)]++
   })
   return [...map.values()].sort((a, b) => b.total - a.total).slice(0, 6)
 })
 
 const capacityData = computed(() => BUCKETS.map(b => ({ name: b.label, value: bucketCounts.value[b.key], itemStyle: { color: b.color } })).filter(d => d.value > 0))
-
-// ============================================================
-// 运营模式指标
-// ============================================================
-const opsLoading = ref(false)
-const opsReachable = ref(true)
-const ops = ref({ revenue: 0, newUsers: 0, orders: 0 })
-
-async function loadOperations() {
-  if (!isOperationMode.value || !auth.projectId) return
-  opsLoading.value = true
-  try {
-    let data: RecordData
-    try { data = unwrap<RecordData>(await operationsApi.getDashboard()) }
-    catch { data = unwrap<RecordData>(await api.get(`/projects/${encodeURIComponent(auth.projectId)}/admin/operations-dashboard`)) }
-    const trend = Array.isArray(data.revenue_trend) ? data.revenue_trend as RecordData[] : []
-    const today = dayjs().format('YYYY-MM-DD')
-    const match = trend.find(point => String(point.date || '').slice(0, 10) === today)
-    const users = (data.user_growth ?? {}) as RecordData
-    const orders = (data.order_stats ?? {}) as RecordData
-    ops.value = { revenue: Number(match?.amount ?? trend[trend.length - 1]?.amount ?? 0), newUsers: Number(users.new_users_today ?? 0), orders: Number(orders.completed_orders ?? 0) }
-    opsReachable.value = true
-  } catch { ops.value = { revenue: 0, newUsers: 0, orders: 0 }; opsReachable.value = false }
-  finally { opsLoading.value = false }
-}
-
-const opsCards = computed(() => [
-  { key: 'revenue', label: '今日营收', value: `¥${ops.value.revenue.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, icon: ICONS.coin, tone: 'primary' as const, foot: '已支付订单金额' },
-  { key: 'users', label: '新增用户', value: String(ops.value.newUsers), icon: ICONS.user, tone: 'success' as const, foot: '今日注册并加入租户' },
-  { key: 'orders', label: '有效订单量', value: String(ops.value.orders), icon: ICONS.cart, tone: 'warning' as const, foot: '状态为已完成' }
-])
 
 // ============================================================
 // ECharts 渲染
@@ -379,7 +280,7 @@ function withAlpha(hex: string, alpha: number) {
 }
 
 function renderTrendChart() {
-  if (!trendChartRef.value) return
+  if (!trendChartRef.value || !hasTrendSamples.value || !trendChartRef.value.clientWidth) return
   if (!trendChart || trendChart.isDisposed()) trendChart = echarts.init(trendChartRef.value)
   const t = tokens()
   const area = (color: string) => new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -417,6 +318,7 @@ function resizeCharts() { trendChart?.resize(); pieChart?.resize() }
 
 async function renderCharts() {
   await nextTick()
+  if (disposed) return
   renderTrendChart()
   renderPieChart()
 }
@@ -436,9 +338,13 @@ function resetData() {
   assetTotal.value = taskTotal.value = alertTotal.value = 0; trendPoints.value = []
 }
 
+let disposed = false
+let loadSequence = 0
 async function load(background = false) {
+  if (disposed) return
+  const sequence = ++loadSequence
   loadError.value = ''
-  if (!auth.projectId) { resetData(); await renderCharts(); return }
+  if (!auth.projectId) { resetData(); loading.value = refreshing.value = false; await renderCharts(); return }
   if (background) refreshing.value = true; else loading.value = true
 
   const errors: string[] = []
@@ -446,13 +352,15 @@ async function load(background = false) {
     task.catch(reason => { if (!silent) errors.push(`${label}：${errorText(reason)}`); return null })
 
   const [assetRes, taskRes, alertRes, dcRes, sensorRes] = await Promise.all([
-    attempt('资产', resource.list('/assets', { page: 1, page_size: 200 })),
-    attempt('任务', resource.list('/tasks', { page: 1, page_size: 100 })),
-    attempt('告警', resource.list('/alerts', { page: 1, page_size: 200 })),
+    auth.can('assets:read') ? attempt('资产', resource.list('/assets', { page: 1, page_size: 200 })) : Promise.resolve(null),
+    auth.can('tasks:read') ? attempt('任务', resource.list('/tasks', { page: 1, page_size: 100 })) : Promise.resolve(null),
+    auth.can('alerts:read') ? attempt('告警', resource.list('/alerts', { page: 1, page_size: 200 })) : Promise.resolve(null),
     auth.can('datacenters:read') ? attempt('机房', resource.list('/datacenters', { page: 1, page_size: 200 }), true) : Promise.resolve(null),
     auth.can('monitor:read') ? attempt('传感器', resource.list('/sensor-records', { page: 1, page_size: 200 }), true) : Promise.resolve(null)
   ])
 
+  if (disposed || sequence !== loadSequence) return
+  resetData()
   if (assetRes) { const d = rows(assetRes); assets.value = d.items; assetTotal.value = d.total }
   if (taskRes) { const d = rows(taskRes); tasks.value = d.items; taskTotal.value = d.total }
   if (alertRes) { const d = rows(alertRes); alerts.value = d.items; alertTotal.value = d.total }
@@ -466,7 +374,6 @@ async function load(background = false) {
 
   buildTrend()
   await renderCharts()
-  if (isOperationMode.value) void loadOperations()
 }
 
 function startAutoRefresh() {
@@ -477,13 +384,15 @@ function stopAutoRefresh() { if (refreshTimer) { clearInterval(refreshTimer); re
 
 watch(autoRefresh, on => { if (on) startAutoRefresh(); else stopAutoRefresh() })
 watch(timeRange, () => { if (auth.projectId) void load(false) })
-watch(() => auth.projectId, () => { void load(false) })
+watch(() => auth.projectId, () => { resetData(); void load(false) })
 watch(isDarkMode, () => { void renderCharts() })
 
 onMounted(async () => {
   await loadProjects()
+  if (disposed) return
   if (auth.projectId) await load(false); else buildTrend()
   await renderCharts()
+  if (disposed) return
   window.addEventListener('resize', resizeCharts)
   if (typeof ResizeObserver !== 'undefined') {
     observer = new ResizeObserver(() => resizeCharts())
@@ -494,6 +403,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
+  loadSequence++
   window.removeEventListener('resize', resizeCharts)
   observer?.disconnect(); observer = undefined
   stopAutoRefresh()
@@ -548,31 +459,18 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 运营指标行 -->
-      <div v-if="isOperationMode" class="dashboard-grid" style="grid-template-columns: repeat(3, 1fr)">
-        <div v-for="item in opsCards" :key="item.key" class="metric-card ops-metric-card">
-          <div class="metric-icon" :class="item.tone" v-html="item.icon" />
-          <div class="metric-content">
-            <div class="metric-label">{{ item.label }}</div>
-            <div class="metric-value">{{ item.value }}</div>
-            <div class="metric-foot">{{ item.foot }}</div>
-          </div>
-          <n-tag v-if="!opsReachable" size="tiny" :bordered="false" type="warning">占位</n-tag>
-        </div>
-      </div>
-
       <!-- 图表行：趋势 + 容量 -->
       <div class="dashboard-grid" style="grid-template-columns: 2fr 1fr">
         <div class="card chart-card">
           <div class="card-header">
             <span>资源使用率趋势</span>
             <div class="chart-header-meta">
-              <n-tag v-if="trendEstimated" size="small" :bordered="false" type="info">估算</n-tag>
               <span class="legend-chip"><i style="background: #165DFF" />CPU</span>
               <span class="legend-chip"><i style="background: #00B42A" />内存</span>
             </div>
           </div>
-          <div ref="trendChartRef" class="chart-body" style="height: 320px" />
+          <div v-show="hasTrendSamples" ref="trendChartRef" class="chart-body" style="height: 320px" />
+          <div v-if="!hasTrendSamples" class="dash-empty-inline" style="min-height: 320px"><n-empty description="暂无 CPU / 内存使用率采样"><template #extra>接入有效监控数据后展示实际趋势</template></n-empty></div>
         </div>
         <div class="card chart-card">
           <div class="card-header">
@@ -665,7 +563,6 @@ onUnmounted(() => {
 .metric-suffix { font-size: 15px; font-weight: 600; color: var(--color-text-tertiary); }
 
 /* 运营指标 */
-.ops-metric-card { display: flex; align-items: flex-start; gap: 14px; }
 
 /* 图表卡片 */
 .chart-card { display: flex; flex-direction: column; min-width: 0; }

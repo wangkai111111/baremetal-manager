@@ -13,9 +13,11 @@ package platform
 // 上述路径同时挂在 /api/v1/provision 前缀下，便于 nginx 只转发 /api/ 的部署形态复用同一后端处理器。
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -26,9 +28,11 @@ import (
 	"time"
 
 	"baremetal-manager/backend/config"
+	"baremetal-manager/backend/internal/service"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // provisioningCallbackTokenRe 约束回调凭据形状，避免把任意字符串拼进数据库查询。
@@ -64,6 +68,45 @@ func (a *App) serveNetbootFile(c *gin.Context) {
 	provisionServeUnder(c, filepath.Join(root, "netboot"), c.Param("filepath"))
 }
 
+func (a *App) serveIPXEScript(c *gin.Context) {
+	root, err := provisioningTFTPRoot()
+	if err != nil {
+		fail(c, 503, "provisioning storage unavailable")
+		return
+	}
+	mac, err := provisioningNormalizeMAC(strings.TrimSuffix(c.Param("mac"), ".ipxe"))
+	if err != nil {
+		fail(c, 404, "script not found")
+		return
+	}
+	var active int64
+	err = a.store.db.WithContext(c.Request.Context()).Table("installations").Where("deleted_at IS NULL AND status IN ('pending','preparing','booting','installing','unknown') AND callback_revoked_at IS NULL AND callback_expires_at>now() AND (deadline_at IS NULL OR deadline_at>now()) AND replace(lower(config_snapshot->>'mac'),':','')=?", mac).Count(&active).Error
+	if err != nil {
+		fail(c, 503, "installation state unavailable")
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	if active == 0 {
+		c.Data(200, "text/plain; charset=utf-8", []byte("#!ipxe\nexit\n"))
+		return
+	}
+	var snapJSON []byte
+	var record struct{ ConfigSnapshot json.RawMessage }
+	if err := a.store.db.WithContext(c.Request.Context()).Table("installations").Select("config_snapshot").Where("deleted_at IS NULL AND callback_revoked_at IS NULL AND callback_expires_at>now() AND status IN ('booting','unknown') AND replace(lower(config_snapshot->>'mac'),':','')=?", mac).Order("id DESC").Take(&record).Error; err == nil {
+		snapJSON = record.ConfigSnapshot
+		var snap installationSnapshot
+		if json.Unmarshal(snapJSON, &snap) == nil {
+			if token, err := service.DecryptCredential(snap.TokenEncrypted); err == nil {
+				if err := a.observeInstallRequest(c.Request.Context(), token, "download", "ipxe_requested", "已收到 VM 的 iPXE 请求，正在下载内核、initrd 与系统镜像"); err != nil {
+					fail(c, 503, "progress persistence unavailable")
+					return
+				}
+			}
+		}
+	}
+	provisionServeUnder(c, filepath.Join(root, "ipxe"), mac+".ipxe")
+}
+
 // serveISOFile GET /iso/*filepath —— 下发 casper netboot 需要的 live-server ISO（{HTTPBase}/iso/{name}）。
 // casper 通过 url= 拉取整张 ISO，Range 请求由 http.ServeFile 原生支持。
 func (a *App) serveISOFile(c *gin.Context) {
@@ -94,14 +137,51 @@ func (a *App) serveAutoinstall(c *gin.Context) {
 		fail(c, 400, "unsupported seed file")
 		return
 	}
+	token := c.Param("seedToken")
+	if !provisioningCallbackTokenRe.MatchString(token) {
+		fail(c, 404, "seed not found")
+		return
+	}
+	var active int64
+	err := a.store.db.WithContext(c.Request.Context()).Table("installations").Where("deleted_at IS NULL AND callback_revoked_at IS NULL AND callback_expires_at>now() AND status IN ('pending','preparing','booting','installing','post_install','unknown') AND callback_token_hash=? AND replace(lower(config_snapshot->>'mac'),':','')=?", service.CallbackTokenHash(token), mac).Count(&active).Error
+	if err != nil || active == 0 {
+		fail(c, 404, "seed not found")
+		return
+	}
 	c.Header("Cache-Control", "no-store")
-	provisionServeUnder(c, filepath.Join(root, "nocloud", mac), "/"+name)
+	c.Header("Referrer-Policy", "no-referrer")
+	// Only the authenticated HTTP path can decrypt seed files. A direct TFTP
+	// read from this shared volume must never reveal password hashes or tokens.
+	path, err := provisionResolveUnder(filepath.Join(root, "nocloud", mac), name+".enc")
+	if err != nil {
+		fail(c, 404, "seed not found")
+		return
+	}
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 4<<20 {
+		fail(c, 404, "seed not found")
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fail(c, 404, "seed not found")
+		return
+	}
+	plain, err := service.DecryptCredential(string(data))
+	if err != nil {
+		fail(c, 503, "seed unavailable")
+		return
+	}
+	if err := a.observeInstallRequest(c.Request.Context(), token, "", "seed/"+name, "已下发 NoCloud "+name+" 安装配置"); err != nil {
+		fail(c, 503, "installation no longer active")
+		return
+	}
+	c.Data(200, "text/plain; charset=utf-8", []byte(plain))
 }
 
 // installCallback POST /install-callback/:token —— 记录安装进度/完成情况。
 //
-// 语义是「尽力而为」：只追加 installation_events 事件、并按只进不退的方向推进 installations 状态，
-// 终态判定与后续动作由编排器（装机任务 / worker）负责，避免两处互相覆盖。
+// 回调在同一事务内记录幂等事件并单向推进安装状态；终态同步收口操作并释放设备租约。
 // 请求体：{"status": "booting|installing|post_install|succeeded|failed", "message": "...", "stage": "...", "event_key": "..."}
 func (a *App) installCallback(c *gin.Context) {
 	token := strings.TrimSpace(c.Param("token"))
@@ -153,39 +233,98 @@ func (a *App) installCallback(c *gin.Context) {
 	message := provisioningCallbackMessage(in.Message, status)
 	eventKey := provisioningCallbackEventKey(in.EventKey, row.ID, status, stage)
 
-	// 事件按 (installation_id, event_key) 幂等：客户端重试不会刷出重复进度。
-	e = a.store.db.WithContext(c.Request.Context()).Exec(`
-		INSERT INTO installation_events(tenant_id, project_id, installation_id, event_key, stage, message)
-		VALUES (?,?,?,?,?,?)
-		ON CONFLICT (tenant_id, project_id, installation_id, event_key) WHERE deleted_at IS NULL DO NOTHING`,
-		row.TenantID, row.ProjectID, row.ID, eventKey, stage, message).Error
+	advanced := false
+	e = a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		var op operation
+		if err := tx.Table("operations").Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND kind='install' AND deleted_at IS NULL", row.OperationID).Take(&op).Error; err != nil {
+			return err
+		}
+		var state installProgress
+		if err := tx.Table("installations").Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND callback_revoked_at IS NULL AND callback_expires_at>now() AND deleted_at IS NULL", row.ID).Take(&state).Error; err != nil {
+			return err
+		}
+		if state.DeadlineAt != nil && !time.Now().Before(*state.DeadlineAt) {
+			return gorm.ErrRecordNotFound
+		}
+		var currentSteps []installStep
+		if err := json.Unmarshal(state.Progress, &currentSteps); err != nil {
+			return err
+		}
+		for _, step := range currentSteps {
+			if step.Status == "running" && step.DeadlineAt != nil && !time.Now().Before(*step.DeadlineAt) {
+				return gorm.ErrRecordNotFound
+			}
+		}
+		if err := tx.Exec(`INSERT INTO installation_events(tenant_id,project_id,installation_id,event_key,stage,message) VALUES (?,?,?,?,?,?) ON CONFLICT (tenant_id,project_id,installation_id,event_key) WHERE deleted_at IS NULL DO NOTHING`, row.TenantID, row.ProjectID, row.ID, eventKey, stage, message).Error; err != nil {
+			return err
+		}
+		rank := map[string]int{"pending": 0, "preparing": 1, "booting": 2, "installing": 3, "post_install": 4, "unknown": 0, "succeeded": 5, "failed": 5, "cancelled": 5}
+		if rank[state.Status] == 5 || rank[status] < rank[state.Status] {
+			return nil
+		}
+		stepKey := ""
+		switch status {
+		case "installing":
+			stepKey = "install"
+		case "succeeded":
+			stepKey = "first_boot"
+		case "post_install":
+			stepKey = "post_install"
+			if stage == "first_boot" {
+				stepKey = "first_boot"
+			}
+		}
+		if stepKey != "" {
+			if err := recordInstallStep(tx, op, stepKey, installStepMessage(stepKey)); err != nil {
+				return err
+			}
+		}
+		updates := map[string]any{"status": status, "started_at": gorm.Expr("COALESCE(started_at,now())"), "error": nil}
+		if status == "installing" {
+			updates["irreversible_at"] = gorm.Expr("COALESCE(irreversible_at,now())")
+		}
+		if status == "failed" {
+			updates["error"] = message
+		}
+		if provisioningCallbackTerminal(status) {
+			updates["completed_at"] = gorm.Expr("now()")
+			if status == "failed" {
+				updates["callback_revoked_at"] = gorm.Expr("now()")
+				updates["cleanup_pending"] = true
+			}
+
+			if err := finishInstallProgress(tx, op, map[string]string{"succeeded": "succeeded", "failed": "failed"}[status], message); err != nil {
+				return err
+			}
+		}
+		if err := tx.Table("installations").Where("id=?", row.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+		advanced = true
+		if provisioningCallbackTerminal(status) {
+			values := map[string]any{"status": status, "started_at": gorm.Expr("COALESCE(started_at,now())"), "completed_at": gorm.Expr("now()"), "error": nil}
+			if status == "failed" {
+				values["error"] = message
+			}
+			if err := tx.Table("operations").Where("id=? AND status IN ('pending','running','unknown')", row.OperationID).Updates(values).Error; err != nil {
+				return err
+			}
+			if status == "succeeded" {
+				if err := tx.Table("assets").Where("id=? AND tenant_id=? AND project_id=? AND manufacturer='BMM Test VM' AND model='QEMU PXE Lab' AND mac_address='52:54:00:77:00:10'::macaddr AND deleted_at IS NULL", row.AssetID, row.TenantID, row.ProjectID).Updates(map[string]any{"power_state": "on", "status": "online", "collection_error": nil, "monitor_health": "unknown"}).Error; err != nil {
+					return err
+				}
+			}
+			return tx.Table("device_leases").Where("operation_id=?", row.OperationID).Updates(map[string]any{"heartbeat_at": gorm.Expr("now()-interval '1 second'"), "expires_at": gorm.Expr("now()")}).Error
+		}
+		return tx.Table("operations").Where("id=? AND status IN ('pending','unknown')", row.OperationID).Updates(map[string]any{"status": "running", "started_at": gorm.Expr("COALESCE(started_at,now())"), "completed_at": nil, "error": nil}).Error
+	})
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		fail(c, 410, "installation expired or cancelled")
+		return
+	}
 	if e != nil {
 		fail(c, 500, "install progress persistence failed")
 		return
-	}
-
-	updates := map[string]any{"status": status, "updated_at": gorm.Expr("now()")}
-	if status == "failed" {
-		updates["error"] = message
-	}
-	if provisioningCallbackStarted(status) {
-		updates["started_at"] = gorm.Expr("COALESCE(started_at, now())")
-	}
-	if provisioningCallbackTerminal(status) {
-		updates["started_at"] = gorm.Expr("COALESCE(started_at, now())")
-		updates["completed_at"] = gorm.Expr("COALESCE(completed_at, now())")
-	}
-	// 只进不退：已是终态（含编排器先行写入的结果）时不再覆盖。
-	res := a.store.db.WithContext(c.Request.Context()).Table("installations").
-		Where("id=? AND deleted_at IS NULL AND status NOT IN ('succeeded','failed','cancelled')", row.ID).
-		Updates(updates)
-	advanced := res.Error == nil && res.RowsAffected == 1
-
-	// operations 只做「pending → running」的兜底推进，终态由 worker 统一收口。
-	if status != "succeeded" && status != "failed" {
-		a.store.db.WithContext(c.Request.Context()).Table("operations").
-			Where("id=? AND deleted_at IS NULL AND kind='install' AND status='pending'", row.OperationID).
-			Updates(map[string]any{"status": "running", "started_at": gorm.Expr("COALESCE(started_at, now())"), "updated_at": gorm.Expr("now()")})
 	}
 
 	if status == "succeeded" && row.Status != "failed" && row.Status != "cancelled" {
@@ -331,4 +470,52 @@ func provisionResolveUnder(root, relative string) (string, error) {
 		return resolved, nil
 	}
 	return candidate, nil
+}
+
+func installStepMessage(key string) string {
+	switch key {
+	case "install":
+		return "安装器已加载应答文件，开始自动分区并安装系统"
+	case "post_install":
+		return "系统文件已安装，正在应用 root / SSH 设置及首次启动验证服务"
+	case "first_boot":
+		return "安装后配置已完成，等待重启并由磁盘中的系统回报"
+	}
+	return key
+}
+
+func (a *App) serveInstallationMedia(c *gin.Context) {
+	token, kind, name := c.Param("seedToken"), c.Param("kind"), c.Param("file")
+	if !provisioningCallbackTokenRe.MatchString(token) || !((kind == "netboot" && (name == "vmlinuz" || name == "initrd")) || (kind == "iso" && name == DefaultISOFileName)) {
+		fail(c, 404, "media not found")
+		return
+	}
+	root, err := provisioningTFTPRoot()
+	if err != nil {
+		fail(c, 503, "media unavailable")
+		return
+	}
+	path, err := provisionResolveUnder(filepath.Join(root, kind), name)
+	if err != nil {
+		fail(c, 404, "media not found")
+		return
+	}
+	if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
+		fail(c, 404, "media not found")
+		return
+	}
+	if err := a.observeInstallRequest(c.Request.Context(), token, "download", "media/start/"+name, "VM 开始请求 "+name); err != nil {
+		fail(c, 404, "installation inactive")
+		return
+	}
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Cache-Control", "no-store")
+	c.Header("Referrer-Policy", "no-referrer")
+	http.ServeFile(c.Writer, c.Request, path)
+	if c.Request.Method == "GET" && c.Writer.Status() == 200 && c.Request.Context().Err() == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = a.observeInstallRequest(ctx, token, "", "media/end/"+name, "HTTP 服务已发送 "+name+"，等待安装器确认接收与启动")
+	}
+	c.Abort()
 }

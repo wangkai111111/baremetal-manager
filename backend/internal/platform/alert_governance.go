@@ -189,7 +189,6 @@ const alertExportSelect = `id, asset_id, severity, status, message, dedup_key, r
  (SELECT ast.name FROM assets ast WHERE ast.id=alerts.asset_id AND ast.tenant_id=alerts.tenant_id
   AND ast.project_id=alerts.project_id AND ast.deleted_at IS NULL) AS asset_name`
 
-// alertExportQuery 组装告警历史筛选，作用域与通用列表一致（运营模式按已交付资产隔离）。
 func (a *App) alertExportQuery(c *gin.Context, sc scope) *gorm.DB {
 	q := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "alerts"}, sc)
 	if id := number(c.Query("asset_id")); id > 0 {

@@ -43,8 +43,10 @@ type auditMeta struct {
 // 避免伪造的 X-Forwarded-For 触发 inet 列类型错误而使业务事务回滚。
 func requestMeta(c *gin.Context, actor int64) auditMeta {
 	ip := strings.TrimSpace(c.ClientIP())
-	if _, err := netip.ParseAddr(ip); err != nil {
+	if addr, err := netip.ParseAddr(ip); err != nil {
 		ip = ""
+	} else {
+		ip = addr.Unmap().String()
 	}
 	ua := strings.TrimSpace(c.GetHeader("User-Agent"))
 	if len(ua) > 512 {

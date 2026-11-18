@@ -22,7 +22,7 @@ func (a *App) projects(c *gin.Context) {
 		q = q.Where("tenant_id=?", tenant)
 	}
 	if !u.IsPlatformAdmin {
-		q = q.Where("EXISTS (SELECT 1 FROM memberships m JOIN tenant_memberships tm ON tm.tenant_id=m.tenant_id AND tm.user_id=m.user_id AND tm.status='active' AND tm.deleted_at IS NULL JOIN roles r ON r.id=m.role_id AND r.tenant_id=m.tenant_id AND r.deleted_at IS NULL WHERE m.project_id=projects.id AND m.tenant_id=projects.tenant_id AND m.user_id=? AND m.deleted_at IS NULL)", u.ID)
+		q = q.Where(projectAccessSQL("projects", u.ID))
 	}
 	a.identityList(c, q, "projects")
 }

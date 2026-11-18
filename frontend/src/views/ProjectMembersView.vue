@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 项目成员管理页面 — 管理项目成员与权限分配
 import { computed, ref, watch } from 'vue'
+import dayjs from 'dayjs'
+const formatTime = (value: unknown) => value && dayjs(String(value)).isValid() ? dayjs(String(value)).format('YYYY-MM-DD HH:mm') : '—'
 import {
   NButton,
   NDataTable,
@@ -14,7 +16,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { h } from 'vue'
-import { errorText, resource, rows, type RecordData, api } from '../api'
+import { errorText, rows, type RecordData, api } from '../api'
 import { useAuth } from '../stores/auth'
 
 const message = useMessage()
@@ -22,7 +24,7 @@ const auth = useAuth()
 
 // === 角色选项 ===
 const roleOptions = [
-  { label: '管理员', value: 'admin' },
+  { label: '项目管理员', value: 'manager' },
   { label: '运维', value: 'operator' },
   { label: '只读', value: 'viewer' }
 ]
@@ -42,7 +44,7 @@ const isEditing = ref(false)
 const userOptions = ref<{ label: string; value: string | number }[]>([])
 
 // === 权限控制 ===
-const canWrite = computed(() => auth.can('projects:write'))
+const canWrite = computed(() => auth.can('iam:manage'))
 
 // === 表格列定义 ===
 const columns = computed<DataTableColumns<RecordData>>(() => [
@@ -54,7 +56,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
     render: (row: RecordData) => {
       const role = String(row.role || 'viewer')
       const label = roleOptions.find(o => o.value === role)?.label || role
-      const tagType = role === 'admin' ? 'error' : role === 'operator' ? 'info' : 'default'
+      const tagType = role === 'manager' ? 'warning' : role === 'operator' ? 'info' : 'default'
       return h(
         NTag,
         { size: 'small', bordered: false, type: tagType },
@@ -62,7 +64,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
       )
     }
   },
-  { title: '加入时间', key: 'created_at', minWidth: 150 },
+  { title: '加入时间', key: 'created_at', minWidth: 150, render: (row: RecordData) => formatTime(row.created_at) },
   ...(canWrite.value
     ? [
         {
@@ -74,7 +76,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
             h('div', { class: 'table-actions' }, [
               h(
                 NButton,
-                { text: true, onClick: () => openChangeRole(row) },
+                { text: true, disabled: String(row.user_id) === String(auth.user?.id), onClick: () => openChangeRole(row) },
                 { default: () => '修改角色' }
               ),
               h(
@@ -82,7 +84,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
                 { onPositiveClick: () => removeMember(row) },
                 {
                   trigger: () =>
-                    h(NButton, { text: true, type: 'error' }, { default: () => '移除' }),
+                    h(NButton, { text: true, type: 'error', disabled: String(row.user_id) === String(auth.user?.id) }, { default: () => '移除' }),
                   default: () => '确认移除此成员？'
                 }
               )
@@ -118,7 +120,7 @@ watch(
 // === 加载用户列表（用于添加成员）===
 async function loadUsers() {
   try {
-    const data = rows(await resource.list('/users', { page: 1, page_size: 200 }))
+    const data = rows(await api.get(`/projects/${auth.projectId}/users`, { params: { page: 1, page_size: 200 } }))
     userOptions.value = data.items.map(u => ({
       label: `${String(u.username || u.id)} (${String(u.name || '')})`,
       value: u.id as string | number

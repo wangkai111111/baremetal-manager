@@ -127,7 +127,6 @@ func (h *Handler) Router() *gin.Engine {
 	p.GET("/alerts", h.Alerts)
 	p.GET("/audit", h.Audits)
 	p.GET("/networks", h.Networks)
-	p.GET("/ip-allocations", h.IPs)
 	p.GET("/members", listMembers(h.S.Store))
 	p.GET("/sol-sessions", h.SOLSessions)
 	w := authorized.Group("/projects/:projectId")
@@ -138,7 +137,6 @@ func (h *Handler) Router() *gin.Engine {
 	w.POST("/assets/:id/actions", h.Action)
 	w.POST("/alerts/:id/resolve", h.ResolveAlert)
 	w.POST("/networks", h.CreateNetwork)
-	w.POST("/ip-allocations", h.CreateIP)
 	w.POST("/members", addOrUpdateMember(h.S.Store))
 	w.PUT("/members/:userId", updateMember(h.S.Store))
 	w.DELETE("/members/:userId", removeMember(h.S.Store))
@@ -158,7 +156,7 @@ func (h *Handler) Router() *gin.Engine {
 	RegisterInstallRoutes(p, h.S.Store, h.S)
 
 	// === 网络管理增强路由 ===
-	RegisterNetworkExtRoutes(p, h.S.Store, h.S)
+	RegisterNetworkExtRoutes(p, h.S.Store)
 
 	// === 告警管理增强路由 ===
 	RegisterAlertExtRoutes(p, h.S.Store)
@@ -569,48 +567,6 @@ func (h *Handler) CreateNetwork(c *gin.Context) {
 		return
 	}
 	h.S.Store.Audit(uid(c), pid(c), "network.create", fmt.Sprint(v.ID))
-	c.JSON(201, v)
-}
-
-// IPs 列出当前项目的 IP 地址分配记录。
-func (h *Handler) IPs(c *gin.Context) {
-	var v []model.IPAllocation
-	h.S.Store.DB.Where("project_id = ?", pid(c)).Find(&v)
-	c.JSON(200, v)
-}
-
-// CreateIP 校验地址属于项目网络及关联设备后创建分配记录。
-func (h *Handler) CreateIP(c *gin.Context) {
-	var v model.IPAllocation
-	if c.ShouldBindJSON(&v) != nil || v.Address == "" {
-		fail(c, 400, "invalid IP")
-		return
-	}
-	var network model.Network
-	if h.S.Store.DB.Where("project_id = ?", pid(c)).First(&network, v.NetworkID).Error != nil {
-		fail(c, 404, "network not found")
-		return
-	}
-	prefix, err := netip.ParsePrefix(network.CIDR)
-	address, addressErr := netip.ParseAddr(v.Address)
-	if err != nil || addressErr != nil || !prefix.Contains(address) {
-		fail(c, 400, "IP outside network")
-		return
-	}
-	if v.AssetID != 0 {
-		var asset model.Asset
-		if h.S.Store.DB.Where("project_id = ?", pid(c)).First(&asset, v.AssetID).Error != nil {
-			fail(c, 404, "asset not found")
-			return
-		}
-	}
-	v.ID = 0
-	v.ProjectID = pid(c)
-	if h.S.Store.DB.Create(&v).Error != nil {
-		fail(c, 409, "IP exists")
-		return
-	}
-	h.S.Store.Audit(uid(c), pid(c), "ip.allocate", v.Address)
 	c.JSON(201, v)
 }
 

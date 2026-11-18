@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 角色权限管理页面 — 只读展示角色与权限分配矩阵
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   NButton,
   NDataTable,
@@ -25,7 +25,7 @@ const loading = ref(false)
 const expandedRoles = ref<Set<string>>(new Set())
 
 // === 权限分组定义（按资源分组）===
-const permissionGroups = [
+const basePermissionGroups = [
   { label: '裸机资产', key: 'assets', permissions: ['assets:read', 'assets:write', 'assets:operate'] },
   { label: 'BMC 操作', key: 'bmc', permissions: ['bmc:operate'] },
   { label: 'SOL 串口', key: 'sol', permissions: ['sol:access'] },
@@ -34,11 +34,17 @@ const permissionGroups = [
   { label: '监控告警', key: 'alerts', permissions: ['alerts:read', 'alerts:write', 'alerts:manage'] },
   { label: '网络管理', key: 'network', permissions: ['network:read', 'network:write'] },
   { label: '固件管理', key: 'firmware', permissions: ['firmware:read', 'firmware:write'] },
-  { label: '身份权限', key: 'iam', permissions: ['iam:read', 'iam:write'] },
+  { label: '身份权限', key: 'iam', permissions: ['iam:read', 'iam:write', 'iam:manage'] },
   { label: '审计日志', key: 'audit', permissions: ['audit:read'] },
   { label: '系统设置', key: 'settings', permissions: ['settings:read', 'settings:write'] },
   { label: '项目管理', key: 'projects', permissions: ['projects:read', 'projects:write'] }
 ]
+
+const permissionGroups = computed(() => {
+  const known = new Set(basePermissionGroups.flatMap(group => group.permissions))
+  const extra = [...new Set(items.value.flatMap(row => (row.permissions as string[]) || []))].filter(permission => !known.has(permission)).sort()
+  return [...basePermissionGroups, ...(extra.length ? [{label:'其他业务权限',key:'additional',permissions:extra}] : [])]
+})
 
 // === 表格列定义 ===
 const columns: DataTableColumns<RecordData> = [

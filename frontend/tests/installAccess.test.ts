@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { installAccessError, installAccessPayload, newInstallAccess } from '../src/utils/installAccess.ts'
+
+test('requires credentials and matching password, honors byte limit', () => {
+  const form = newInstallAccess()
+  assert.ok(installAccessError(form))
+  form.rootPassword = 'a-test-password'
+  assert.match(installAccessError(form), /不一致/)
+  form.confirmPassword = form.rootPassword
+  assert.equal(installAccessError(form), '')
+  form.rootPassword = form.confirmPassword = '密'.repeat(43)
+  assert.match(installAccessError(form), /128/)
+})
+test('disabled keys are never submitted and password is not trimmed', () => {
+  const form = { ...newInstallAccess(), rootPassword: ' password ', confirmPassword: ' password ', sshKeys: 'ssh-ed25519 AAAA stale' }
+  assert.equal(installAccessError(form), '')
+  assert.deepEqual(installAccessPayload(form).ssh_authorized_keys, [])
+  assert.equal(installAccessPayload(form).root_password, ' password ')
+  form.rootSSHLogin = 'prohibit-password'
+  assert.match(installAccessError(form), /需要至少一条/)
+})
+test('key-only access, per-line key handling and root SSH policy', () => {
+  const form = { ...newInstallAccess(), addSSHKeys: true, sshKeys: ' ssh-ed25519 AAAA one\r\n\nssh-rsa AQAB two ' }
+  assert.equal(installAccessPayload(form).ssh_authorized_keys.length, 2)
+  assert.equal(installAccessError(form), '')
+  form.rootSSHLogin = 'yes'
+  assert.match(installAccessError(form), /必须设置/)
+  form.rootSSHLogin = 'prohibit-password'
+  assert.equal(installAccessError(form), '')
+  form.sshKeys = '-----BEGIN OPENSSH PRIVATE KEY-----'
+  assert.match(installAccessError(form), /公钥格式无效/)
+})

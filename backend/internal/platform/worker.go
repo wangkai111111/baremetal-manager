@@ -24,6 +24,7 @@ type operation struct {
 }
 type outbox struct{ ID, OperationID int64 }
 type device struct {
+	Manufacturer, Model, MACAddress                  string
 	ID                                               int64
 	BMCAddress, BMCUser, BMCSecretKeyID, BMCProtocol string
 	BMCSecretCiphertext                              []byte
@@ -63,7 +64,7 @@ func (a *App) batchActions(c *gin.Context) {
 	}
 	results := make([]gin.H, 0, len(in.AssetIDs))
 	for _, id := range in.AssetIDs {
-		op, err := a.store.enqueue(c.Request.Context(), contextScope(c), id, kind, fmt.Sprintf("%s-%d", key, id))
+		op, err := a.store.enqueue(c.Request.Context(), contextScope(c), id, kind, fmt.Sprintf("%s-%d", key, id), requestMeta(c, contextScope(c).User))
 		if err != nil {
 			results = append(results, gin.H{"asset_id": id, "status": "failed", "reason": "资产不存在、无权访问或已有冲突操作"})
 			continue
@@ -124,6 +125,7 @@ type collectionDTO struct {
 }
 
 type collectionRow struct {
+	Manufacturer, Model, MACAddress     string
 	BMCProtocol                         string
 	RedfishSnapshot                     json.RawMessage
 	CollectedAt                         *time.Time
@@ -135,6 +137,9 @@ type collectionRow struct {
 }
 
 func collectionSummary(row collectionRow) collectionDTO {
+	if isTestVMIdentity(row.Manufacturer, row.Model, row.MACAddress) {
+		return collectionDTO{Status: "unsupported", Health: "unknown", CollectionError: "测试 VM 不提供 BMC 硬件采集，请使用 PXE 实验室"}
+	}
 	dto := collectionDTO{Supported: row.BMCProtocol == "redfish", Status: "not_collected", Health: row.MonitorHealth, ConsecutiveFailures: row.MonitorConsecutiveFailures, LastAttemptAt: row.MonitorLastAttemptAt, MonitoringEnabled: row.MonitoringEnabled}
 	if dto.Health == "" {
 		dto.Health = "unknown"
@@ -147,7 +152,7 @@ func collectionSummary(row collectionRow) collectionDTO {
 	}
 	if row.CollectionError != "" {
 		dto.Status = "failed"
-		dto.CollectionError = "硬件采集失败，请检查 BMC 配置、连接及任务状态"
+		dto.CollectionError = "硬件采集失败，请检查 BMC 配置和连接"
 	}
 	s, err := parseComputerSystemSummary(row.RedfishSnapshot)
 	if err != nil {
@@ -173,7 +178,7 @@ func collectionSummary(row collectionRow) collectionDTO {
 func (a *App) collection(c *gin.Context) {
 	var row collectionRow
 	if err := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "assets"}, contextScope(c)).
-		Select(`bmc_protocol,redfish_snapshot,collected_at,collection_error,monitor_health,monitor_consecutive_failures,monitor_last_attempt_at,monitor_next_at,
+		Select(`manufacturer,model,mac_address,bmc_protocol,redfish_snapshot,collected_at,collection_error,monitor_health,monitor_consecutive_failures,monitor_last_attempt_at,monitor_next_at,
 		bmc_protocol='redfish' AND status<>'retired' AND NOT EXISTS (SELECT 1 FROM asset_monitor_configs mc WHERE mc.tenant_id=assets.tenant_id AND mc.project_id=assets.project_id AND mc.asset_id=assets.id AND mc.deleted_at IS NULL AND NOT mc.enabled) AS monitoring_enabled`).Where("id=?", number(c.Param("id"))).Take(&row).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			fail(c, 404, "asset not found")
@@ -183,21 +188,42 @@ func (a *App) collection(c *gin.Context) {
 		return
 	}
 	dto := collectionSummary(row)
-	var latest operation
-	err := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "operations"}, contextScope(c)).
-		Select("id,status").Where("asset_id=? AND kind='collect' AND status<>'cancelled'", number(c.Param("id"))).Order("id DESC").Take(&latest).Error
+	if isTestVMIdentity(row.Manufacturer, row.Model, row.MACAddress) {
+		ok(c, dto)
+		return
+	}
+	// The asset was authorized above. Read internal work here only to report current
+	// collection progress; automatic queue IDs are never exposed as task links.
+	var latest struct {
+		ID        int64
+		Status    string
+		Automatic bool
+		CreatedAt time.Time
+	}
+	err := a.store.db.WithContext(c.Request.Context()).Table("operations").Select("id,status,automatic,created_at").
+		Where("tenant_id=? AND project_id=? AND asset_id=? AND deleted_at IS NULL AND kind='collect' AND status<>'cancelled'", contextScope(c).Tenant, contextScope(c).Project, number(c.Param("id"))).
+		Order("id DESC").Take(&latest).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		fail(c, 500, "collection summary unavailable")
 		return
 	}
 	if err == nil {
-		dto.OperationID = latest.ID
-		// A legacy empty snapshot must never be presented as successful collection.
-		if latest.Status != "succeeded" || dto.CollectedAt != nil {
-			dto.Status = latest.Status
+		if !latest.Automatic {
+			dto.OperationID = latest.ID
 		}
-		if latest.Status == "failed" || latest.Status == "unknown" {
-			dto.CollectionError = "硬件采集失败或结果未确认，请检查 BMC 配置、连接及任务状态"
+		// Old manual failures must not override a more recent automatic snapshot.
+		active := latest.Status == "pending" || latest.Status == "running" || latest.Status == "retry_wait"
+		resultAt := row.MonitorLastAttemptAt
+		if row.CollectedAt != nil && (resultAt == nil || row.CollectedAt.After(*resultAt)) {
+			resultAt = row.CollectedAt
+		}
+		if active || resultAt == nil || latest.CreatedAt.After(*resultAt) {
+			if latest.Status != "succeeded" || dto.CollectedAt != nil {
+				dto.Status = latest.Status
+			}
+			if latest.Status == "failed" || latest.Status == "unknown" {
+				dto.CollectionError = "硬件采集失败或结果未确认，请检查 BMC 配置和连接"
+			}
 		}
 	}
 	ok(c, dto)
@@ -228,6 +254,7 @@ func collectionAssetUpdates(snapshot json.RawMessage) (map[string]any, error) {
 }
 
 var errCollectionUnsupported = errors.New("hardware collection requires Redfish protocol")
+var errAutomaticCollectionBusy = errors.New("后台正在自动采集，请等待本次完成后再手动采集")
 
 func (a *App) collect(c *gin.Context) { a.submit(c, "collect", c.GetHeader("Idempotency-Key")) }
 func (a *App) submit(c *gin.Context, kind, key string) {
@@ -241,8 +268,16 @@ func (a *App) submit(c *gin.Context, kind, key string) {
 		fail(c, 400, "idempotency key too long")
 		return
 	}
-	op, e := a.store.enqueue(c.Request.Context(), contextScope(c), number(c.Param("id")), kind, key)
+	op, e := a.store.enqueue(c.Request.Context(), contextScope(c), number(c.Param("id")), kind, key, requestMeta(c, contextScope(c).User))
 	if e != nil {
+		if errors.Is(e, errTestVMLabRequired) {
+			fail(c, 422, e.Error())
+			return
+		}
+		if errors.Is(e, errAutomaticCollectionBusy) {
+			fail(c, 409, e.Error())
+			return
+		}
 		if errors.Is(e, errCollectionUnsupported) {
 			fail(c, 422, "IPMI 暂不支持硬件采集，请使用 Redfish；电源操作不受影响")
 			return
@@ -252,15 +287,18 @@ func (a *App) submit(c *gin.Context, kind, key string) {
 	}
 	c.JSON(202, gin.H{"code": 0, "data": gin.H{"id": op.ID, "status": op.Status, "kind": op.Kind}, "message": "accepted"})
 }
-func (s *store) enqueue(ctx context.Context, sc scope, asset int64, kind, key string) (operation, error) {
+func (s *store) enqueue(ctx context.Context, sc scope, asset int64, kind, key string, meta auditMeta) (operation, error) {
 	var op operation
 	e := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := lockScope(tx, sc); e != nil {
 			return e
 		}
 		var d device
-		if e := queryScope(tx, resource{table: "assets"}, sc).Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND project_id=? AND id=? AND status<>'retired' AND COALESCE(subscription_state, 'legacy') <> 'reclaim_pending'", sc.Tenant, sc.Project, asset).Take(&d).Error; e != nil {
+		if e := queryScope(tx, resource{table: "assets"}, sc).Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND project_id=? AND id=? AND status<>'retired'", sc.Tenant, sc.Project, asset).Take(&d).Error; e != nil {
 			return e
+		}
+		if isTestVMIdentity(d.Manufacturer, d.Model, d.MACAddress) {
+			return errTestVMLabRequired
 		}
 		if kind == "collect" && d.BMCProtocol != "redfish" {
 			return errCollectionUnsupported
@@ -278,6 +316,9 @@ func (s *store) enqueue(ctx context.Context, sc scope, asset int64, kind, key st
 		if kind == "collect" {
 			e = tx.Table("operations").Where("tenant_id=? AND project_id=? AND asset_id=? AND deleted_at IS NULL AND kind='collect' AND status IN ('pending','running','retry_wait')", sc.Tenant, sc.Project, asset).Order("id").Take(&op).Error
 			if e == nil {
+				if op.Automatic {
+					return errAutomaticCollectionBusy
+				}
 				return nil
 			}
 			if !errors.Is(e, gorm.ErrRecordNotFound) {
@@ -293,6 +334,9 @@ func (s *store) enqueue(ctx context.Context, sc scope, asset int64, kind, key st
 			timeout = 100
 		}
 		row := map[string]any{"tenant_id": sc.Tenant, "project_id": sc.Project, "asset_id": asset, "user_id": sc.User, "kind": kind, "idempotency_key": key, "status": "pending", "max_attempts": 1, "timeout_seconds": timeout}
+		if meta.ClientIP != "" {
+			row["client_ip"] = meta.ClientIP
+		}
 		if e = tx.Table("operations").Clauses(clause.Returning{Columns: []clause.Column{{Name: "id"}}}).Create(&row).Error; e != nil {
 			return e
 		}
@@ -309,12 +353,30 @@ func (a *App) Worker(ctx context.Context) {
 	defer ticker.Stop()
 	slots := make(chan struct{}, 4)
 	notificationSlots := make(chan struct{}, 4)
+	installationSlots := make(chan struct{}, 1)
+	lastInstallCheck := time.Time{}
 	imageSlots := make(chan struct{}, 1)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if time.Since(lastInstallCheck) >= 5*time.Second {
+				select {
+				case installationSlots <- struct{}{}:
+					lastInstallCheck = time.Now()
+					go func() {
+						defer func() { <-installationSlots }()
+						if err := a.resumeInstallDiskBoots(ctx); err != nil && ctx.Err() == nil {
+							log.Print("installation disk boot reconciliation failed")
+						}
+						if err := a.expireInstallations(ctx); err != nil && ctx.Err() == nil {
+							log.Print("installation deadline check failed")
+						}
+					}()
+				default:
+				}
+			}
 			select {
 			case imageSlots <- struct{}{}:
 				go func() { defer func() { <-imageSlots }(); a.pollImageDownload(ctx) }()
@@ -346,18 +408,13 @@ func (a *App) claim(ctx context.Context) (operation, outbox, error) {
 		if event.ID == 0 {
 			return gorm.ErrRecordNotFound
 		}
-		var assetState struct{ SubscriptionState string }
-		if e = tx.Raw("SELECT a.subscription_state FROM assets a JOIN operations o ON o.asset_id=a.id WHERE o.id=? FOR UPDATE OF a", event.OperationID).Scan(&assetState).Error; e != nil {
+		// Keep the asset locked before the operation, matching submission/deletion lock order.
+		var assetID int64
+		if e = tx.Raw("SELECT a.id FROM assets a JOIN operations o ON o.asset_id=a.id AND o.tenant_id=a.tenant_id AND o.project_id=a.project_id WHERE o.id=? FOR UPDATE OF a", event.OperationID).Scan(&assetID).Error; e != nil {
 			return e
 		}
 		if e = tx.Table("operations").Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", event.OperationID).Take(&op).Error; e != nil {
 			return e
-		}
-		if assetState.SubscriptionState == "reclaim_pending" && op.Kind != "power_off" && op.Status == "pending" {
-			if e = tx.Table("operations").Where("id=?", op.ID).Update("status", "cancelled").Error; e != nil {
-				return e
-			}
-			op.Status = "cancelled"
 		}
 		// 过期 claim 说明先前执行结果不明；任何动作都不自动重放。
 		if op.Status != "pending" {
@@ -370,18 +427,25 @@ func (a *App) claim(ctx context.Context) (operation, outbox, error) {
 						return e
 					}
 				}
-				if e = operationLog(tx, op, 2, "warning", "claim expired; execution was not retried"); e != nil {
+				var sequence int
+				if e = tx.Table("operation_logs").Select("COALESCE(MAX(sequence),0)+1").Where("operation_id=?", op.ID).Scan(&sequence).Error; e != nil {
+					return e
+				}
+				if e = operationLog(tx, op, sequence, "warning", "claim expired; execution was not retried"); e != nil {
 					return e
 				}
 			}
 			if e = tx.Table("task_outbox").Where("id=?", event.ID).Updates(map[string]any{"status": "published", "published_at": time.Now(), "locked_until": nil}).Error; e != nil {
 				return e
 			}
+			if e = discardAutomaticCollection(tx, op); e != nil {
+				return e
+			}
 			event.ID = 0
 			return nil
 		}
 		var lease struct{ ID int64 }
-		e = tx.Raw("INSERT INTO device_leases (tenant_id,project_id,asset_id,operation_id,holder_id,expires_at) VALUES (?,?,?,?,?,now()+interval '120 seconds') ON CONFLICT (tenant_id,project_id,asset_id) DO UPDATE SET operation_id=EXCLUDED.operation_id,holder_id=EXCLUDED.holder_id,fencing_token=device_leases.fencing_token+1,heartbeat_at=now(),expires_at=EXCLUDED.expires_at,deleted_at=NULL WHERE device_leases.expires_at<now() RETURNING id", op.TenantID, op.ProjectID, op.AssetID, op.ID, a.node).Scan(&lease).Error
+		e = tx.Raw("INSERT INTO device_leases (tenant_id,project_id,asset_id,operation_id,holder_id,expires_at) VALUES (?,?,?,?,?,now()+interval '120 seconds') ON CONFLICT (tenant_id,project_id,asset_id) DO UPDATE SET operation_id=EXCLUDED.operation_id,holder_id=EXCLUDED.holder_id,fencing_token=device_leases.fencing_token+1,heartbeat_at=now(),expires_at=EXCLUDED.expires_at,deleted_at=NULL WHERE device_leases.expires_at<=now() RETURNING id", op.TenantID, op.ProjectID, op.AssetID, op.ID, a.node).Scan(&lease).Error
 		if e != nil {
 			return e
 		}
@@ -396,16 +460,25 @@ func (a *App) claim(ctx context.Context) (operation, outbox, error) {
 		}
 		op.Status = "running"
 		op.WorkerID = a.node
-		return operationLog(tx, op, 1, "info", "device operation started")
+		if err := operationLog(tx, op, 1, "info", "device operation started"); err != nil {
+			return err
+		}
+		if op.Kind == "install" {
+			return recordInstallStep(tx, op, "prepare", "执行器已领取任务，检查真实安装介质并生成加密应答文件")
+		}
+		return nil
 	})
 	return op, event, e
 }
 func operationLog(tx *gorm.DB, op operation, sequence int, level, message string) error {
+	if op.Automatic && op.Kind == "collect" {
+		return nil
+	}
 	return tx.Table("operation_logs").Create(map[string]any{"tenant_id": op.TenantID, "project_id": op.ProjectID, "operation_id": op.ID, "sequence": sequence, "level": level, "message": message}).Error
 }
 func (a *App) loadDevice(ctx context.Context, sc scope, id int64) (model.Asset, device, error) {
 	var d device
-	e := queryScope(a.store.db.WithContext(ctx), resource{table: "assets"}, sc).Select("id,host(bmc_address) AS bmc_address,bmc_user,bmc_secret_ciphertext,bmc_secret_key_id,bmc_port,bmc_protocol,bmc_tls_verify").Where("id=? AND status<>'retired'", id).Take(&d).Error
+	e := queryScope(a.store.db.WithContext(ctx), resource{table: "assets"}, sc).Select("id,manufacturer,model,mac_address,host(bmc_address) AS bmc_address,bmc_user,bmc_secret_ciphertext,bmc_secret_key_id,bmc_port,bmc_protocol,bmc_tls_verify").Where("id=? AND status<>'retired'", id).Take(&d).Error
 	if e != nil {
 		return model.Asset{}, d, e
 	}
@@ -429,6 +502,10 @@ func (a *App) runOne(parent context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
+	if op.Kind == "install" {
+		a.runInstallation(ctx, op, event)
+		return
+	}
 	sc := scope{Tenant: op.TenantID, Project: op.ProjectID, Admin: true}
 	var asset model.Asset
 	var d device
@@ -509,7 +586,10 @@ func (a *App) runOne(parent context.Context) {
 		if e := tx.Table("task_outbox").Where("id=? AND status='publishing'", event.ID).Updates(map[string]any{"status": "published", "published_at": time.Now(), "locked_until": nil}).Error; e != nil {
 			return e
 		}
-		return tx.Table("device_leases").Where("id=? AND holder_id=?", lease, a.node).Updates(map[string]any{"heartbeat_at": time.Now().Add(-time.Second), "expires_at": time.Now()}).Error
+		if err := tx.Table("device_leases").Where("id=? AND holder_id=?", lease, a.node).Updates(map[string]any{"heartbeat_at": gorm.Expr("now()-interval '1 second'"), "expires_at": gorm.Expr("now()")}).Error; err != nil {
+			return err
+		}
+		return discardAutomaticCollection(tx, op)
 	})
 	if finishErr != nil {
 		log.Printf("operation finalization failed: operation_id=%d asset_id=%d tenant_id=%d project_id=%d; database or lease failure", op.ID, op.AssetID, op.TenantID, op.ProjectID)

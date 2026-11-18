@@ -5,7 +5,8 @@ import { NButton, NModal, NInput, useMessage } from 'naive-ui'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { api, unwrap, errorText } from '../api'
+import { isTestVM } from '../utils/testVM'
+import { api, unwrap, errorText, resource, type RecordData } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -117,6 +118,13 @@ async function connectSocket() {
   reconnecting.value = true
 
   try {
+    const asset = unwrap<RecordData>(await resource.get('/assets', String(route.params.id)))
+    if (isTestVM(asset)) {
+      state.value = '测试 VM 请使用 PXE 实验室查看串口日志'
+      reconnecting.value = false
+      await router.replace(`/assets/${route.params.id}`)
+      return
+    }
     const ticket = unwrap<{ url: string }>(await api.post(`/assets/${encodeURIComponent(String(route.params.id))}/sol-ticket`))
     if (disposed) return
     const url = new URL(ticket.url, location.origin)

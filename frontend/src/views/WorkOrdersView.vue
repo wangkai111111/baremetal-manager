@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 工单工作台 — 自用 / 运营两种模式通用（后端 /work-orders 无模式门禁）
 // 契约：GET/POST /work-orders、GET/PUT /work-orders/:id、PUT /work-orders/:id/:transition
-// 指派（assigned_to 写入）与回复依赖后端尚未提供的端点，属任务 9，本视图仅只读展示处理人。
+// 指派与回复使用已注册的协作端点。
 import { computed, h, ref, watch } from 'vue'
 import {
   NButton,
@@ -17,6 +17,7 @@ import {
 import type { DataTableColumns, SelectOption } from 'naive-ui'
 import dayjs from 'dayjs'
 import {
+  api, rows, type RecordData,
   errorText,
   paged,
   unwrap,
@@ -144,7 +145,6 @@ async function load() {
   }
 }
 
-watch(() => auth.projectId, () => { page.value = 1; load() }, { immediate: true })
 watch([page, statusFilter, typeFilter, priorityFilter, scope], () => load())
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 watch(search, () => {
@@ -214,13 +214,75 @@ async function submitCreate() {
 const drawerVisible = ref(false)
 const current = ref<WorkOrderRecord | null>(null)
 const detailLoading = ref(false)
+const messages = ref<RecordData[]>([])
+const messageTotal = ref(0)
+const reply = ref('')
+const collaborationBusy = ref(false)
+const assigneeId = ref<number | null>(null)
+const assigneeOptions = ref<{label:string;value:number}[]>([])
+
+watch(() => auth.projectId, () => {
+  drawerVisible.value = false
+  current.value = null
+  messages.value = []
+  reply.value = ''
+  page.value = 1
+  load()
+}, { immediate: true })
+
+async function loadMessages(id: number, append = false) {
+  const result = rows(await api.get(`/work-orders/${id}/messages`, { params: { page: append ? Math.floor(messages.value.length / 50) + 1 : 1, page_size: 50 } }))
+  if (current.value?.id !== id) return
+  messages.value = append ? [...messages.value, ...result.items] : result.items
+  messageTotal.value = result.total
+}
+
+async function assign() {
+  if (!current.value || collaborationBusy.value) return
+  const id = current.value.id
+  collaborationBusy.value = true
+  try {
+    await api.put(`/work-orders/${id}/assign`, { assigned_to: assigneeId.value || 0 })
+    message.success('处理人已更新')
+    await load()
+    await loadMessages(id)
+  } catch (e) { message.error(errorText(e)) }
+  finally { collaborationBusy.value = false }
+}
+
+async function sendReply() {
+  if (!current.value || !reply.value.trim() || collaborationBusy.value) return
+  const id = current.value.id
+  collaborationBusy.value = true
+  try {
+    await api.post(`/work-orders/${id}/messages`, { content: reply.value.trim() })
+    reply.value = ''
+    await loadMessages(id)
+    message.success('回复已发送')
+  } catch (e) { message.error(errorText(e)) }
+  finally { collaborationBusy.value = false }
+}
 
 async function openDetail(row: WorkOrderRecord) {
   current.value = row
+  messages.value = []
+  messageTotal.value = 0
+  reply.value = ''
+  assigneeId.value = row.assigned_to || null
+  assigneeOptions.value = []
   drawerVisible.value = true
   detailLoading.value = true
   try {
-    current.value = unwrap<WorkOrderRecord>(await workOrderApi.get(row.id))
+    const result = unwrap<WorkOrderRecord>(await workOrderApi.get(row.id))
+    if (current.value?.id !== row.id) return
+    current.value = result
+    assigneeId.value = result.assigned_to || null
+    if (isStaff.value && auth.can('iam:read')) {
+      const users = rows(await api.get(`/projects/${auth.projectId}/users`, { params: { page_size: 200 } })).items
+      if (current.value?.id !== row.id) return
+      assigneeOptions.value = users.filter(u => u.status === 'active').map(u => ({ label: String(u.name || u.username || u.id), value: Number(u.id) }))
+    }
+    await loadMessages(row.id)
   } catch (e) {
     // 详情不可读时退回列表数据，仍允许基于列表状态进行流转
     message.warning(errorText(e))
@@ -236,7 +298,7 @@ function transitionBlock(row: WorkOrderRecord, target: WorkOrderTransition): str
   if (!canWrite.value) return '缺少 work_orders:write 权限'
   if (!isStaff.value && (target === 'in_progress' || target === 'resolved')) {
     const assignee = String(row.assigned_to ?? '')
-    if (!assignee) return '尚未指派处理人，指派能力待后端提供'
+    if (!assignee) return '尚未指派处理人，请联系管理员或客服'
     if (assignee !== viewerId.value) return '仅被指派的处理人可执行该流转'
   }
   return null
@@ -273,8 +335,8 @@ const timeline = computed(() => {
   return [
     { label: '已提交', detail: `提交人 #${row.user_id}`, at: row.created_at ?? null, done: true },
     { label: '开始处理', detail: row.assigned_to ? `处理人 #${row.assigned_to}` : '等待指派处理人', at: null as string | null, done: rank >= 1 },
-    { label: '已解决', detail: '解决方案待客服回填', at: row.resolved_at ?? null, done: !!row.resolved_at },
-    { label: '已关闭', detail: '提交人确认或超时关闭', at: row.closed_at ?? null, done: !!row.closed_at }
+    { label: '已解决', detail: '解决方案记录在回复中', at: row.resolved_at ?? null, done: !!row.resolved_at },
+    { label: '已关闭', detail: '由有权限的用户关闭', at: row.closed_at ?? null, done: !!row.closed_at }
   ]
 })
 
@@ -387,7 +449,7 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
       >
         <span class="lane-rank">0{{ lane.rank + 1 }}</span>
         <strong>{{ lane.label }}</strong>
-        <em>{{ laneCounts[lane.key] }} 条</em>
+        <em>本页 {{ laneCounts[lane.key] }} 条</em>
       </button>
       <div class="lane-sum">
         <span>合计</span>
@@ -439,7 +501,7 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
     </div>
 
     <!-- 详情抽屉 -->
-    <n-drawer v-model:show="drawerVisible" :width="460" placement="right">
+    <n-drawer v-model:show="drawerVisible" :width="'min(460px, 100vw)'" placement="right">
       <n-drawer-content :title="current ? `工单 #${current.id}` : '工单详情'" closable>
         <div v-if="current" class="wo-detail" :class="`wo-detail--${current.priority}`">
           <div class="detail-head">
@@ -471,11 +533,26 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
                 </div>
               </li>
             </ol>
-            <p class="detail-note">
-              处理人当前为只读展示：指派与回复接口尚未由后端提供，完成后无法在此填写解决方案。
-            </p>
+            <div v-if="isStaff && canWrite && current.status !== 'closed'" class="collaboration-controls">
+              <n-select v-model:value="assigneeId" :options="assigneeOptions" placeholder="选择处理人" clearable filterable />
+              <n-button :loading="collaborationBusy" @click="assign">{{ assigneeId ? '指派处理人' : '取消指派' }}</n-button>
+            </div>
           </section>
 
+          <section class="detail-block">
+            <h3>沟通与解决方案</h3>
+            <p v-if="!messages.length" class="detail-note">暂无回复</p>
+            <article v-for="entry in messages" :key="String(entry.id)" class="reply-entry">
+              <strong>{{ entry.author_name || entry.author_username || `用户 #${entry.user_id}` }} · {{ entry.is_support ? '处理方' : '提交方' }}</strong>
+              <p class="detail-desc">{{ entry.content }}</p>
+              <time>{{ stamp(String(entry.created_at)) }}</time>
+            </article>
+            <n-button v-if="messages.length < messageTotal" @click="loadMessages(current.id, true)">加载更多回复</n-button>
+            <div v-if="canWrite" class="collaboration-controls">
+              <n-input v-model:value="reply" type="textarea" placeholder="填写回复或解决方案" :maxlength="2000" :autosize="{minRows: 3}" />
+              <n-button type="primary" :disabled="!reply.trim()" :loading="collaborationBusy" @click="sendReply">发送回复</n-button>
+            </div>
+          </section>
           <section class="detail-block detail-meta">
             <div><span>提交人</span><strong>#{{ current.user_id }}</strong></div>
             <div><span>处理人</span><strong>{{ current.assigned_to ? `#${current.assigned_to}` : '未指派' }}</strong></div>
@@ -507,7 +584,7 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
     </n-drawer>
 
     <!-- 提交工单 -->
-    <n-modal v-model:show="createVisible" preset="card" title="提交工单" :style="{ width: '560px' }">
+    <n-modal v-model:show="createVisible" preset="card" title="提交工单" :style="{ width: 'min(560px, 94vw)' }">
       <div class="form-grid">
         <label class="form-item">
           <span>工单类型</span>
@@ -531,7 +608,7 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
           />
         </label>
         <p class="form-item form-note">
-          工单创建后状态为「待受理」。普通用户需等待客服受理后才能推进状态，处理人指派能力待后端提供。
+          工单创建后状态为「待受理」。管理员或客服可在详情中指派处理人，双方可以追加回复和解决方案。
         </p>
         <ul v-if="createErrors.length" class="form-errors">
           <li v-for="item in createErrors" :key="item">{{ item }}</li>
@@ -546,6 +623,10 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
 </template>
 
 <style scoped>
+.collaboration-controls { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.reply-entry { padding: 12px 0; border-bottom: 1px solid var(--color-border); }
+.reply-entry strong, .reply-entry time { font-size: 12px; color: var(--color-text-secondary); }
+
 .wo-page {
   display: flex;
   flex-direction: column;

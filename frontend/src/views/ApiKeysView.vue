@@ -17,6 +17,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { h } from 'vue'
+import dayjs from 'dayjs'
 import { errorText, resource, rows, type RecordData, unwrap } from '../api'
 import { useAuth } from '../stores/auth'
 
@@ -81,8 +82,8 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
       )
     }
   },
-  { title: '过期时间', key: 'expires_at', minWidth: 150, render: (row: RecordData) => String(row.expires_at || '永不过期') },
-  { title: '最后使用', key: 'last_used_at', minWidth: 150, render: (row: RecordData) => String(row.last_used_at || '从未使用') },
+  { title: '过期时间', key: 'expires_at', minWidth: 150, render: (row: RecordData) => row.expires_at ? dayjs(String(row.expires_at)).format('YYYY-MM-DD HH:mm') : '永不过期' },
+  { title: '最后使用', key: 'last_used_at', minWidth: 150, render: (row: RecordData) => row.last_used_at ? dayjs(String(row.last_used_at)).format('YYYY-MM-DD HH:mm') : '从未使用' },
   {
     title: '状态',
     key: 'status',
@@ -92,11 +93,11 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
       return h(
         NTag,
         { size: 'small', bordered: false, type: status === 'active' ? 'success' : 'default' },
-        { default: () => status === 'active' ? '有效' : '已吊销' }
+        { default: () => ({active:'有效',expired:'已过期',revoked:'已吊销'} as Record<string,string>)[status] || status }
       )
     }
   },
-  { title: '创建时间', key: 'created_at', minWidth: 150 },
+  { title: '创建时间', key: 'created_at', minWidth: 150, render:(row:RecordData)=>row.created_at ? dayjs(String(row.created_at)).format('YYYY-MM-DD HH:mm') : '—' },
   ...(canWrite.value
     ? [
         {

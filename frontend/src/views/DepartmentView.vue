@@ -30,6 +30,7 @@ import {
   unwrap,
   type RecordData
 } from '../api'
+import { assetIsOnline } from '../utils/departments'
 import { useAuth } from '../stores/auth'
 
 const router = useRouter()
@@ -44,6 +45,8 @@ const assets = ref<RecordData[]>([])
 const assetTotal = ref(0)
 const datacenterNames = ref<Record<string, string>>({})
 const loading = ref(false)
+let contextEpoch = 0
+let statsSequence = 0
 
 const selectedKeys = ref<string[]>([])
 const expandedKeys = ref<string[]>([])
@@ -79,6 +82,7 @@ const assignChecked = ref<DataTableRowKey[]>([])
 
 const canWriteDept = computed(() => auth.can('departments:write'))
 const canAssign = computed(() => auth.can('assets:write'))
+const canUnassign = computed(() => canAssign.value && (auth.user?.is_platform_admin === true || auth.user?.can_manage_organization === true))
 
 // ============================================================
 // 部门索引（扁平化 + 父子关系）
@@ -170,8 +174,8 @@ const currentAssets = computed<RecordData[]>(() => {
   return assets.value.filter(a => a.department_id != null && ids.has(String(a.department_id)))
 })
 
-// 与后端统计口径保持一致：status 为 online 视为在线
-const isOnline = (asset: RecordData) => String(asset.status ?? '') === 'online'
+// 在线表示实际电源开启，与服务器电源状态及后端统计一致。
+const isOnline = assetIsOnline
 
 const metrics = computed(() => {
   const localCount = assetsByDept.value.get(currentId.value)?.length ?? 0
@@ -184,7 +188,7 @@ const metrics = computed(() => {
       onlineCount: localOnline,
       offlineCount: currentAssets.value.length - localOnline,
       subDeptCount,
-      scope: '含子部门（本地统计）'
+      scope: '包含子部门'
     }
   }
   const assetCount = stats.value ? Number(stats.value.asset_count ?? localCount) : localCount
@@ -196,7 +200,7 @@ const metrics = computed(() => {
     onlineCount,
     offlineCount: backendOffline ?? Math.max(assetCount - onlineCount, 0),
     subDeptCount: stats.value ? Number(stats.value.sub_dept_count ?? subDeptCount) : subDeptCount,
-    scope: '仅本部门（后端统计）'
+    scope: '仅本部门'
   }
 })
 
@@ -277,7 +281,7 @@ function renderTreeSuffix({ option }: { option: TreeOption }) {
   if (!canWriteDept.value && !canAssign.value) return null
   const id = String(option.key ?? '')
   const node = deptIndex.value.get(id)
-  if (!node) return null
+  if (!node || node.raw.can_manage !== true) return null
   return h('div', {
     class: 'dept-tree-actions',
     onClick: (event: MouseEvent) => event.stopPropagation()
@@ -321,31 +325,34 @@ function onTreeSelect(keys: Array<string | number>) {
 // ============================================================
 // 数据加载
 // ============================================================
-async function loadDepartments() {
+async function loadDepartments(epoch = contextEpoch) {
   const data = unwrap<RecordData[]>(await departmentApi.list('/departments'))
+  if (epoch !== contextEpoch) return
   treeRaw.value = Array.isArray(data) ? data : []
   // 默认展开全部含子节点的部门，便于浏览
   expandedKeys.value = flatDepts.value.filter(d => d.childIds.length).map(d => d.id)
   if (currentId.value && !deptIndex.value.has(currentId.value)) selectedKeys.value = []
 }
 
-async function loadAssets() {
+async function loadAssets(epoch = contextEpoch) {
   const collected: RecordData[] = []
   let page = 1
   for (;;) {
     const result = rows(await departmentApi.list('/assets', { page, page_size: 200 }))
+    if (epoch !== contextEpoch) return
     collected.push(...result.items)
     assetTotal.value = result.total
-    if (collected.length >= result.total || page >= 5) break
+    if (collected.length >= result.total || result.items.length === 0) break
     page += 1
   }
   assets.value = collected
 }
 
-async function loadDatacenters() {
+async function loadDatacenters(epoch = contextEpoch) {
   if (!auth.can('datacenters:read')) return
   try {
     const result = rows(await departmentApi.list('/datacenters', { page: 1, page_size: 200 }))
+    if (epoch !== contextEpoch) return
     const map: Record<string, string> = {}
     for (const item of result.items) map[String(item.id)] = String(item.name ?? '')
     datacenterNames.value = map
@@ -355,31 +362,34 @@ async function loadDatacenters() {
 }
 
 async function loadStats() {
-  if (!currentId.value) {
-    stats.value = null
-    return
-  }
-  statsLoading.value = true
+  const id = currentId.value
+  const epoch = contextEpoch
+  const sequence = ++statsSequence
+  stats.value = null
+  statsLoading.value = !!id
+  if (!id) return
+  const active = () => sequence === statsSequence && epoch === contextEpoch && id === currentId.value
   try {
-    stats.value = unwrap<RecordData>(await departmentStats(currentId.value))
+    const result = unwrap<RecordData>(await departmentStats(id))
+    if (active()) stats.value = result
   } catch {
-    // 统计接口不可用时回退到本地资产列表统计
-    stats.value = null
+    if (active()) stats.value = null
   } finally {
-    statsLoading.value = false
+    if (active()) statsLoading.value = false
   }
 }
 
 async function loadAll() {
   if (!auth.projectId) return
+  const epoch = contextEpoch
   loading.value = true
   try {
-    await Promise.all([loadDepartments(), loadAssets(), loadDatacenters()])
-    await loadStats()
+    await Promise.all([loadDepartments(epoch), loadAssets(epoch), loadDatacenters(epoch)])
+    if (epoch === contextEpoch) await loadStats()
   } catch (e) {
-    message.error(errorText(e))
+    if (epoch === contextEpoch) message.error(errorText(e))
   } finally {
-    loading.value = false
+    if (epoch === contextEpoch) loading.value = false
   }
 }
 
@@ -420,7 +430,7 @@ async function save() {
   }
   saving.value = true
   try {
-    const parentId = Number(form.value.parent_id) || null
+    const parentId = Number(form.value.parent_id) || 0
     const payload: RecordData = { name, description: String(form.value.description ?? ''), parent_id: parentId }
     if (editingId.value) {
       await departmentApi.update('/departments', editingId.value, payload)
@@ -467,6 +477,7 @@ async function remove(row: RecordData) {
 const candidateAssets = computed(() => {
   const kw = assignSearch.value.trim().toLowerCase()
   return assets.value.filter(asset => {
+    if (asset.can_manage !== true) return false
     if (onlyUnassigned.value && asset.department_id != null && asset.department_id !== 0 && asset.department_id !== '') return false
     if (!kw) return true
     return [asset.name, asset.serial_number, asset.management_ip, asset.bmc_address]
@@ -475,6 +486,7 @@ const candidateAssets = computed(() => {
 })
 
 function openAssign() {
+  onlyUnassigned.value = canUnassign.value
   assignChecked.value = []
   assignSearch.value = ''
   assignModal.value = true
@@ -538,7 +550,7 @@ async function unassign(ids: DataTableRowKey[]) {
 }
 
 const deptAssetColumns = computed<DataTableColumns<RecordData>>(() => [
-  { type: 'selection', fixed: 'left', width: 40, disabled: () => !canAssign.value },
+  { type: 'selection', fixed: 'left', width: 40, disabled: (row: RecordData) => !canAssign.value || row.can_manage !== true },
   {
     title: '资产名称',
     key: 'name',
@@ -557,7 +569,7 @@ const deptAssetColumns = computed<DataTableColumns<RecordData>>(() => [
     render: row => h(NTag, { size: 'small', bordered: false, type: statusTagType(row.display_status ?? row.status) },
       { default: () => statusLabel(row.display_status ?? row.status) })
   },
-  ...(canAssign.value
+  ...(canUnassign.value
     ? [{
         title: '操作',
         key: 'actions',
@@ -570,7 +582,7 @@ const deptAssetColumns = computed<DataTableColumns<RecordData>>(() => [
 ])
 
 const assignColumns = computed<DataTableColumns<RecordData>>(() => [
-  { type: 'selection', fixed: 'left', width: 40 },
+  { type: 'selection', fixed: 'left', width: 40, disabled: (row: RecordData) => row.can_manage !== true },
   { title: '资产名称', key: 'name', minWidth: 140, ellipsis: { tooltip: true } },
   { title: '管理 IP', key: 'management_ip', minWidth: 120, render: row => mono(String(row.management_ip || '—')) },
   {
@@ -591,7 +603,17 @@ const assignColumns = computed<DataTableColumns<RecordData>>(() => [
 // ============================================================
 // 生命周期
 // ============================================================
-watch(() => auth.projectId, () => {
+watch([() => auth.projectId, () => auth.tenantId], () => {
+  contextEpoch++
+  statsSequence++
+  assets.value = []
+  assetTotal.value = 0
+  treeRaw.value = []
+  datacenterNames.value = {}
+  editing.value = false
+  assignModal.value = false
+  checkedDeptAssets.value = []
+  assignChecked.value = []
   selectedKeys.value = []
   stats.value = null
   void loadAll()
@@ -610,7 +632,7 @@ watch(currentId, () => { void loadStats() })
       </div>
       <div class="head-actions">
         <n-button quaternary @click="loadAll">刷新</n-button>
-        <n-button v-if="canWriteDept" type="primary" @click="openCreate()">+ 新建顶级部门</n-button>
+        <n-button v-if="canWriteDept && (auth.user?.is_platform_admin || auth.user?.can_manage_organization)" type="primary" @click="openCreate()">+ 新建顶级部门</n-button>
       </div>
     </div>
 
@@ -673,9 +695,9 @@ watch(currentId, () => { void loadStats() })
               <p>{{ String(currentDept.description || '暂无部门描述') }}</p>
             </div>
             <n-space class="dept-head-actions">
-              <n-button v-if="canWriteDept" size="small" @click="openEdit(currentDept)">编辑</n-button>
-              <n-button v-if="canWriteDept" size="small" @click="openCreate(currentId)">新建子部门</n-button>
-              <n-popconfirm v-if="canWriteDept" @positive-click="remove(currentDept)">
+              <n-button v-if="canWriteDept && currentDept.can_manage === true" size="small" @click="openEdit(currentDept)">编辑</n-button>
+              <n-button v-if="canWriteDept && currentDept.can_manage === true" size="small" @click="openCreate(currentId)">新建子部门</n-button>
+              <n-popconfirm v-if="canWriteDept && currentDept.can_manage === true" @positive-click="remove(currentDept)">
                 <template #trigger>
                   <n-button size="small" type="error" ghost>删除部门</n-button>
                 </template>
@@ -703,7 +725,7 @@ watch(currentId, () => { void loadStats() })
               <div class="metric-content">
                 <div class="metric-label">在线资产</div>
                 <div class="metric-value">{{ metrics.onlineCount }}</div>
-                <div class="metric-foot">在线率 {{ onlineRate }}%</div>
+                <div class="metric-foot">电源开启 · {{ onlineRate }}%</div>
               </div>
             </div>
             <div class="metric-card">
@@ -713,7 +735,7 @@ watch(currentId, () => { void loadStats() })
               <div class="metric-content">
                 <div class="metric-label">非在线资产</div>
                 <div class="metric-value">{{ metrics.offlineCount }}</div>
-                <div class="metric-foot">离线 / 维护 / 未知</div>
+                <div class="metric-foot">电源关闭 / 未知</div>
               </div>
             </div>
             <div class="metric-card">
@@ -785,7 +807,7 @@ watch(currentId, () => { void loadStats() })
               </div>
               <div class="toolbar-actions">
                 <n-button
-                  v-if="canAssign"
+                  v-if="canUnassign"
                   size="small"
                   type="error"
                   ghost
@@ -794,7 +816,7 @@ watch(currentId, () => { void loadStats() })
                 >
                   解除分配{{ checkedDeptAssets.length ? ` (${checkedDeptAssets.length})` : '' }}
                 </n-button>
-                <n-button v-if="canAssign" size="small" type="primary" @click="openAssign">
+                <n-button v-if="canAssign && currentDept.can_manage === true" size="small" type="primary" @click="openAssign">
                   分配资产到此部门
                 </n-button>
               </div>
@@ -941,7 +963,7 @@ watch(currentId, () => { void loadStats() })
   min-width: 0;
 }
 
-.dept-tree-label {
+:deep(.dept-tree-label) {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -949,7 +971,7 @@ watch(currentId, () => { void loadStats() })
   min-width: 0;
 }
 
-.dept-tree-name {
+:deep(.dept-tree-name) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -957,7 +979,7 @@ watch(currentId, () => { void loadStats() })
   color: var(--color-text-primary);
 }
 
-.dept-tree-count {
+:deep(.dept-tree-count) {
   flex-shrink: 0;
   font-size: 11px;
   padding: 1px 7px;
@@ -967,22 +989,15 @@ watch(currentId, () => { void loadStats() })
   font-variant-numeric: tabular-nums;
 }
 
-.dept-tree-count.has-asset {
+:deep(.dept-tree-count.has-asset) {
   background: var(--color-primary-light);
   color: var(--color-primary);
 }
 
-.dept-tree-actions {
+:deep(.dept-tree-actions) {
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-}
-
-.dept-tree-scroll :deep(.n-tree-node-content:hover) + .dept-tree-actions,
-.dept-tree-scroll :deep(.n-tree-treenode:hover) .dept-tree-actions {
-  opacity: 1;
 }
 
 /* === 右侧详情 === */

@@ -16,7 +16,6 @@ package platform
 //     落一批 quality='good' 的样本（温度 / 转速 / 功率 / 电压）。
 //     所以趋势接口对写入点上线之前的时间区间必然返回空点集，响应 note 会明确说明，
 //     不会用快照值或插值伪造历史。
-//   - 作用域沿用 queryScope：自用模式按租户+项目；运营模式非平台管理员按已交付订单资产隔离。
 //   - 传感器历史按保留期物理清理（默认 90 天，SENSOR_RETENTION_DAYS 可覆盖，0 表示关闭），
 //     这是唯一不走软删除约定的表：软删除标记本身会持续膨胀，且趋势查询仍需额外过滤。
 
@@ -164,24 +163,23 @@ func (a *App) purgeSensorHistory() {
 
 // dashboardTotals 是资源大盘的总量口径。
 type dashboardTotals struct {
-	Assets          int64   `json:"assets"`
-	PowerOn         int64   `json:"power_on"`
-	PowerOff        int64   `json:"power_off"`
-	PowerUnknown    int64   `json:"power_unknown"`
-	HealthOK        int64   `json:"health_ok"`
-	HealthWarning   int64   `json:"health_warning"`
-	HealthCritical  int64   `json:"health_critical"`
-	HealthUnknown   int64   `json:"health_unknown"`
-	Collected       int64   `json:"collected"`
-	CollectFailed   int64   `json:"collect_failed"`
-	Stale           int64   `json:"stale"`
-	Retired         int64   `json:"retired"`
-	Maintenance     int64   `json:"maintenance"`
-	ReclaimPending  int64   `json:"reclaim_pending"`
-	MonitoringOn    int64   `json:"monitoring_enabled"`
-	CpuThreads      int64   `json:"cpu_threads"`
-	MemoryGiB       float64 `json:"memory_gib"`
-	ActiveWindows   int64   `json:"active_maintenance_windows"`
+	Assets         int64   `json:"assets"`
+	PowerOn        int64   `json:"power_on"`
+	PowerOff       int64   `json:"power_off"`
+	PowerUnknown   int64   `json:"power_unknown"`
+	HealthOK       int64   `json:"health_ok"`
+	HealthWarning  int64   `json:"health_warning"`
+	HealthCritical int64   `json:"health_critical"`
+	HealthUnknown  int64   `json:"health_unknown"`
+	Collected      int64   `json:"collected"`
+	CollectFailed  int64   `json:"collect_failed"`
+	Stale          int64   `json:"stale"`
+	Retired        int64   `json:"retired"`
+	Maintenance    int64   `json:"maintenance"`
+	MonitoringOn   int64   `json:"monitoring_enabled"`
+	CpuThreads     int64   `json:"cpu_threads"`
+	MemoryGiB      float64 `json:"memory_gib"`
+	ActiveWindows  int64   `json:"active_maintenance_windows"`
 }
 
 // numericSelect 把 JSONB 文本安全转成 numeric：只有纯数字文本才参与聚合。
@@ -206,7 +204,6 @@ var dashboardTotalsSelect = `COUNT(*) AS assets,
  COUNT(*) FILTER (WHERE assets.collected_at IS NULL OR assets.collected_at < now() - interval '30 minutes') AS stale,
  COUNT(*) FILTER (WHERE assets.status='retired') AS retired,
  COUNT(*) FILTER (WHERE assets.status='maintenance') AS maintenance,
- COUNT(*) FILTER (WHERE COALESCE(assets.subscription_state,'legacy')='reclaim_pending') AS reclaim_pending,
  COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM asset_monitor_configs mc WHERE mc.tenant_id=assets.tenant_id
    AND mc.project_id=assets.project_id AND mc.asset_id=assets.id AND mc.deleted_at IS NULL AND mc.enabled)) AS monitoring_enabled,
  COALESCE(SUM(` + numericSelect(cpuThreadsExpr) + `),0)::bigint AS cpu_threads,
@@ -235,16 +232,15 @@ func (a *App) resourceDashboard(c *gin.Context) {
 	tasks, failedTasks := a.dashboardTasks(sc)
 	ok(c, gin.H{
 		"generated_at":  time.Now().UTC(),
-		"mode":          currentSystemMode(db),
 		"scope":         gin.H{"tenant_id": sc.Tenant, "project_id": sc.Project},
 		"totals":        totals,
 		"by_datacenter": byDatacenter,
 		"alerts": gin.H{
-			"open":               openAlerts,
-			"unclaimed":          unclaimed,
-			"by_severity":        alerts,
-			"active_shields":     a.dashboardActiveShields(sc),
-			"failed_tasks_24h":   failedTasks,
+			"open":             openAlerts,
+			"unclaimed":        unclaimed,
+			"by_severity":      alerts,
+			"active_shields":   a.dashboardActiveShields(sc),
+			"failed_tasks_24h": failedTasks,
 		},
 		"tasks":   gin.H{"by_status_24h": tasks},
 		"metrics": a.dashboardMetrics(sc),

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,6 +29,15 @@ func run() error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return errors.New("DATABASE_URL is required")
+	}
+	// host 网络中的控制器经宿主机映射端口访问同一数据库。
+	if len(os.Args) > 1 && os.Args[1] == "pxe-services" && os.Getenv("PXE_DB_HOST") != "" {
+		u, err := url.Parse(dsn)
+		if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+			return errors.New("PXE controller requires a PostgreSQL URL")
+		}
+		u.Host = net.JoinHostPort(os.Getenv("PXE_DB_HOST"), os.Getenv("PXE_DB_PORT"))
+		dsn = u.String()
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
@@ -77,7 +88,11 @@ func run() error {
 	case "scheduler":
 		app.Scheduler(ctx)
 	case "api":
-		server := &http.Server{Addr: ":8000", Handler: app.Router(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
+		listenAddr := os.Getenv("API_LISTEN_ADDR")
+		if listenAddr == "" {
+			listenAddr = ":8000"
+		}
+		server := &http.Server{Addr: listenAddr, Handler: app.Router(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 		done := make(chan error, 1)
 		go func() { done <- server.ListenAndServe() }()
 		select {

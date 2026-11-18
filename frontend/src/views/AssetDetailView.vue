@@ -25,8 +25,13 @@ import {
   type SelectOption
 } from 'naive-ui'
 import { api, errorText, resource, rows, taskStatusType, unwrap, type RecordData } from '../api'
+import TestVMLab from '../components/TestVMLab.vue'
+import { flattenDepartments } from '../utils/departments'
+import { isTestVM } from '../utils/testVM'
 import { labels } from '../catalog'
 import { useAuth } from '../stores/auth'
+import AssetFinanceEditor from '../components/AssetFinanceEditor.vue'
+const financeOpen = ref(false)
 
 const route = useRoute()
 const router = useRouter()
@@ -94,6 +99,8 @@ const opStatusLabel = (value: unknown) => opStatusLabels[str(value)] || str(valu
 // 主数据
 // ============================================================
 const asset = ref<RecordData>({})
+const testVm = computed(() => isTestVM(asset.value))
+const testVmShowing = ref(false)
 const loading = ref(false)
 const loadError = ref('')
 const activeTab = ref<'overview' | 'monitor' | 'hardware' | 'network' | 'logs' | 'console'>('overview')
@@ -114,9 +121,6 @@ const opKindFilter = ref<string | null>(null)
 const opStatusFilter = ref<string | null>(null)
 
 const ledgerHardware = ref<RecordData[]>([])
-const ipAllocations = ref<RecordData[]>([])
-const networkRows = ref<RecordData[]>([])
-const networkLoading = ref(false)
 const solSessions = ref<RecordData[]>([])
 const solLoading = ref(false)
 const tagCatalog = ref<RecordData[]>([])
@@ -200,7 +204,7 @@ async function collectHardware() {
   }
 }
 
-const collectionStatusText = computed(() => ({
+const collectionStatusText = computed(() => testVm.value ? 'QEMU PXE 测试 VM · 无 BMC' : ({
   not_collected: '尚未采集', unsupported: '当前协议不支持硬件采集', pending: '采集任务待执行',
   running: '采集中', succeeded: '采集成功', failed: '采集失败', unknown: '采集结果未确认'
 } as Record<string, string>)[str(collection.value.status)] || '摘要尚未加载')
@@ -234,7 +238,7 @@ const monitorLabels: Record<string, string> = {
 }
 const valueLabels: Record<string, string> = {
   On: '已开机', Off: '已关机', OK: '正常', Warning: '警告', Critical: '严重', Enabled: '启用', Disabled: '禁用',
-  LinkUp: '已连接', LinkDown: '未连接', Unknown: '未知', Absent: '未安装', Present: '在位',
+  LinkUp: '已连接', LinkDown: '未连接', Unknown: '未知', unknown: '未知', Absent: '未安装', Present: '在位',
   PoweringOn: '开机中', PoweringOff: '关机中', allocated: '已分配', reserved: '预留', released: '已释放',
   SSD: '固态硬盘', HDD: '机械硬盘', NVMe: 'NVMe', SAS: 'SAS', SATA: 'SATA'
 }
@@ -321,21 +325,6 @@ async function loadHardwareLedger() {
   }
 }
 
-async function loadNetwork() {
-  networkLoading.value = true
-  try {
-    ipAllocations.value = rows(await resource.list('/ip-allocations', { asset_id: assetId.value, page_size: 100 })).items
-  } catch {
-    ipAllocations.value = []
-  }
-  try {
-    networkRows.value = rows(await resource.list('/networks', { page_size: 200 })).items
-  } catch {
-    networkRows.value = []
-  }
-  networkLoading.value = false
-}
-
 async function loadSolSessions() {
   solLoading.value = true
   try {
@@ -365,8 +354,8 @@ async function loadReferences() {
   if (auth.can('datacenters:read')) {
     try { datacenterRows.value = rows(await resource.list('/datacenters', { page_size: 200 })).items } catch { datacenterRows.value = [] }
   }
-  if (auth.systemMode === 'self_use' && auth.can('departments:read')) {
-    try { departmentRows.value = rows(await resource.list('/departments', { page_size: 200 })).items } catch { departmentRows.value = [] }
+  if (auth.can('departments:read')) {
+    try { departmentRows.value = flattenDepartments(rows(await resource.list('/departments')).items) } catch { departmentRows.value = [] }
   }
   if (auth.can('iam:read')) {
     try { memberRows.value = rows(await resource.list('/members', { page_size: 200 })).items } catch { memberRows.value = [] }
@@ -374,11 +363,13 @@ async function loadReferences() {
 }
 
 function resetData() {
+  departmentRows.value = []
+  datacenterRows.value = []
+  memberRows.value = []
   asset.value = {}
   collection.value = {}
   operations.value = []
   ledgerHardware.value = []
-  ipAllocations.value = []
   solSessions.value = []
   tagBindings.value = []
   collectionNotice.value = ''
@@ -404,7 +395,7 @@ const derivedStatus = computed(() => {
   if (status === 'maintenance' || status === 'retired') return status
   if (!asset.value.collected_at && str(asset.value.collection_error)) return 'error'
   if (str(asset.value.power_state) === 'off') return 'stopped'
-  if (str(asset.value.power_state) === 'on') return auth.systemMode === 'external_operation' ? 'in_use' : 'running'
+  if (str(asset.value.power_state) === 'on') return 'running'
   if (status === 'offline') return 'offline'
   if (!asset.value.collected_at && status === 'unknown') return 'pending_management'
   return 'unknown'
@@ -413,12 +404,8 @@ const displayStatus = computed(() => str(asset.value.display_status) || derivedS
 const statusTag = computed<StatusMeta>(() => statusMeta[displayStatus.value] || statusMeta.unknown)
 const powerLabel = computed(() => ({ on: '电源开启', off: '电源关闭', unknown: '电源未知' } as Record<string, string>)[str(asset.value.power_state)] || '电源未知')
 
-const ownerScope = computed(() => (auth.systemMode === 'external_operation' ? '租户' : '部门'))
+const ownerScope = computed(() => '部门')
 const ownerName = computed(() => {
-  if (auth.systemMode === 'external_operation') {
-    const hit = auth.tenants.find(tenant => String(tenant.id) === str(asset.value.tenant_id))
-    return str(hit?.name) || (String(asset.value.tenant_id) === String(auth.tenantId) ? '当前租户' : `租户 #${str(asset.value.tenant_id) || '—'}`)
-  }
   const hit = departmentRows.value.find(dept => String(dept.id) === str(asset.value.department_id))
   if (hit?.name) return str(hit.name)
   return asset.value.department_id == null ? '未分配' : `部门 #${str(asset.value.department_id)}`
@@ -500,6 +487,7 @@ const diskCount = computed(() => physicalDisks.value.length)
 const diskMedia = computed(() => [...new Set(physicalDisks.value.map(row => str(row.media_type)).filter(Boolean))].join('/'))
 
 const specText = computed(() => {
+  if (testVm.value) return '2 vCPU · 8 GB · 40 GB'
   const parts: string[] = []
   if (cpuCores.value) parts.push(`${cpuCores.value}C`)
   if (memoryGiB.value) parts.push(`${memoryGiB.value >= 1024 ? `${Number((memoryGiB.value / 1024).toFixed(1))}T` : `${memoryGiB.value}G`}`)
@@ -540,13 +528,12 @@ const configFields = computed<ConfigField[]>(() => {
     { label: '序列号 SN', value: str(a.serial_number) || str(c.serial_number), mono: true },
     { label: '制造商 / 型号', value: [str(a.manufacturer) || str(c.manufacturer), str(a.model) || str(c.model)].filter(Boolean).join(' · ') || '—' },
     { label: 'CPU', value: cpuModel ? `${sockets ? `${sockets} 路 ` : ''}${cpuCores.value ? `${cpuCores.value} 核` : ''}${cpuThreads.value ? ` / ${cpuThreads.value} 线程` : ''} ${cpuModel}` : (c.collected_at ? '已采集但未暴露 CPU 型号' : '—'), hint: c.collected_at ? undefined : '需先采集硬件快照' },
-    { label: '内存', value: memoryGiB.value ? `${memoryGiB.value} GiB${memoryModules ? ` · ${memoryModules} 条` : ''}` : str(c.memory_gib) ? `${str(c.memory_gib)} GiB` : '—' },
+    { label: '内存', value: memoryGiB.value ? `${memoryGiB.value} GiB${memoryModules ? ` · ${memoryModules} 条` : ''}` : '—' },
     { label: '磁盘', value: diskBytes.value ? `${humanBytes(diskBytes.value)}${diskCount.value ? ` · ${diskCount.value} 块` : ''}${diskMedia.value ? ` ${diskMedia.value}` : ''}` : '—' },
     { label: '网卡', value: nicSummaryText.value },
     { label: 'BMC 地址', value: str(a.bmc_address), mono: true },
     { label: '业务 IP', value: str(a.management_ip), mono: true },
     { label: '所在机房', value: datacenterName.value },
-    { label: '机柜 / U 位', value: '未启用', hint: '当前数据模型（迁移 005 起）已移除机柜与 U 位字段' },
     { label: `${ownerScope.value}`, value: ownerName.value },
     { label: '采购日期', value: fmtDate(a.purchase_date), mono: true },
     warrantyField.value,
@@ -792,26 +779,6 @@ const ledgerColumns: DataTableColumns<RecordData> = [
 // ============================================================
 // 网络配置
 // ============================================================
-const networkName = (id: unknown) => {
-  const key = str(id)
-  if (!key) return '—'
-  const hit = networkRows.value.find(row => String(row.id) === key)
-  return str(hit?.name) || `网络 #${key}`
-}
-const ipColumns = computed<DataTableColumns<RecordData>>(() => [
-  { title: 'IP 地址', key: 'address', minWidth: 140, render: row => h('span', { class: 'mono' }, dash(row.address)) },
-  { title: '所属网络', key: 'network_id', minWidth: 130, render: row => networkName(row.network_id) },
-  {
-    title: '分配状态', key: 'status', minWidth: 96,
-    render: row => h(NTag, {
-      size: 'small', bordered: false,
-      type: str(row.status) === 'allocated' ? 'success' : str(row.status) === 'reserved' ? 'warning' : 'default'
-    }, { default: () => formatField('status', row.status) })
-  },
-  { title: 'MAC 地址', key: 'mac_address', minWidth: 160, render: row => h('span', { class: 'mono' }, dash(row.mac_address)) },
-  { title: '分配时间', key: 'allocated_at', minWidth: 150, render: row => h('span', { class: 'mono' }, fmtTime(row.allocated_at)) },
-  { title: '释放时间', key: 'released_at', minWidth: 150, render: row => h('span', { class: 'mono' }, fmtTime(row.released_at)) }
-])
 const nicColumns = computed<DataTableColumns<RecordData>>(() => buildSectionColumns(networkInterfaces.value, [
   { key: 'name', label: '接口名称', width: 150 }, { key: 'kind', label: '类别' },
   { key: 'mac', label: 'MAC 地址', mono: true, width: 160 }, { key: 'model', label: '型号', width: 150 },
@@ -929,7 +896,7 @@ const actionBusy = ref('')
 const POWER_ACTIONS: Record<string, string> = { on: '开机', off: '关机', restart: '重启' }
 
 async function handlePowerAction(action: string) {
-  if (!auth.can('bmc:operate')) { message.error('缺少 BMC 操作权限（bmc:operate）'); return }
+  if (!auth.can('bmc:operate') && !testVm.value) { message.error('缺少 BMC 操作权限（bmc:operate）'); return }
   const label = POWER_ACTIONS[action] || action
   dialog.warning({
     title: `确认执行${label}`,
@@ -952,8 +919,8 @@ async function handlePowerAction(action: string) {
 }
 
 const canOperate = computed(() => auth.can('assets:operate'))
-const canPower = computed(() => auth.can('bmc:operate'))
-const canWrite = computed(() => auth.can('assets:write'))
+const canPower = computed(() => auth.can('bmc:operate') && !testVm.value)
+const canWrite = computed(() => auth.can('assets:write') && asset.value.can_manage === true)
 
 function bmcWebUrl(): string | null {
   const address = str(asset.value.bmc_address).trim()
@@ -1088,7 +1055,6 @@ async function ensureTabData(tab: string) {
   if (loadedTabs.has(tab)) return
   loadedTabs.add(tab)
   if (tab === 'hardware') await loadHardwareLedger()
-  if (tab === 'network') await loadNetwork()
   if (tab === 'console') await loadSolSessions()
 }
 
@@ -1137,14 +1103,14 @@ onUnmounted(() => {
     <header class="titlebar">
       <div class="titlebar-row">
         <div class="title-identity">
-          <div class="eyebrow">BARE METAL · {{ str(asset.bmc_protocol).toUpperCase() || 'REDFISH' }} · ID {{ assetId }}</div>
+          <div class="eyebrow">{{ testVm ? 'TEST VM · QEMU PXE' : `BARE METAL · ${str(asset.bmc_protocol).toUpperCase() || 'REDFISH'}` }} · ID {{ assetId }}</div>
           <h1 class="server-name">
             <span class="name-text">{{ asset.name || (loading ? '正在读取资产…' : '未知资产') }}</span>
             <n-tag size="small" :bordered="false" :type="statusTag.tag" class="status-tag">{{ statusTag.label }}</n-tag>
           </h1>
           <div class="title-facts">
             <span class="fact"><em>SN</em><b class="mono">{{ asset.serial_number || '—' }}</b></span>
-            <span class="fact"><em>BMC</em><b class="mono">{{ asset.bmc_address || '—' }}</b></span>
+            <span v-if="!testVm" class="fact"><em>BMC</em><b class="mono">{{ asset.bmc_address || '—' }}</b></span>
             <span class="fact"><em>IP</em><b class="mono">{{ asset.management_ip || '—' }}</b></span>
             <span class="fact"><em>SPEC</em><b class="mono">{{ specText }}</b></span>
           </div>
@@ -1158,7 +1124,13 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="titlebar-actions">
+      <div v-if="testVm" class="titlebar-actions">
+        <n-button v-if="canWrite" @click="financeOpen = true">采购 / 维保</n-button>
+        <n-button type="primary" @click="testVmShowing = true">PXE 实验室</n-button>
+        <n-button @click="refreshAll">刷新数据</n-button>
+      </div>
+      <div v-else class="titlebar-actions">
+        <n-button v-if="canWrite" @click="financeOpen = true">采购 / 维保</n-button>
         <n-button size="medium" :disabled="!canPower" :loading="actionBusy === 'on'" @click="handlePowerAction('on')">开机</n-button>
         <n-button size="medium" :disabled="!canPower" :loading="actionBusy === 'off'" @click="handlePowerAction('off')">关机</n-button>
         <n-button size="medium" type="warning" ghost :disabled="!canPower" :loading="actionBusy === 'restart'" @click="handlePowerAction('restart')">重启</n-button>
@@ -1172,7 +1144,20 @@ onUnmounted(() => {
     </header>
 
     <!-- Tab 区 -->
-    <div class="panel detail-panel">
+    <div v-if="testVm" class="panel" style="padding: 24px; margin-top: 20px">
+      <h2>PXE 测试虚拟机</h2>
+      <p>2 vCPU · 8 GB 内存 · 40 GB 虚拟磁盘。通过 PXE 实验室查看真实 VM 状态、安装进度和串口日志，并控制启动与关机。</p>
+      <n-descriptions bordered :column="2">
+        <n-descriptions-item label="虚拟化">QEMU / KVM</n-descriptions-item>
+        <n-descriptions-item label="MAC 地址">{{ asset.mac_address }}</n-descriptions-item>
+        <n-descriptions-item label="系统 IP">{{ asset.management_ip || '等待安装回报' }}</n-descriptions-item>
+        <n-descriptions-item label="配置来源">固定 PXE 实验环境</n-descriptions-item>
+      </n-descriptions>
+      <h3>操作记录</h3>
+      <n-data-table :columns="operationColumns" :data="operations" :loading="operationsLoading" :pagination="{ pageSize: 10 }" :scroll-x="960" />
+    </div>
+    <TestVMLab v-if="testVm" v-model:show="testVmShowing" @updated="refreshAll" />
+    <div v-if="!testVm" class="panel detail-panel">
       <n-tabs v-model:value="activeTab" type="line" animated display-directive="show:lazy" class="detail-tabs">
         <!-- ===== Tab 1 概览 ===== -->
         <n-tab-pane name="overview" tab="概览">
@@ -1280,6 +1265,7 @@ onUnmounted(() => {
                 · {{ valueLabels[str(collection.health)] || '健康未知' }}</span>
             </div>
             <div class="head-actions">
+
               <n-button size="small" :disabled="collection.supported !== true" :loading="collectionLoading"
                 @click="collectHardware">采集硬件信息</n-button>
               <n-button size="small" :loading="collectionLoading" @click="loadCollection().then(() => message.success('快照已刷新')).catch(e => message.error(errorText(e)))">刷新快照</n-button>
@@ -1309,15 +1295,6 @@ onUnmounted(() => {
 
         <!-- ===== Tab 4 网络配置 ===== -->
         <n-tab-pane name="network" tab="网络配置">
-          <section class="card section">
-            <header class="section-head">
-              <h2>IP 分配<span v-if="ipAllocations.length" class="count-chip mono">{{ ipAllocations.length }}</span></h2>
-              <span class="section-note">来源 ip_allocations</span>
-            </header>
-            <n-data-table v-if="ipAllocations.length" size="small" :columns="ipColumns" :data="ipAllocations"
-              :loading="networkLoading" :pagination="false" :max-height="360" />
-            <div v-else class="empty-hint">该设备没有 IP 分配记录。PXE 交付或静态绑定后会在此显示。</div>
-          </section>
 
           <section class="card section">
             <header class="section-head">
@@ -1325,7 +1302,7 @@ onUnmounted(() => {
               <span class="section-note">{{ stateOf('network') }}</span>
             </header>
             <n-data-table v-if="networkInterfaces.length" size="small" :columns="nicColumns" :data="networkInterfaces"
-              :loading="networkLoading" :pagination="false" :max-height="320" />
+              :pagination="false" :max-height="320" />
             <div v-else class="empty-hint">采集快照中没有网卡明细，请先在「硬件信息」执行采集。</div>
           </section>
 
@@ -1422,6 +1399,7 @@ onUnmounted(() => {
         <n-button type="primary" :loading="tagSaving" @click="saveTags">保存</n-button>
       </div>
     </n-modal>
+    <AssetFinanceEditor v-model:show="financeOpen" :asset-id="String(asset.id || route.params.id)" kind="lifecycle" @saved="loadAsset" />
   </div>
 </template>
 
