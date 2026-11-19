@@ -195,7 +195,7 @@ onMounted(() => { void load(); void loadHostOptions() })
           在客户端 VLAN 的三层网关上，将 DHCP Relay / IP Helper 指向 {{ config.server || '所选宿主机 IPv4' }}。Relay 的 giaddr 应属于所选装机子网；客户端网关填写该子网的网关，不是 PXE 服务器地址。需保证双向路由，以及 DHCP、TFTP（含返回数据端口）、HTTP 下载和安装回调连通。当前全局服务一次绑定一个装机子网。
         </NAlert>
         <template v-if="binding">
-          <DHCPReservations v-model="reservations" :disabled="locked || optionBusy || !boundNetwork" :subnet="String(boundNetwork?.subnet || config.subnet || '')" :gateway="hostIP(boundNetwork?.gateway)" :server="config.server || ''" :mode="config.dhcp_mode || ''" />
+          <DHCPReservations v-model="reservations" :disabled="locked || optionBusy || !boundNetwork" :subnet="String(boundNetwork?.subnet || config.subnet || '')" :gateway="hostIP(boundNetwork?.gateway)" :server="config.server || ''" :mode="config.dhcp_mode || ''" :tagged-only="taggedOnly" :relay-proxy="relayProxy" />
           <div class="pxe-form">
             <NFormItem label="未匹配规则的设备"><div class="pxe-control">
               <NSelect :value="taggedOnly ? 'only' : 'dynamic'" :options="[{label:'仍从动态地址池分配',value:'dynamic'},{label:'不分配，仅允许已启用的规则',value:'only'}]" @update:value="value => taggedOnly = value === 'only'" />

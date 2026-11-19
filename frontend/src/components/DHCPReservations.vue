@@ -2,10 +2,13 @@
 import { computed, reactive, ref } from 'vue'
 import { NAlert, NButton, NEmpty, NForm, NFormItem, NInput, NModal, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage } from 'naive-ui'
 import { newDHCPReservation, validateDHCPReservations, type DHCPReservation } from '../utils/dhcpReservations'
-const props = defineProps<{ modelValue: DHCPReservation[]; disabled: boolean; subnet: string; gateway: string; server: string; mode: string }>()
+import DHCPReservationImport from './DHCPReservationImport.vue'
+const props = withDefaults(defineProps<{ modelValue: DHCPReservation[]; disabled: boolean; subnet: string; gateway: string; server: string; mode: string; taggedOnly?: boolean; relayProxy?: boolean }>(), {taggedOnly: false, relayProxy: false})
 const emit = defineEmits<{ 'update:modelValue': [value: DHCPReservation[]] }>()
 const dialog = useDialog(), message = useMessage()
 const open = ref(false), editing = ref(-1)
+const importOpen = ref(false)
+const importContext = computed(() => ({subnet: props.subnet, gateway: props.gateway, server: props.server, mode: props.mode, taggedOnly: props.taggedOnly, relayProxy: props.relayProxy}))
 const form = reactive(newDHCPReservation())
 const formats = [{label: '文本（原文精确匹配）', value: 'text'}, {label: '十六进制（冒号分隔）', value: 'hex'}]
 const kind = (rule: DHCPReservation) => [rule.circuit_id && 'Circuit-ID', rule.remote_id && 'Remote-ID', rule.mac && 'MAC'].filter(Boolean).join(' + ')
@@ -29,6 +32,9 @@ function toggle(index: number, enabled: boolean) {
   if (props.disabled) return
   emit('update:modelValue', props.modelValue.map((row, i) => i === index ? {...row, enabled} : row))
 }
+function importRules(rules: DHCPReservation[]) {
+  if (!props.disabled) emit('update:modelValue', rules)
+}
 function remove(index: number) {
   if (props.disabled) return
   dialog.warning({title: '删除固定 IP 规则', content: `删除“${props.modelValue[index]?.name}”后，点击页面下方“保存全局配置”才会生效。`, positiveText: '删除规则', negativeText: '取消', onPositiveClick: () => { if (!props.disabled) emit('update:modelValue', props.modelValue.filter((_, i) => i !== index)) }})
@@ -36,7 +42,7 @@ function remove(index: number) {
 </script>
 <template>
   <section class="dhcp-rules" aria-label="标签与固定 IP 规则">
-    <div class="rule-heading"><h3>标签与固定 IP 规则</h3><NButton :disabled="disabled || modelValue.length >= 128" @click="edit()">添加固定 IP 规则</NButton></div>
+    <div class="rule-heading"><h3>标签与固定 IP 规则 <span class="help">{{ modelValue.length }} / 128</span></h3><NSpace><NButton :disabled="disabled" @click="importOpen = true">批量导入</NButton><NButton :disabled="disabled || modelValue.length >= 128" @click="edit()">添加固定 IP 规则</NButton></NSpace></div>
     <p class="help">按交换机 Option 82 的端口标识（Circuit-ID）、交换机标识（Remote-ID）或服务器 MAC 分配固定 IP。同一规则填写多项时必须全部匹配；不同规则不能同时命中同一设备。</p>
     <NEmpty v-if="!modelValue.length" description="尚未添加规则，默认使用动态地址池" size="small" class="rule-empty" />
     <article v-for="(rule, index) in modelValue" :key="index" class="rule-row">
@@ -64,6 +70,7 @@ function remove(index: number) {
       <NAlert v-if="validation" type="warning" :bordered="false">{{ validation }}</NAlert>
       <template #footer><NSpace justify="end"><NButton @click="open = false">取消</NButton><NButton type="primary" :disabled="disabled || !!validation" @click="save">保存规则</NButton></NSpace></template>
     </NModal>
+    <DHCPReservationImport v-model:show="importOpen" :disabled="disabled" :rules="modelValue" :context="importContext" @apply="importRules" />
   </section>
 </template>
 <style scoped>
