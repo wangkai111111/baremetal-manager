@@ -24,7 +24,13 @@ async function submit() {
   } catch (error) { message.error(errorText(error)) }
   finally { saving.value = false }
 }
-function logout() { auth.logout(); void router.replace('/login') }
+async function logout() {
+  if (saving.value) return
+  saving.value = true
+  try { await api.post('/auth/logout'); auth.logout(); await router.replace('/login') }
+  catch (error) { message.error(errorText(error)) }
+  finally { saving.value = false }
+}
 </script>
 <template>
   <main class="password-change-screen">

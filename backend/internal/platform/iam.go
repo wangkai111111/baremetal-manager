@@ -364,7 +364,28 @@ func (a *App) iamWriteUser(c *gin.Context) {
 				return gorm.ErrRecordNotFound
 			}
 		}
-		return a.store.audit(tx, sc, "iam:write", "users", id)
+		action, message := "user:update", "更新账号资料"
+		if create {
+			action = "user:create"
+			message = "创建用户账号"
+		} else if c.Request.Method == "DELETE" {
+			action = "user:delete"
+			message = "删除用户账号"
+		} else if in.Password != "" {
+			action = "user:reset-password"
+			message = "重置登录密码"
+		}
+		if in.Status != "" {
+			message += "；账号状态：" + map[string]string{"active": "正常", "disabled": "禁用", "locked": "锁定"}[in.Status]
+		}
+		if in.MustChangePassword != nil {
+			if *in.MustChangePassword {
+				message += "；要求下次登录修改密码"
+			} else {
+				message += "；不强制下次登录修改密码"
+			}
+		}
+		return a.store.recordAuditNote(tx, sc, sc.Audit, action, "users", id, "success", map[string]any{"message": message})
 	})
 	if err != nil {
 		fail(c, 409, "用户保存失败，请检查用户名是否重复或刷新后重试")

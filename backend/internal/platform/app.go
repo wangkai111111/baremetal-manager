@@ -36,6 +36,7 @@ type user struct {
 	Name               string `json:"name"`
 	Email              string `json:"email"`
 	PasswordHash       string `json:"-"`
+	Status             string `json:"-"`
 	IsPlatformAdmin    bool   `json:"is_platform_admin"`
 	MustChangePassword bool   `json:"must_change_password"`
 	PasswordVersion    int64  `json:"-"`
@@ -133,6 +134,16 @@ func (a *App) guard(c *gin.Context) {
 		fail(c, 401, "密码已变更，请重新登录")
 		return
 	}
+	var revoked int64
+	if err := a.store.db.Table("revoked_login_tokens").Where("token_hash=? AND expires_at>now()", loginTokenHash(token)).Count(&revoked).Error; err != nil {
+		fail(c, 503, "会话校验失败")
+		return
+	}
+	if revoked > 0 {
+		fail(c, 401, "会话已退出，请重新登录")
+		return
+	}
+	c.Set("login_expiry", claims.ExpiresAt.Time)
 	if u.MustChangePassword && !passwordChangeRoute(c) {
 		c.AbortWithStatusJSON(403, gin.H{"code": 403, "message": "请先修改初始密码", "password_change_required": true})
 		return
@@ -185,24 +196,39 @@ func (a *App) require(code string) gin.HandlerFunc {
 }
 func (a *App) login(c *gin.Context) {
 	var in struct{ Username, Password string }
-	if c.ShouldBindJSON(&in) != nil || len(in.Password) > 72 {
+	if c.ShouldBindJSON(&in) != nil {
 		fail(c, 400, "invalid credentials")
 		return
 	}
 	var u user
-	err := a.store.db.Table("users").Where("lower(username)=lower(?) AND status='active' AND deleted_at IS NULL", in.Username).Take(&u).Error
-	if err != nil || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(in.Password)) != nil {
+	err := a.store.db.Table("users").Where("lower(username)=lower(?) AND deleted_at IS NULL", in.Username).Take(&u).Error
+	if err != nil || u.Status != "active" || len(in.Password) > 72 || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(in.Password)) != nil {
+		if u.ID == 0 {
+			u.Username = in.Username
+		}
+		if e := a.authAudit(a.store.db.WithContext(c.Request.Context()), c, u, "auth:login", "failed"); e != nil {
+			fail(c, 503, "登录审计暂不可用")
+			return
+		}
 		fail(c, 401, "invalid credentials")
 		return
 	}
 	now := time.Now()
-	claims := loginClaims{RegisteredClaims: jwt.RegisteredClaims{Subject: strconv.FormatInt(u.ID, 10), Issuer: "baremetal-platform", IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(8 * time.Hour))}, PasswordVersion: u.PasswordVersion}
+	claims := loginClaims{RegisteredClaims: jwt.RegisteredClaims{ID: uuid.NewString(), Subject: strconv.FormatInt(u.ID, 10), Issuer: "baremetal-platform", IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(8 * time.Hour))}, PasswordVersion: u.PasswordVersion}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(a.secret)
 	if err != nil {
 		fail(c, 500, "token creation failed")
 		return
 	}
-	a.store.db.Table("users").Where("id=?", u.ID).Update("last_login_at", now)
+	if err := a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("users").Where("id=?", u.ID).Update("last_login_at", now).Error; err != nil {
+			return err
+		}
+		return a.authAudit(tx, c, u, "auth:login", "success")
+	}); err != nil {
+		fail(c, 503, "登录审计暂不可用")
+		return
+	}
 	// 登录响应携带完整上下文（权限/项目/角色），供前端菜单与路由守卫使用；
 	// 若仅返回裸 user 行，非平台管理员（租户用户）会因拿不到 permissions 而看到空侧边栏。
 	ok(c, gin.H{"token": token, "user": a.buildUserContext(u, 0)})
@@ -325,6 +351,10 @@ func (a *App) password(c *gin.Context) {
 	}
 	u := current(c)
 	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(in.OldPassword)) != nil {
+		if err := a.authAudit(a.store.db, c, u, "auth:password-change", "denied"); err != nil {
+			fail(c, 503, "审计暂不可用")
+			return
+		}
 		fail(c, 403, "当前密码不正确")
 		return
 	}
@@ -337,8 +367,17 @@ func (a *App) password(c *gin.Context) {
 		fail(c, 500, "password hashing failed")
 		return
 	}
-	result := a.store.db.Table("users").Where("id=? AND password_hash=? AND password_version=? AND status='active' AND deleted_at IS NULL", u.ID, u.PasswordHash, u.PasswordVersion).Updates(map[string]any{"password_hash": string(hash), "must_change_password": false, "password_version": gorm.Expr("password_version+1")})
-	if result.Error != nil || result.RowsAffected != 1 {
+	err := a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		result := tx.Table("users").Where("id=? AND password_hash=? AND password_version=? AND status='active' AND deleted_at IS NULL", u.ID, u.PasswordHash, u.PasswordVersion).Updates(map[string]any{"password_hash": string(hash), "must_change_password": false, "password_version": gorm.Expr("password_version+1")})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("password changed concurrently")
+		}
+		return a.authAudit(tx, c, u, "auth:password-change", "success")
+	})
+	if err != nil {
 		fail(c, 500, "密码更新失败，请重新登录后重试")
 		return
 	}
@@ -346,7 +385,7 @@ func (a *App) password(c *gin.Context) {
 }
 
 func passwordChangeRoute(c *gin.Context) bool {
-	return c.Request.Method == "GET" && c.FullPath() == "/api/v1/auth/me" || c.Request.Method == "PUT" && c.FullPath() == "/api/v1/auth/password"
+	return c.Request.Method == "POST" && c.FullPath() == "/api/v1/auth/logout" || c.Request.Method == "GET" && c.FullPath() == "/api/v1/auth/me" || c.Request.Method == "PUT" && c.FullPath() == "/api/v1/auth/password"
 }
 func (a *App) readiness(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)

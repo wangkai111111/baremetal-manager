@@ -211,10 +211,27 @@ func (a *App) testVM(c *gin.Context) {
 			fail(c, status, err.Error())
 			return
 		}
+		if err := a.store.recordAuditNote(a.store.db.WithContext(ctx), sc, sc.Audit, "vm:create", "assets", records.AssetID, "success", map[string]any{"message": "创建或更新 PXE 测试 VM"}); err != nil {
+			fail(c, 500, "测试 VM 已创建，但审计保存失败，请刷新核对")
+			return
+		}
 		ok(c, gin.H{"vm": state, "asset_id": records.AssetID, "network_id": records.NetworkID, "pool_id": records.PoolID, "plan_id": records.PlanID})
 		return
 	}
+	var auditAsset struct{ ID int64 }
+	if err := a.store.db.Table("assets").Select("id").Where("tenant_id=? AND project_id=? AND manufacturer='BMM Test VM' AND model='QEMU PXE Lab' AND mac_address=? AND deleted_at IS NULL", sc.Tenant, sc.Project, pxeservice.TestVMMAC).Take(&auditAsset).Error; err != nil {
+		fail(c, 409, "测试 VM 资产记录不存在")
+		return
+	}
 	state, status, err = a.callTestVM(ctx, http.MethodPost, "/test-vm/"+action, &cfg)
+	outcome := "success"
+	if err != nil {
+		outcome = "failed"
+	}
+	if auditErr := a.store.recordAudit(a.store.db.WithContext(ctx), sc, sc.Audit, "vm:"+action, "assets", auditAsset.ID, outcome); auditErr != nil {
+		fail(c, 500, "VM 操作已发送，但审计保存失败，请核对状态")
+		return
+	}
 	if err != nil {
 		fail(c, status, err.Error())
 		return

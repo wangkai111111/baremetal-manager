@@ -60,6 +60,10 @@ func (a *App) solTicket(c *gin.Context) {
 		fail(c, 422, errTestVMLabRequired.Error())
 		return
 	}
+	if err := a.store.recordAudit(a.store.db.WithContext(c.Request.Context()), sc, sc.Audit, "sol:access", "assets", identity.ID, "success"); err != nil {
+		fail(c, 500, "控制台访问审计失败")
+		return
+	}
 	key := uuid.NewString()
 	solTickets.Store(key, ticket{sc, number(c.Param("id")), time.Now().Add(30 * time.Second)})
 	time.AfterFunc(30*time.Second, func() { solTickets.Delete(key) })
@@ -338,12 +342,7 @@ func (a *App) updateSettings(c *gin.Context) {
 		}
 	}
 	e := a.store.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
-		// 全局设置沿用现有项目审计表，归档到首个有效项目，不新增全局审计 DDL。
-		var project struct{ ID, TenantID int64 }
-		if e := tx.Table("projects").Where("deleted_at IS NULL AND status=?", "active").Order("id").Take(&project).Error; e != nil {
-			return e
-		}
-		sc := scope{Tenant: project.TenantID, Project: project.ID, User: current(c).ID, Admin: true}
+		sc := scope{User: current(c).ID, Admin: true}
 		for k, v := range in {
 			data, _ := json.Marshal(v)
 			if e := tx.Exec("INSERT INTO system_settings(key,value,create_by) VALUES (?,?::jsonb,?) ON CONFLICT (key) WHERE deleted_at IS NULL DO UPDATE SET value=EXCLUDED.value,update_by=EXCLUDED.create_by", k, string(data), sc.User).Error; e != nil {

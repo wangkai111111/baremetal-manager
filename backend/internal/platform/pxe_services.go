@@ -120,6 +120,16 @@ func (a *App) pxeServices(c *gin.Context) {
 		fail(c, 502, "invalid controller response")
 		return
 	}
+	if method != "GET" {
+		action := "configure"
+		if c.Param("action") != "" {
+			action = c.Param("action")
+		}
+		if err := a.store.recordAudit(a.store.db.WithContext(c.Request.Context()), scope{User: current(c).ID}, requestMeta(c, current(c).ID), "pxe:"+action, "pxe_services", "global", "success"); err != nil {
+			fail(c, 500, "PXE 操作已完成，但审计保存失败，请刷新核对")
+			return
+		}
+	}
 	ok(c, value)
 }
 func (a *App) installWithPreflight(c *gin.Context) {

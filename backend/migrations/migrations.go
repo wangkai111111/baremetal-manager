@@ -77,3 +77,6 @@ var QuietAutomaticCollectionSQL string
 
 //go:embed 021_user_initial_password.sql
 var UserInitialPasswordSQL string
+
+//go:embed 022_audit_auth_scope.sql
+var AuditAuthScopeSQL string

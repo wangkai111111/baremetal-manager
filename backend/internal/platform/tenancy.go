@@ -64,7 +64,10 @@ func (a *App) createTenant(c *gin.Context) {
 		if e := tx.Table("tenant_memberships").Create(map[string]any{"tenant_id": tenant, "user_id": u.ID}).Error; e != nil {
 			return e
 		}
-		return initializeRoles(tx, tenant, u.ID)
+		if err := initializeRoles(tx, tenant, u.ID); err != nil {
+			return err
+		}
+		return a.store.recordAudit(tx, scope{Tenant: tenant, User: u.ID}, requestMeta(c, u.ID), "create", "tenants", tenant, "success")
 	})
 	if e != nil {
 		fail(c, 409, "tenant creation failed")
@@ -147,7 +150,10 @@ func (a *App) createProject(c *gin.Context) {
 		if e := tx.Exec("INSERT INTO tenant_memberships(tenant_id,user_id) VALUES (?,?) ON CONFLICT (tenant_id,user_id) DO NOTHING", tenant, u.ID).Error; e != nil {
 			return e
 		}
-		return tx.Table("memberships").Create(map[string]any{"tenant_id": tenant, "project_id": id, "user_id": u.ID, "role_id": role, "create_by": u.ID}).Error
+		if err := tx.Table("memberships").Create(map[string]any{"tenant_id": tenant, "project_id": id, "user_id": u.ID, "role_id": role, "create_by": u.ID}).Error; err != nil {
+			return err
+		}
+		return a.store.recordAudit(tx, scope{Tenant: tenant, Project: id, User: u.ID}, requestMeta(c, u.ID), "create", "projects", id, "success")
 	})
 	if e != nil {
 		fail(c, 403, "project creation denied or invalid")

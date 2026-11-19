@@ -55,7 +55,7 @@ func (s *store) managesAsset(sc scope, id int64) bool {
 }
 
 var scopedUserPermissions = strings.Fields(`assets:read assets:operate bmc:operate sol:read sol:access tasks:read monitor:read alerts:read departments:read datacenters:read tags:read images:read install:read install:operate network:read firmware:read work_orders:read work_orders:write`)
-var scopedAdminPermissions = strings.Fields(`assets:write departments:write monitor:write iam:read iam:manage`)
+var scopedAdminPermissions = strings.Fields(`assets:write departments:write monitor:write iam:read iam:manage audit:read`)
 
 func containsCode(codes []string, code string) bool {
 	for _, s := range codes {
@@ -96,7 +96,9 @@ func filterAssetResource(q *gorm.DB, table string, sc scope) *gorm.DB {
 		return q.Where(`EXISTS(SELECT 1 FROM installations access_inst WHERE access_inst.id=installation_events.installation_id AND access_inst.tenant_id=installation_events.tenant_id AND access_inst.project_id=installation_events.project_id AND access_inst.deleted_at IS NULL AND (` + assetAccessSQL(sc, "access_inst.asset_id", false) + `))`)
 	case "alert_events":
 		return q.Where(`EXISTS(SELECT 1 FROM alerts access_alert WHERE access_alert.id=alert_events.alert_id AND access_alert.tenant_id=alert_events.tenant_id AND access_alert.project_id=alert_events.project_id AND access_alert.deleted_at IS NULL AND (` + assetAccessSQL(sc, "access_alert.asset_id", false) + `))`)
-	case "notification_deliveries", "audits", "discovery_candidates", "maintenance_windows":
+	case "audits":
+		return q.Where(auditManagedSQL(sc))
+	case "notification_deliveries", "discovery_candidates", "maintenance_windows":
 		return q.Where("FALSE")
 	}
 	return q
@@ -193,6 +195,10 @@ func (a *App) userAccessGrants(c *gin.Context) {
 		if !sc.Admin {
 			q = q.Where(departmentAccessSQL(sc, "user_access_grants.department_id", true))
 		}
+		var before []accessGrant
+		if err := q.Select("department_id,is_admin").Find(&before).Error; err != nil {
+			return err
+		}
 		if err := q.Delete(&accessGrant{}).Error; err != nil {
 			return err
 		}
@@ -208,7 +214,7 @@ func (a *App) userAccessGrants(c *gin.Context) {
 				return err
 			}
 		}
-		return st.audit(tx, sc, "access:manage", "users", id)
+		return st.auditAccessChanges(tx, sc, id, before, in.Grants)
 	})
 	if err != nil {
 		fail(c, 409, "保存授权失败："+err.Error())

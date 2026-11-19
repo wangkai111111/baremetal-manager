@@ -19,6 +19,7 @@ import (
 
 type operation struct {
 	ID, TenantID, ProjectID, AssetID, UserID int64
+	ClientIP                                 string
 	Kind, Status, WorkerID                   string
 	Automatic                                bool
 }
@@ -602,6 +603,15 @@ func (a *App) runOne(parent context.Context) {
 		}
 		if err := tx.Table("device_leases").Where("id=? AND holder_id=?", lease, a.node).Updates(map[string]any{"heartbeat_at": gorm.Expr("now()-interval '1 second'"), "expires_at": gorm.Expr("now()")}).Error; err != nil {
 			return err
+		}
+		if !op.Automatic {
+			outcome := "success"
+			if status != "succeeded" {
+				outcome = "failed"
+			}
+			if err := a.store.recordAuditNote(tx, scope{Tenant: op.TenantID, Project: op.ProjectID, User: op.UserID}, auditMeta{ClientIP: op.ClientIP}, "task:"+status, "operations", op.ID, outcome, map[string]any{"message": "任务执行结果：" + map[string]string{"succeeded": "成功", "failed": "失败", "unknown": "状态待人工核实"}[status]}); err != nil {
+				return err
+			}
 		}
 		return discardAutomaticCollection(tx, op)
 	})

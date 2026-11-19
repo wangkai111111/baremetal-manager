@@ -75,6 +75,11 @@ func (a *App) routes() *gin.Engine {
 	auth := v.Group("")
 	auth.Use(a.guard)
 	auth.GET("/auth/me", a.authMe)
+	auth.POST("/auth/logout", a.logout)
+	aud := auth.Group("/audit", a.auditScope)
+	aud.GET("", a.listAuditLogs)
+	aud.GET("/export", a.exportAuditLogs)
+	aud.GET("/:id", a.getAuditLog)
 	auth.PUT("/auth/password", a.password)
 	auth.GET("/tenants", a.tenants)
 	auth.POST("/tenants", a.createTenant)
@@ -103,6 +108,12 @@ func (a *App) routes() *gin.Engine {
 	for _, res := range resources {
 		resource := res
 		code := permissionResource(res.table)
+		if res.table == "audits" {
+			p.GET("/audit", a.listAuditLogs)
+			p.GET("/audit/export", a.exportAuditLogs)
+			p.GET("/audit/:id", a.getAuditLog)
+			continue
+		}
 		p.GET("/"+res.path, a.require(code+":read"), a.listResource(resource))
 		if res.path == "tasks" {
 			p.GET("/tasks/:id", a.require("tasks:read"), a.getTask)

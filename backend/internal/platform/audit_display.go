@@ -9,6 +9,11 @@ import (
 // These labels are shared by the list, search and export. Identifiers remain
 // available to API consumers, but are never used as a display-name fallback.
 var auditActions = map[string]string{
+	"task:succeeded": "任务执行成功", "task:failed": "任务执行失败", "task:unknown": "任务结果待核实",
+	"pxe:configure": "修改 PXE 配置", "pxe:start": "启动 PXE 服务", "pxe:stop": "停止 PXE 服务", "pxe:restart": "重启 PXE 服务",
+	"user:create": "新增用户", "user:update": "修改用户", "user:delete": "删除用户", "user:reset-password": "重置用户密码",
+	"auth:login": "登录", "auth:logout": "退出登录", "auth:password-change": "修改登录密码",
+	"sol:access": "打开远程控制台", "vm:create": "创建 / 更新测试 VM", "vm:start": "测试 VM 开机", "vm:stop": "测试 VM 关机", "vm:restart": "测试 VM 重启",
 	"initial-access:read": "查看初始登录信息",
 	"create":              "创建", "update": "更新", "write": "保存", "delete": "删除",
 	"submit": "提交任务", "cancel": "取消任务", "claim": "认领", "assign": "分配",
@@ -20,8 +25,8 @@ var auditActions = map[string]string{
 }
 
 var auditTargetTypes = map[string]string{
-	"assets": "服务器", "operations": "运维任务", "installations": "系统安装",
-	"users": "用户", "roles": "角色", "memberships": "项目成员授权", "api_keys": "API 密钥",
+	"pxe_services": "PXE 服务", "assets": "服务器", "operations": "运维任务", "installations": "系统安装",
+	"tenants": "组织", "projects": "项目", "users": "用户", "roles": "角色", "memberships": "项目成员授权", "api_keys": "API 密钥",
 	"departments": "部门", "work_orders": "工单", "system_settings": "系统设置",
 	"datacenters": "机房", "tags": "标签", "asset_tags": "服务器标签",
 	"networks": "子网", "ip_pools": "地址池", "images": "系统镜像",
@@ -80,6 +85,8 @@ func auditTargetSQL(alias string) string {
 	}
 	tenant := " AND r.tenant_id=" + alias + ".tenant_id"
 	project := tenant + " AND r.project_id=" + alias + ".project_id"
+	add("tenants", "r.name", "")
+	add("projects", "r.name", tenant)
 	add("assets", auditAssetSQL("r"), project)
 	add("users", auditUserLabelSQL("r"), "")
 	for _, table := range []string{"departments", "roles"} {
@@ -107,18 +114,20 @@ func auditTargetSQL(alias string) string {
 		"smtp.host": "邮件服务器", "smtp.port": "邮件服务端口", "smtp.username": "邮件登录账号",
 		"smtp.password": "邮件登录密码", "smtp.from": "发件地址", "smtp.tls": "邮件 TLS",
 	}
-	sql.WriteString(" WHEN 'system_settings' THEN " + auditLabelSQL(alias+".target_id", settings, "'系统配置项'") + " ELSE NULL END")
+	sql.WriteString(" WHEN 'pxe_services' THEN 'PXE 装机服务' WHEN 'system_settings' THEN " + auditLabelSQL(alias+".target_id", settings, "'系统配置项'") + " ELSE NULL END")
 	return sql.String()
 }
 
 func auditDisplaySQL(alias string) string {
 	snapshot := alias + ".after_snapshot->'audit_display'"
-	operator := `COALESCE(NULLIF(` + snapshot + `->>'operator_name',''), NULLIF(` + auditUserSQL(alias+".user_id") + `,''), '系统或历史操作人')`
-	target := `COALESCE(NULLIF(` + snapshot + `->>'target_name',''), NULLIF((` + auditTargetSQL(alias) + `),''), '历史记录未保留对象名称')`
-	project := `COALESCE(NULLIF(` + snapshot + `->>'project_name',''), (SELECT p.name FROM projects p WHERE p.id=` + alias + `.project_id AND p.tenant_id=` + alias + `.tenant_id), '历史项目')`
+	operator := `COALESCE(NULLIF(` + snapshot + `->>'operator_name',''), NULLIF(` + auditUserSQL(alias+".user_id") + `,''), CASE WHEN ` + alias + `.action='auth:login' THEN '未验证账号' ELSE '系统或历史操作人' END)`
+	target := `COALESCE(NULLIF(` + snapshot + `->>'target_name',''), NULLIF((` + auditTargetSQL(alias) + `),''), CASE WHEN ` + alias + `.action='auth:login' THEN '登录验证' ELSE '历史记录未保留对象名称' END)`
+	project := `COALESCE(NULLIF(` + snapshot + `->>'project_name',''), (SELECT p.name FROM projects p WHERE p.id=` + alias + `.project_id AND p.tenant_id=` + alias + `.tenant_id), CASE WHEN ` + alias + `.project_id IS NULL THEN '平台 / 登录会话' ELSE '历史项目' END)`
 	return `jsonb_build_object('operator_name', ` + operator + `, 'target_name', ` + target + `,
  'project_name', ` + project + `, 'client_ip', host(` + alias + `.client_ip),
  'action_label', ` + auditLabelSQL(alias+".action", auditActions, "'其他操作'") + `,
+ 'scope_names', COALESCE((SELECT string_agg(DISTINCT au->>'department_name', '、') FROM jsonb_array_elements(COALESCE(` + alias + `.after_snapshot->'audience','[]'::jsonb)) au), '平台范围'),
+ 'description', COALESCE(` + alias + `.after_snapshot->'note'->>'message',''),
  'target_type_label', ` + auditLabelSQL(alias+".target_type", auditTargetTypes, "'其他资源'") + `)`
 }
 

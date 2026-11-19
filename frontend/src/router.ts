@@ -4,6 +4,7 @@ import { sections } from './catalog'
 
 // 使用专用组件的页面路径（不走通用 ResourceView）
 const dedicatedRoutePaths = [
+  '/audit-logs',
   '/alert-rules',
   '/alert-channels',
   '/kickstart-templates',
@@ -66,6 +67,7 @@ const router = createRouter({
         { path: 'pxe', redirect: '/pxe-config' },
 
         // === 专用页面路由（使用独立组件）===
+        { path: 'audit-logs', component: () => import('./views/AuditLogsView.vue'), meta: { title: '审计日志', permission: 'audit:read' } },
         { path: 'datacenters', component: () => import('./views/DatacenterView.vue'), meta: { title: '机房管理', permission: 'datacenters:read' } },
         { path: 'tags', component: () => import('./views/TagManage.vue'), meta: { title: '标签管理', permission: 'assets:write' } },
         { path: 'alert-rules', component: () => import('./views/AlertRuleView.vue'), meta: { title: '告警规则', permission: 'alerts:read' } },

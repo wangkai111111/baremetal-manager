@@ -695,6 +695,7 @@ watch(currentId, () => { void loadStats() })
               <p>{{ String(currentDept.description || '暂无部门描述') }}</p>
             </div>
             <n-space class="dept-head-actions">
+              <n-button v-if="auth.can('audit:read') && currentDept.can_manage === true" size="small" @click="router.push({ path: '/audit-logs', query: { department_id: currentId, department_name: currentNode?.name } })">审计日志</n-button>
               <n-button v-if="canWriteDept && currentDept.can_manage === true" size="small" @click="openEdit(currentDept)">编辑</n-button>
               <n-button v-if="canWriteDept && currentDept.can_manage === true" size="small" @click="openCreate(currentId)">新建子部门</n-button>
               <n-popconfirm v-if="canWriteDept && currentDept.can_manage === true" @positive-click="remove(currentDept)">

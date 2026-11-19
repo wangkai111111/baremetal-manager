@@ -259,9 +259,12 @@ function handleUserMenuSelect(key: string) {
   }
 }
 
-function logout() {
-  auth.logout()
-  router.push('/login')
+async function logout() {
+  try {
+    await api.post('/auth/logout')
+    auth.logout()
+    await router.push('/login')
+  } catch (error) { message.error(errorText(error)) }
 }
 
 // === 修改密码 ===

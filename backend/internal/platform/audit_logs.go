@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -23,6 +24,7 @@ type auditMeta struct {
 	RequestID string
 	ClientIP  string
 	UserAgent string
+	Audience  []auditAudienceEntry
 }
 
 // requestMeta 从请求上下文提取来源信息。client_ip 仅在可解析为合法 IP 时写入，
@@ -58,10 +60,19 @@ func (s *store) recordAuditNote(tx *gorm.DB, sc scope, meta auditMeta, action, t
  (SELECT ?::bigint AS tenant_id, ?::bigint AS project_id, ?::bigint AS user_id,
  ?::text AS action, ?::text AS target_type, ?::text AS target_id,
  NULL::jsonb AS after_snapshot, NULL::inet AS client_ip) e`,
-		sc.Tenant, sc.Project, sc.User, action, targetType, fmt.Sprint(targetID)).Scan(&display).Error; err != nil {
+		nullableID(sc.Tenant), nullableID(sc.Project), nullableID(sc.User), action, targetType, fmt.Sprint(targetID)).Scan(&display).Error; err != nil {
 		return err
 	}
 	snapshot := map[string]any{"audit_display": json.RawMessage(display)}
+	audience := meta.Audience
+	var err error
+	if audience == nil {
+		audience, err = auditAudience(tx, sc, action, targetType, targetID)
+	}
+	if err != nil {
+		return err
+	}
+	snapshot["audience"] = audience
 	if note != nil {
 		snapshot["note"] = note
 	}
@@ -91,9 +102,9 @@ func auditRow(sc scope, meta auditMeta, action, targetType string, targetID any,
 		outcome = "success"
 	}
 	row := map[string]any{
-		"tenant_id":   sc.Tenant,
-		"project_id":  sc.Project,
-		"user_id":     sc.User,
+		"tenant_id":   nullableID(sc.Tenant),
+		"project_id":  nullableID(sc.Project),
+		"user_id":     nullableID(sc.User),
 		"request_id":  meta.RequestID,
 		"action":      action,
 		"target_type": targetType,
@@ -109,7 +120,16 @@ func auditRow(sc scope, meta auditMeta, action, targetType string, targetID any,
 
 // auditQuery 按筛选条件构造审计查询。非平台管理员只能看到本项目作用域内的记录。
 func (a *App) auditQuery(c *gin.Context, sc scope) *gorm.DB {
-	q := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "audits"}, sc)
+	q := a.store.db.WithContext(c.Request.Context()).Table("audits").Where("audits.deleted_at IS NULL")
+	if sc.Project > 0 {
+		q = q.Where("audits.project_id=? OR audits.project_id IS NULL", sc.Project)
+	}
+	if !sc.Admin {
+		q = q.Where(auditManagedSQL(sc))
+	}
+	if department := number(c.Query("department_id")); department > 0 {
+		q = q.Where(`EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(audits.after_snapshot->'audience','[]'::jsonb)) au WHERE (au->>'tenant_id')::bigint=? AND (au->>'department_id')::bigint IN (WITH RECURSIVE subtree(id) AS (SELECT id FROM departments WHERE id=? AND tenant_id=? UNION SELECT d.id FROM departments d JOIN subtree s ON d.parent_id=s.id WHERE d.tenant_id=?) SELECT id FROM subtree))`, sc.Tenant, department, sc.Tenant, sc.Tenant)
+	}
 	if operator := strings.TrimSpace(c.Query("operator")); operator != "" {
 		if id := number(operator); id > 0 {
 			q = q.Where("audits.user_id=?", id)
@@ -137,7 +157,7 @@ func (a *App) auditQuery(c *gin.Context, sc scope) *gorm.DB {
 	}
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		like := "%" + search + "%"
-		q = q.Where(auditSearchSQL("audits"), like)
+		q = q.Where(`jsonb_path_query_array((`+scopedAuditDisplaySQL(sc)+`), '$.*')::text ILIKE ?`, like)
 	}
 	return q
 }
@@ -173,7 +193,7 @@ func (a *App) listAuditLogs(c *gin.Context) {
 		return
 	}
 	p, n := page(c)
-	items, err := decodeRows(q.Order("audits.id DESC").Limit(n).Offset((p-1)*n), resource{table: "audits"})
+	items, err := decodeAuditRows(q.Order("audits.id DESC").Limit(n).Offset((p-1)*n), sc)
 	if err != nil {
 		fail(c, 500, "audit query failed")
 		return
@@ -182,7 +202,7 @@ func (a *App) listAuditLogs(c *gin.Context) {
 }
 
 // auditExportColumns 是 CSV 导出的列顺序，JSON 导出复用查询结果字段。
-var auditExportColumns = []string{"occurred_at", "operator_name", "action_label", "target_type_label", "target_name", "project_name", "outcome", "client_ip"}
+var auditExportColumns = []string{"occurred_at", "operator_name", "action_label", "target_type_label", "target_name", "project_name", "scope_names", "description", "outcome", "client_ip"}
 
 // exportAuditLogs 导出审计记录，支持 format=csv|json（默认 json），风格与
 // orders/bills 的单对象导出一致：设置 Content-Disposition 附件头后直接输出。
@@ -192,7 +212,7 @@ func (a *App) exportAuditLogs(c *gin.Context) {
 		fail(c, 403, "permission denied")
 		return
 	}
-	items, err := decodeRows(a.auditQuery(c, sc).Order("audits.id DESC").Limit(10000), resource{table: "audits"})
+	items, err := decodeAuditRows(a.auditQuery(c, sc).Order("audits.id DESC").Limit(10000), sc)
 	if err != nil {
 		fail(c, 500, "audit export failed")
 		return
@@ -209,11 +229,19 @@ func (a *App) exportAuditLogs(c *gin.Context) {
 		c.Header("Content-Disposition", "attachment; filename=audit_logs_"+stamp+".csv")
 		c.Header("Content-Type", "text/csv; charset=utf-8")
 		writer := csv.NewWriter(c.Writer)
-		_ = writer.Write(auditExportColumns)
+		headers := make([]string, 0, len(auditExportColumns))
+		for _, column := range auditExportColumns {
+			headers = append(headers, auditExportLabels[column])
+		}
+		_ = writer.Write(headers)
 		for _, item := range items {
 			record := make([]string, 0, len(auditExportColumns))
 			for _, column := range auditExportColumns {
-				record = append(record, exportCell(item[column]))
+				value := exportCell(item[column])
+				if column == "outcome" {
+					value = map[string]string{"success": "成功", "failed": "失败", "denied": "拒绝"}[value]
+				}
+				record = append(record, auditCSVCell(value))
 			}
 			_ = writer.Write(record)
 		}
@@ -241,4 +269,15 @@ func exportCell(value any) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+var auditExportLabels = map[string]string{"occurred_at": "发生时间", "operator_name": "操作人", "action_label": "操作", "target_type_label": "对象类型", "target_name": "操作对象", "project_name": "所属项目", "scope_names": "组织 / 部门范围", "description": "说明", "outcome": "结果", "client_ip": "操作 IP"}
+
+func auditCSVCell(value string) string {
+	// Spreadsheet clients must display untrusted names as text, never formulas.
+	trimmed := strings.TrimLeftFunc(value, unicode.IsSpace)
+	if len(trimmed) > 0 && strings.ContainsRune("=+-@", rune(trimmed[0])) {
+		return "'" + value
+	}
+	return value
 }
