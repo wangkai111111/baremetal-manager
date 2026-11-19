@@ -31,6 +31,9 @@ const consoleElement = ref<HTMLElement>()
 const message = useMessage()
 const router = useRouter()
 const auth = useAuth()
+const canManageLab = computed(() => auth.user?.is_platform_admin === true)
+const canPower = computed(() => auth.can('bmc:operate'))
+const canInstall = computed(() => auth.can('install:operate'))
 function viewTask() {if (!state.value?.installation.operation_id) return;emit('update:show',false);router.push({path:'/tasks',query:{task:String(state.value.installation.operation_id)}})}
 let timer: ReturnType<typeof setTimeout> | undefined
 let sequence = 0
@@ -72,18 +75,21 @@ async function perform(name: string, action: () => Promise<void>) {
   finally { busy.value = ''; await refresh() }
 }
 function create() {
+	if (!canManageLab.value) return
   perform('create', async () => {
     await api.post('/assets/test-vm', { firmware: firmware.value }, { timeout: 120000 })
     message.success('测试虚拟机与 Ubuntu 安装方案已准备好')
   })
 }
 function prepareNetwork() {
+	if (!canManageLab.value) return
   perform('network', async () => {
     await api.post('/assets/test-vm/prepare-network')
     message.success('隔离网络 DHCP / TFTP 已启动')
   })
 }
 function power(action: string) {
+	if (action === 'cancel-install' ? !canInstall.value : !canPower.value) return
   perform(action, async () => { await api.post(`/assets/test-vm/${action}`) })
 }
 function deleted() {
@@ -95,7 +101,7 @@ function deleted() {
   emit('deleted')
 }
 function install() {
-  if (!confirmed.value || !state.value?.asset_id || !state.value.plan_id || !selectedImage.value) return
+  if (!canInstall.value || !confirmed.value || !state.value?.asset_id || !state.value.plan_id || !selectedImage.value) return
   const accessError = installAccessError(access.value)
   if (accessError) { message.error(accessError); return }
   perform('install', async () => {
@@ -126,22 +132,23 @@ onBeforeUnmount(() => { disposed = true; sequence++; clearTimeout(timer) })
     <NAlert v-if="failure || state?.error" type="error" :bordered="false" class="lab-alert">{{ failure || state?.error }}</NAlert>
     <div class="lab-controls">
       <NFormItem label="引导固件" :show-feedback="false">
-        <NSelect v-model:value="firmware" aria-label="引导固件" :options="[{ label: 'UEFI（推荐）', value: 'uefi' }, { label: 'Legacy BIOS', value: 'bios' }]" :disabled="!!busy || !!state?.asset_id" style="min-width: 170px" />
+        <NSelect v-model:value="firmware" aria-label="引导固件" :options="[{ label: 'UEFI（推荐）', value: 'uefi' }, { label: 'Legacy BIOS', value: 'bios' }]" :disabled="!canManageLab || !!busy || !!state?.asset_id" style="min-width: 170px" />
       </NFormItem>
       <div class="lab-buttons">
-        <NButton v-if="!state?.asset_id" type="primary" :loading="busy === 'create'" :disabled="!!busy || !state" @click="create">创建测试 VM</NButton>
-        <NTag v-else :type="state.running ? 'success' : 'default'" :bordered="false">VM {{ state.running ? '运行中' : '已停止' }}</NTag>
-        <NButton :loading="busy === 'network'" :disabled="!!busy || !state?.asset_id || active || state.network_ready" @click="prepareNetwork">{{ state?.network_ready ? 'PXE 网络已就绪' : '准备 PXE 网络' }}</NButton>
-        <NButton :disabled="!!busy || !state?.asset_id || active" @click="power(state?.running ? 'stop' : 'start')">{{ state?.running ? '停止 VM' : '启动 VM' }}</NButton>
-        <NButton v-if="state?.running" :disabled="!!busy || active" @click="power('restart')">从磁盘重启</NButton>
-        <TestVMDeleteButton v-if="state && (state.asset_id || state.tenant_id)" :asset-id="state.asset_id" :disabled="!!busy || active" @busy="busy = $event ? 'delete' : ''" @deleted="deleted" />
-        <NPopconfirm v-if="active && !state?.installation.cleanup_pending" @positive-click="power('cancel-install')" positive-text="停止并取消安装" negative-text="继续等待">
+        <NButton v-if="canManageLab && !state?.asset_id" type="primary" :loading="busy === 'create'" :disabled="!!busy || !state" @click="create">创建测试 VM</NButton>
+        <NTag v-if="state?.asset_id" :type="state.running ? 'success' : 'default'" :bordered="false">VM {{ state.running ? '运行中' : '已停止' }}</NTag>
+        <NButton v-if="canManageLab" :loading="busy === 'network'" :disabled="!!busy || !state?.asset_id || active || state.network_ready" @click="prepareNetwork">{{ state?.network_ready ? 'PXE 网络已就绪' : '准备 PXE 网络' }}</NButton>
+        <NButton v-if="canPower" :disabled="!!busy || !state?.asset_id || active" @click="power(state?.running ? 'stop' : 'start')">{{ state?.running ? '停止 VM' : '启动 VM' }}</NButton>
+        <NButton v-if="canPower && state?.running" :disabled="!!busy || active" @click="power('restart')">从磁盘重启</NButton>
+        <TestVMDeleteButton v-if="canManageLab && state && (state.asset_id || state.tenant_id)" :asset-id="state.asset_id" :disabled="!!busy || active" @busy="busy = $event ? 'delete' : ''" @deleted="deleted" />
+        <NPopconfirm v-if="canInstall && active && !state?.installation.cleanup_pending" @positive-click="power('cancel-install')" positive-text="停止并取消安装" negative-text="继续等待">
           <template #trigger><NButton type="error" secondary :disabled="!!busy">取消安装</NButton></template>
           停止测试虚机并撤销本次安装回调。磁盘可能已被改写，再次测试需要重新安装。
         </NPopconfirm>
       </div>
     </div>
     <p v-if="active" class="lab-footnote">安装或安装清理尚未结束，暂时不能删除测试 VM。</p>
+    <p v-if="!canManageLab && state && !state.network_ready" class="lab-footnote">请联系平台管理员准备 PXE 网络后再安装。</p>
     <div class="lab-install">
       <div>
         <strong>{{ statusLabel }}</strong>
@@ -160,7 +167,7 @@ onBeforeUnmount(() => { disposed = true; sequence++; clearTimeout(timer) })
     <NCheckbox v-model:checked="confirmed" :disabled="!!busy || active || !state?.network_ready">我确认清空 BMM Test VM 的 40 GB 测试磁盘并安装 {{ selectedImageLabel }}</NCheckbox>
     <div class="lab-submit">
       <span>仅操作固定测试 VM；DHCP 绑定隔离网桥，不接入物理网卡。</span>
-      <NButton type="primary" :loading="busy === 'install'" :disabled="!!busy || active || !state?.asset_id || !state?.network_ready || !state?.plan_id || !selectedImage || !confirmed || !!installAccessError(access)" @click="install">{{ installed ? '重新安装 Ubuntu' : '开始 PXE 安装' }}</NButton>
+      <NButton v-if="canInstall" type="primary" :loading="busy === 'install'" :disabled="!!busy || active || !state?.asset_id || !state?.network_ready || !state?.plan_id || !selectedImage || !confirmed || !!installAccessError(access)" @click="install">{{ installed ? '重新安装 Ubuntu' : '开始 PXE 安装' }}</NButton>
     </div>
     <div class="console-heading"><strong>实时串口日志</strong><NButton text size="small" :disabled="!!busy" @click="refresh()">刷新状态</NButton></div>
     <pre ref="consoleElement" class="lab-console" aria-label="虚拟机串口日志">{{ state?.serial_log || (state ? '等待虚拟机启动。完成网络准备后，点击“开始 PXE 安装”。' : '正在连接 PXE 控制服务…') }}</pre>

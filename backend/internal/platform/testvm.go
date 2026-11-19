@@ -58,6 +58,52 @@ func testVMCall(ctx context.Context, method, path string, cfg *pxeservice.TestVM
 	return state, status, nil
 }
 
+func (a *App) callTestVM(ctx context.Context, method, path string, cfg *pxeservice.TestVMConfig) (pxeservice.TestVMStatus, int, error) {
+	if a.testVMControl != nil {
+		return a.testVMControl(ctx, method, path, cfg)
+	}
+	return testVMCall(ctx, method, path, cfg)
+}
+
+func testVMOperationPermission(method, action string) string {
+	if method == http.MethodGet && action == "" {
+		return "assets:read"
+	}
+	if method == http.MethodPost {
+		switch action {
+		case "start", "stop", "restart", "reboot":
+			return "bmc:operate"
+		case "cancel-install":
+			return "install:operate"
+		}
+	}
+	return ""
+}
+
+func (a *App) authorizeTestVM(c *gin.Context) bool {
+	if current(c).IsPlatformAdmin {
+		return true
+	}
+	sc := contextScope(c)
+	permission := testVMOperationPermission(c.Request.Method, c.Param("action"))
+	if permission == "" || sc.User <= 0 || sc.Tenant <= 0 || sc.Project <= 0 || !a.store.allowed(sc, permission) {
+		fail(c, 403, "仅可操作管理员已分配的测试 VM；创建、删除和配置装机网络需要平台管理员权限")
+		return false
+	}
+	var count int64
+	err := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "assets"}, sc).
+		Where("manufacturer='BMM Test VM' AND model='QEMU PXE Lab' AND mac_address=?", pxeservice.TestVMMAC).Count(&count).Error
+	if err != nil {
+		fail(c, 500, "测试 VM 授权检查失败")
+		return false
+	}
+	if count != 1 {
+		fail(c, 404, "测试 VM 不存在或未授权访问")
+		return false
+	}
+	return true
+}
+
 func testVMReboot(ctx context.Context, tenantID, projectID int64) error {
 	if tenantID <= 0 || projectID <= 0 {
 		return errors.New("必须选择有效租户和项目")
@@ -74,8 +120,7 @@ func testVMReboot(ctx context.Context, tenantID, projectID int64) error {
 }
 
 func (a *App) testVM(c *gin.Context) {
-	if !current(c).IsPlatformAdmin {
-		fail(c, 403, "platform administrator required")
+	if !a.authorizeTestVM(c) {
 		return
 	}
 	sc := contextScope(c)
@@ -109,12 +154,12 @@ func (a *App) testVM(c *gin.Context) {
 		ok(c, gin.H{"deleted": true})
 		return
 	}
-	state, status, err := testVMCall(ctx, http.MethodGet, "/test-vm", nil)
+	state, status, err := a.callTestVM(ctx, http.MethodGet, "/test-vm", nil)
 	if err != nil {
 		fail(c, status, err.Error())
 		return
 	}
-	if err = testVMOwner(state, sc.Tenant, sc.Project, action != ""); err != nil {
+	if err = testVMOwner(state, sc.Tenant, sc.Project, action != "" || !current(c).IsPlatformAdmin); err != nil {
 		fail(c, 409, err.Error())
 		return
 	}
@@ -169,7 +214,7 @@ func (a *App) testVM(c *gin.Context) {
 		ok(c, gin.H{"vm": state, "asset_id": records.AssetID, "network_id": records.NetworkID, "pool_id": records.PoolID, "plan_id": records.PlanID})
 		return
 	}
-	state, status, err = testVMCall(ctx, http.MethodPost, "/test-vm/"+action, &cfg)
+	state, status, err = a.callTestVM(ctx, http.MethodPost, "/test-vm/"+action, &cfg)
 	if err != nil {
 		fail(c, status, err.Error())
 		return

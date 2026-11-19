@@ -2,12 +2,14 @@ package platform
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"os"
 	"testing"
 
+	"baremetal-manager/backend/internal/pxeservice"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -112,6 +114,37 @@ func TestAssetAccessAndFinanceIntegration(t *testing.T) {
 	req("PUT", fmt.Sprintf("%s/assets/%d", base, assets[0]), map[string]any{"name": "denied"}, 403)
 	req("POST", fmt.Sprintf("%s/assets/%d/assign", base, assets[0]), map[string]any{"department_id": other}, 403)
 	req("PUT", grantPath("access-other"), map[string]any{"grants": []any{}}, 403)
+	permissions := req("GET", "/api/v1/auth/me", nil, 200)["permissions"].([]any)
+	codes := make([]string, 0, len(permissions))
+	for _, permission := range permissions {
+		codes = append(codes, permission.(string))
+	}
+	for _, code := range []string{"assets:operate", "bmc:operate", "sol:access", "install:operate", "tasks:read"} {
+		if !containsCode(codes, code) {
+			t.Fatalf("missing scoped operation permission: %s", code)
+		}
+	}
+	for _, code := range []string{"assets:write", "iam:manage", "settings:write", "network:write"} {
+		if containsCode(codes, code) {
+			t.Fatalf("ordinary user gained management permission: %s", code)
+		}
+	}
+	req("DELETE", fmt.Sprintf("%s/assets/%d", base, assets[0]), nil, 403)
+	req("POST", fmt.Sprintf("%s/assets/%d/sol-ticket", base, assets[0]), nil, 200)
+	req("POST", fmt.Sprintf("%s/assets/%d/collect", base, assets[0]), nil, 422) // IPMI capability, not permission denial.
+	preflights := 0
+	app.networkState = func(context.Context) (pxeservice.Status, error) { preflights++; return pxeservice.Status{}, nil }
+	install := map[string]any{"install_plan_id": 1, "confirmed": true}
+	req("POST", fmt.Sprintf("%s/assets/%d/install", base, assets[2]), install, 404)
+	if preflights != 0 {
+		t.Fatal("unauthorized install reached PXE controller")
+	}
+	req("POST", fmt.Sprintf("%s/assets/%d/install", base, assets[0]), install, 409) // Authorized, PXE not configured in fixture.
+	req("POST", base+"/installations", map[string]any{"asset_id": assets[0], "install_plan_id": 1, "confirmed": true}, 409)
+	req("POST", base+"/installations", map[string]any{"asset_id": assets[2], "install_plan_id": 1, "confirmed": true}, 404)
+	if preflights != 2 {
+		t.Fatal("installation routes disagree about operation permission")
+	}
 	req("GET", base+"/dashboard/resources", nil, 200)
 	req("GET", base+"/dashboard/metrics/trend?metric=temperature_celsius", nil, 200)
 	// Task and indirect log visibility follows current asset assignment, even for
@@ -211,13 +244,22 @@ func TestAssetAccessAndFinanceIntegration(t *testing.T) {
 	foreignProject := asInt(req("POST", "/api/v1/projects", map[string]any{"tenant_id": foreignTenant, "name": "Foreign", "code": "foreign"}, 200)["id"])
 	token = plain
 	req("GET", fmt.Sprintf("/api/v1/projects/%d/assets", foreignProject), nil, 403)
-	// Explicit read-only project roles still restrict operation capabilities.
+	// Legacy project roles no longer narrow explicit department operation grants.
 	var viewer int64
 	tx.Table("roles").Select("id").Where("tenant_id=? AND code='viewer'", tenant).Take(&viewer)
 	if err := tx.Exec("INSERT INTO memberships(tenant_id,project_id,user_id,role_id) VALUES (?,?,?,?)", tenant, project, users["access-user"], viewer).Error; err != nil {
 		t.Fatal(err)
 	}
-	req("POST", fmt.Sprintf("%s/assets/%d/actions", base, assets[0]), map[string]any{"action": "on"}, 403)
+	req("POST", fmt.Sprintf("%s/assets/%d/actions", base, assets[0]), map[string]any{"action": "on"}, 202)
+	req("POST", fmt.Sprintf("%s/assets/%d/actions", base, assets[2]), map[string]any{"action": "on"}, 409)
+	permissions = req("GET", "/api/v1/auth/me", nil, 200)["permissions"].([]any)
+	foundPower := false
+	for _, code := range permissions {
+		foundPower = foundPower || code == "bmc:operate"
+	}
+	if !foundPower {
+		t.Fatal("frontend permissions still restricted by legacy project role")
+	}
 	req("GET", base+"/assets", nil, 200)
 	// A preexisting API key shares its owner's current data scope.
 	key, hash, err := newIAMKey()
@@ -236,6 +278,46 @@ func TestAssetAccessAndFinanceIntegration(t *testing.T) {
 		t.Fatal("key data scope mismatch")
 	}
 	req("GET", fmt.Sprintf("%s/assets/%d", base, assets[2]), nil, 404)
+	// VM control is authorized against the actual asset, never just its project.
+	// All controller requests use an in-process fake; no live VM is touched.
+	token = admin
+	if err := tx.Table("assets").Where("mac_address=? AND deleted_at IS NULL", pxeservice.TestVMMAC).Update("deleted_at", gorm.Expr("now()")).Error; err != nil {
+		t.Fatal(err)
+	}
+	vmID := asInt(req("POST", base+"/assets", map[string]any{"name": "Scoped VM", "manufacturer": "BMM Test VM", "model": "QEMU PXE Lab", "mac_address": "02:00:00:00:ac:99", "department_id": child, "bmc_protocol": "ipmi", "bmc_address": "2001:db8:acc::99", "bmc_user": "qa", "bmc_secret": "test-only"}, 200)["id"])
+	if err := tx.Table("assets").Where("id=?", vmID).Update("mac_address", pxeservice.TestVMMAC).Error; err != nil {
+		t.Fatal(err)
+	}
+	controlCalls := 0
+	app.testVMControl = func(ctx context.Context, method, path string, cfg *pxeservice.TestVMConfig) (pxeservice.TestVMStatus, int, error) {
+		controlCalls++
+		if method != "GET" && (cfg == nil || cfg.TenantID != tenant || cfg.ProjectID != project) {
+			t.Fatal("wrong VM scope")
+		}
+		return pxeservice.TestVMStatus{TestVMConfig: pxeservice.TestVMConfig{TenantID: tenant, ProjectID: project, Firmware: "uefi"}, Running: true}, 200, nil
+	}
+	token = plain
+	if asInt(req("GET", base+"/assets/test-vm", nil, 200)["asset_id"]) != vmID {
+		t.Fatal("wrong authorized VM")
+	}
+	for _, action := range []string{"start", "stop", "restart", "reboot"} {
+		req("POST", base+"/assets/test-vm/"+action, nil, 200)
+	}
+	calls := controlCalls
+	req("POST", base+"/assets/test-vm", map[string]any{"firmware": "uefi"}, 403)
+	req("DELETE", base+"/assets/test-vm", map[string]any{"confirmed": true, "asset_id": vmID}, 403)
+	req("POST", base+"/assets/test-vm/prepare-network", nil, 403)
+	if controlCalls != calls {
+		t.Fatal("management denial reached VM controller")
+	}
+	if err := tx.Table("assets").Where("id=?", vmID).Update("department_id", other).Error; err != nil {
+		t.Fatal(err)
+	}
+	req("GET", base+"/assets/test-vm", nil, 404)
+	req("POST", base+"/assets/test-vm/stop", nil, 404)
+	if controlCalls != calls {
+		t.Fatal("out-of-scope VM reached controller")
+	}
 
 	// Revocation applies to existing JWTs and to inherited child access immediately.
 	token = admin

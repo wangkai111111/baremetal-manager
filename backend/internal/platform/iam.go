@@ -100,6 +100,9 @@ func (a *App) iamKeyGuard(c *gin.Context, secret string) {
 	if resourceName == "sol-sessions" {
 		code = ""
 	}
+	if resourceName == "installations" && len(parts) == 5 && c.Request.Method == "POST" {
+		code = "install:operate"
+	}
 	if code == "" {
 		fail(c, 403, "API key route is not supported")
 		return

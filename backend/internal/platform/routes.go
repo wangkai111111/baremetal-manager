@@ -186,7 +186,7 @@ func (a *App) routes() *gin.Engine {
 	p.POST("/assets/:id/install", a.require("install:operate"), a.installWithPreflight)
 	p.POST("/assets/:id/install/confirm-stopped", a.require("assets:operate"), a.require("install:operate"), a.confirmPhysicalInstallStopped)
 	p.POST("/assets/:id/firmware-upgrade", a.require("firmware:operate"), unsupported)
-	p.POST("/installations", a.require("install:write"), a.installWithPreflight)
+	p.POST("/installations", a.require("install:operate"), a.installWithPreflight)
 	p.POST("/firmware-upgrades", a.require("firmware:write"), unsupported)
 	// 浏览器 WebSocket 使用短时一次性票据，不能将登录 JWT 放入 URL。
 	v.GET("/sol/connect", a.solWithTicket)

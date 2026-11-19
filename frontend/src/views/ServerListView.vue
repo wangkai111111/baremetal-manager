@@ -87,7 +87,8 @@ const keyword = ref(String(route.query.search || ''))
 const canWrite = computed(() => auth.can('assets:write'))
 const canOperate = computed(() => auth.can('assets:operate'))
 const canPower = computed(() => auth.can('bmc:operate'))
-const canConsole = computed(() => auth.can('assets:operate'))
+const canConsole = computed(() => auth.can('sol:access'))
+const canInstall = computed(() => auth.can('install:operate'))
 const consoleShowing = ref(false)
 const consoleTarget = ref<RecordData | null>(null)
 
@@ -460,7 +461,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
       if (isTestVm(row)) return h('div', { class: 'table-actions row-actions' }, [
         h(NButton, { text: true, type: 'primary', onClick: openTestVm }, { default: () => 'PXE 实验室' }),
         h(NButton, { text: true, onClick: () => router.push(`/assets/${row.id}`) }, { default: () => '详情' }),
-        h(TestVMDeleteButton, { assetId: Number(row.id), text: true, onDeleted: () => load(true) }),
+        auth.user?.is_platform_admin ? h(TestVMDeleteButton, { assetId: Number(row.id), text: true, onDeleted: () => load(true) }) : null,
         canOperate.value ? h(NDropdown, { trigger: 'click', options: [{ label: '初始账号与 SSH 连接', key: 'initial-access' }], onSelect: (key: string) => handleRowMenu(key, row) }, { default: () => h(NButton, { text: true, 'aria-label': '更多操作' }, { default: () => '更多 ▾' }) }) : null
       ])
       const menu = rowMenuOptions(row)
@@ -503,7 +504,7 @@ const rowKey = (row: RecordData) => row.id as string | number
 function rowMenuOptions(row: RecordData): DropdownOption[] {
   const options: DropdownOption[] = [{ label: '查看详情', key: 'detail' }]
   if (canOperate.value) options.push({ label: '初始账号与 SSH 连接', key: 'initial-access' })
-  if (canOperate.value) options.push({ label: '重装系统', key: 'reinstall' })
+  if (canInstall.value) options.push({ label: '重装系统', key: 'reinstall' })
   if (canOperate.value) options.push({ label: '采集硬件信息', key: 'collect' })
   options.push({ label: '打开 BMC 界面', key: 'bmc', disabled: !bmcWebUrl(row) })
   if (canWrite.value && row.can_manage === true) options.push({ type: 'divider', key: 'divider' }, { label: '编辑', key: 'edit' }, { label: '删除', key: 'delete' })
@@ -1335,7 +1336,8 @@ onBeforeUnmount(() => {
     </n-modal>
     <n-modal v-model:show="reinstallShowing" preset="card" title="确认重装系统" style="width: min(620px, 94vw)">
       <n-alert type="warning" :bordered="false">重装将清空服务器磁盘上的现有数据并重新安装系统。支持 Ubuntu Server 22.04 / 24.04 amd64 自动安装。物理机请填写实际装机网卡 MAC，提交后在启动菜单手动选择 PXE / IPv4；准备完成后等待引导最多 3 分钟。
-        <p><n-button text type="primary" @click="router.push('/pxe-config')">去 PXE 配置页查看启动指引</n-button></p>
+        <p v-if="auth.can('network:write')"><n-button text type="primary" @click="router.push('/pxe-config')">去 PXE 配置页查看启动指引</n-button></p>
+        <p v-else>装机网络由管理员配置；如 PXE 预检未通过，请联系管理员检查服务。</p>
       </n-alert>
       <n-form label-placement="top" style="margin-top: 16px">
         <n-form-item label="装机方案" required>

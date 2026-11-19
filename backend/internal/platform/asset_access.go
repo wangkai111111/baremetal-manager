@@ -66,8 +66,9 @@ func containsCode(codes []string, code string) bool {
 	return false
 }
 
-// Project membership is a navigation/operation role, never a grant to all assets.
-// Hard caps ensure old manager/operator roles cannot bypass the new data policy.
+// Organization/department grants define both visibility and machine operations.
+// Legacy project roles cannot silently narrow an explicitly assigned grant.
+// Management capabilities still require an administrator grant.
 func (s *store) accessPermission(sc scope, code string) bool {
 	if sc.Admin {
 		return true
@@ -75,11 +76,7 @@ func (s *store) accessPermission(sc scope, code string) bool {
 	if containsCode(scopedAdminPermissions, code) {
 		return s.hasAccess(sc, true)
 	}
-	if !containsCode(scopedUserPermissions, code) || !s.hasAccess(sc, false) {
-		return false
-	}
-	roles, codes, err := s.projectRolePermissions(sc)
-	return err == nil && (roles == 0 || containsCode(codes, code))
+	return containsCode(scopedUserPermissions, code) && s.hasAccess(sc, false)
 }
 
 // All asset-related generic resources, including indirect log/event tables, use
@@ -236,18 +233,4 @@ func departmentTreeSQL(sc scope) string {
  SELECT d.id,d.parent_id FROM departments d WHERE d.tenant_id=%d AND d.deleted_at IS NULL AND (%s)
  UNION SELECT d.id,d.parent_id FROM departments d JOIN visible v ON v.parent_id=d.id WHERE d.tenant_id=%d AND d.deleted_at IS NULL
  ) SELECT id FROM visible)`, sc.Tenant, departmentAccessSQL(sc, "d.id", false), sc.Tenant)
-}
-
-func (s *store) projectRolePermissions(sc scope) (int64, []string, error) {
-	var roles int64
-	q := s.db.Table("memberships m").Joins("JOIN roles r ON r.id=m.role_id AND r.tenant_id=m.tenant_id AND r.deleted_at IS NULL").Where("m.tenant_id=? AND m.project_id=? AND m.user_id=? AND m.deleted_at IS NULL", sc.Tenant, sc.Project, sc.User)
-	if err := q.Count(&roles).Error; err != nil {
-		return 0, nil, err
-	}
-	codes := []string{}
-	if roles == 0 {
-		return roles, codes, nil
-	}
-	err := q.Joins("JOIN role_permissions rp ON rp.role_id=r.id AND rp.tenant_id=r.tenant_id AND rp.deleted_at IS NULL").Joins("JOIN permissions p ON p.id=rp.permission_id AND p.deleted_at IS NULL").Distinct().Pluck("p.code", &codes).Error
-	return roles, codes, err
 }

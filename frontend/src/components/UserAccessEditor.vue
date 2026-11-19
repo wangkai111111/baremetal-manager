@@ -59,7 +59,7 @@ async function save() {
 </script>
 <template>
   <n-modal :show="show" preset="card" :title="`访问授权 · ${username || ''}`" style="width:min(640px,94vw)" :mask-closable="!saving" :closable="!saving" @update:show="emit('update:show',$event)">
-    <n-alert type="info" :show-icon="false" style="margin-bottom:20px">当前组织：{{ organization }}。组织授权覆盖各项目；部门授权包含子部门。普通用户只能访问已授权范围的机器，不能新增、删除或分配服务器。勾选管理员后，可在该范围内管理服务器和用户授权。</n-alert>
+    <n-alert type="info" :show-icon="false" style="margin-bottom:20px">当前组织：{{ organization }}。组织授权覆盖各项目；部门授权包含子部门。普通用户可对授权范围内的机器执行开关机、重启、重装系统、硬件采集、远程控制，并查看初始账号和任务日志。新增、删除、分配服务器及管理用户授权需要管理员权限。勾选管理员后，可在该范围内管理服务器和用户授权。</n-alert>
     <n-alert v-if="error" type="error">{{ error }}</n-alert>
     <n-spin :show="loading">
       <n-form :disabled="saving || loading" label-placement="top">

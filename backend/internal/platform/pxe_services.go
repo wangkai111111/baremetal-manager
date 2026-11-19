@@ -129,13 +129,25 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		return
 	}
 	var in struct {
+		AssetID       int64               `json:"asset_id"`
 		ImageID       int64               `json:"image_id"`
 		InstallPlanID int64               `json:"install_plan_id"`
 		Confirmed     bool                `json:"confirmed"`
 		Access        *installAccessInput `json:"access"`
 	}
-	if c.ShouldBindJSON(&in) != nil || in.InstallPlanID <= 0 || !in.Confirmed || number(c.Param("id")) <= 0 {
+	if c.ShouldBindJSON(&in) != nil || in.InstallPlanID <= 0 || !in.Confirmed {
 		fail(c, 400, "必须指定 install_plan_id 并以 confirmed:true 明确授权清空目标服务器磁盘")
+		return
+	}
+	assetID := number(c.Param("id"))
+	if c.Param("id") == "" {
+		assetID = in.AssetID
+	} else if in.AssetID != 0 && in.AssetID != assetID {
+		fail(c, 400, "请求中的目标服务器不一致")
+		return
+	}
+	if assetID <= 0 {
+		fail(c, 400, "必须指定目标服务器")
 		return
 	}
 	if err := in.Access.validate(); err != nil {
@@ -143,15 +155,16 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		return
 	}
 	var asset int64
-	if c.Param("id") != "" {
-		if e := a.store.db.Table("assets").Select("id").Where("id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL", number(c.Param("id")), sc.Tenant, sc.Project).Scan(&asset).Error; e != nil || asset == 0 {
-			fail(c, 404, "asset not found")
-			return
-		}
+	if e := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "assets"}, sc).Select("id").Where("id=?", assetID).Scan(&asset).Error; e != nil || asset == 0 {
+		fail(c, 404, "服务器不存在或无权操作")
+		return
 	}
-	data, status, e := pxeservice.Call(c.Request.Context(), "GET", "/status", nil)
-	var state pxeservice.Status
-	if e != nil || status != 200 || json.Unmarshal(data, &state) != nil {
+	reader := a.networkState
+	if reader == nil {
+		reader = readPXENetworkState
+	}
+	state, e := reader(c.Request.Context())
+	if e != nil {
 		fail(c, 409, "PXE 预检失败：控制服务不可达，实际状态未知")
 		return
 	}

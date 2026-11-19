@@ -23,6 +23,7 @@ type App struct {
 	trustedProxies []string
 	networkState   func(context.Context) (pxeservice.Status, error)
 	userMailSender func(context.Context, smtpTestRequest, string, string) error
+	testVMControl  func(context.Context, string, string, *pxeservice.TestVMConfig) (pxeservice.TestVMStatus, int, error)
 	store          *store
 	secret         []byte
 	node           string
@@ -306,14 +307,7 @@ func (a *App) effectivePermissions(tenant, project, userID int64) []string {
 	}
 	sc := scope{Tenant: tenant, Project: project, User: userID}
 	if a.store.hasAccess(sc, false) {
-		roles, permissions, err := a.store.projectRolePermissions(sc)
-		if err == nil {
-			for _, code := range scopedUserPermissions {
-				if roles == 0 || containsCode(permissions, code) {
-					codes = append(codes, code)
-				}
-			}
-		}
+		codes = append(codes, scopedUserPermissions...)
 	}
 	if a.store.hasAccess(sc, true) {
 		codes = append(codes, scopedAdminPermissions...)

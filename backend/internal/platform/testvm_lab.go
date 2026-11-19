@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 
 	"baremetal-manager/backend/internal/pxeservice"
@@ -28,14 +27,18 @@ func (a *App) cancelTestVMInstallation(ctx context.Context, sc scope, vm pxeserv
 		if err := tx.Table("installations").Select("status").Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND status IN ('pending','preparing','booting','installing','post_install','unknown')", row.ID).Take(&inst).Error; err != nil {
 			return errors.New("正在准备任务或状态已变化，请稍后重试")
 		}
-		if _, _, err := testVMCall(ctx, "POST", "/test-vm/abort", &vm.TestVMConfig); err != nil {
+		var visible int64
+		if err := queryScope(tx, resource{table: "assets"}, sc).Where("assets.id=?", row.AssetID).Count(&visible).Error; err != nil || visible != 1 {
+			return errors.New("测试 VM 已不在授权范围，无法取消安装")
+		}
+		if _, _, err := a.callTestVM(ctx, "POST", "/test-vm/abort", &vm.TestVMConfig); err != nil {
 			return err
 		}
 		now := time.Now()
-		if err := finishInstallProgress(tx, op, "cancelled", "管理员已停止测试 VM 并取消安装"); err != nil {
+		if err := finishInstallProgress(tx, op, "cancelled", "操作人已停止测试 VM 并取消安装"); err != nil {
 			return err
 		}
-		if err := tx.Table("installations").Where("id=?", row.ID).Updates(map[string]any{"status": "cancelled", "started_at": gorm.Expr("COALESCE(started_at,now())"), "cleanup_pending": false, "callback_revoked_at": now, "completed_at": now, "error": "管理员已停止测试 VM 并取消安装"}).Error; err != nil {
+		if err := tx.Table("installations").Where("id=?", row.ID).Updates(map[string]any{"status": "cancelled", "started_at": gorm.Expr("COALESCE(started_at,now())"), "cleanup_pending": false, "callback_revoked_at": now, "completed_at": now, "error": "操作人已停止测试 VM 并取消安装"}).Error; err != nil {
 			return err
 		}
 		if err := tx.Table("operations").Where("id=?", row.OperationID).Updates(map[string]any{"status": "cancelled", "started_at": gorm.Expr("COALESCE(started_at,now())"), "completed_at": now}).Error; err != nil {
@@ -54,8 +57,12 @@ func (a *App) cancelTestVMInstallation(ctx context.Context, sc scope, vm pxeserv
 func (a *App) testVMLabStatus(c *gin.Context, vm pxeservice.TestVMStatus, sc scope) {
 	var assetID, planID int64
 	db := a.store.db.WithContext(c.Request.Context())
-	if err := db.Table("assets").Select("id").Where("tenant_id=? AND project_id=? AND manufacturer='BMM Test VM' AND model='QEMU PXE Lab' AND mac_address=? AND deleted_at IS NULL", sc.Tenant, sc.Project, pxeservice.TestVMMAC).Scan(&assetID).Error; err != nil {
+	if err := queryScope(db, resource{table: "assets"}, sc).Select("id").Where("manufacturer='BMM Test VM' AND model='QEMU PXE Lab' AND mac_address=?", pxeservice.TestVMMAC).Scan(&assetID).Error; err != nil {
 		fail(c, 500, "测试资产状态读取失败")
+		return
+	}
+	if !sc.Admin && assetID == 0 {
+		fail(c, 404, "测试 VM 不存在或未授权访问")
 		return
 	}
 	if err := db.Table("install_plans").Select("id").Where("tenant_id=? AND project_id=? AND name=? AND deleted_at IS NULL", sc.Tenant, sc.Project, testVMInstallName).Scan(&planID).Error; err != nil {
@@ -79,9 +86,12 @@ func (a *App) testVMLabStatus(c *gin.Context, vm pxeservice.TestVMStatus, sc sco
 		reason := image.unavailableReason()
 		imageOptions = append(imageOptions, gin.H{"id": image.ID, "name": image.Name, "version": image.Version, "architecture": image.Architecture, "disabled": reason != "", "reason": reason})
 	}
-	data, status, err := pxeservice.Call(c.Request.Context(), http.MethodGet, "/status", nil)
-	var network pxeservice.Status
-	networkKnown := err == nil && status == 200 && json.Unmarshal(data, &network) == nil
+	reader := a.networkState
+	if reader == nil {
+		reader = readPXENetworkState
+	}
+	network, err := reader(c.Request.Context())
+	networkKnown := err == nil
 	ready := networkKnown && network.DHCP && network.TFTP && network.Config.TenantID == sc.Tenant && network.Config.ProjectID == sc.Project && network.Config.Interface == pxeservice.TestVMBridge && network.Config.Subnet == "192.168.77.0/24" && network.Config.Server == "192.168.77.1"
 	ok(c, struct {
 		pxeservice.TestVMStatus

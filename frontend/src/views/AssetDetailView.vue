@@ -1130,7 +1130,7 @@ onUnmounted(() => {
       </div>
 
       <div v-if="testVm" class="titlebar-actions">
-        <TestVMDeleteButton :asset-id="Number(assetId)" @deleted="router.replace('/assets')" />
+        <TestVMDeleteButton v-if="auth.user?.is_platform_admin" :asset-id="Number(assetId)" @deleted="router.replace('/assets')" />
         <n-button v-if="canWrite" @click="financeOpen = true">采购 / 维保</n-button>
         <n-button type="primary" @click="testVmShowing = true">PXE 实验室</n-button>
         <n-button @click="refreshAll">刷新数据</n-button>
@@ -1141,7 +1141,7 @@ onUnmounted(() => {
         <n-button size="medium" :disabled="!canPower" :loading="actionBusy === 'on'" @click="handlePowerAction('on')">开机</n-button>
         <n-button size="medium" :disabled="!canPower" :loading="actionBusy === 'off'" @click="handlePowerAction('off')">关机</n-button>
         <n-button size="medium" type="warning" ghost :disabled="!canPower" :loading="actionBusy === 'restart'" @click="handlePowerAction('restart')">重启</n-button>
-        <n-button size="medium" type="primary" :disabled="!canOperate" @click="router.push(`/assets/${assetId}/sol`)">远程控制台</n-button>
+        <n-button size="medium" type="primary" :disabled="!auth.can('sol:access')" @click="router.push(`/assets/${assetId}/sol`)">远程控制台</n-button>
         <n-dropdown trigger="click" :options="moreOptions" @select="onMoreSelect">
           <n-button size="medium">更多 ▾</n-button>
         </n-dropdown>
