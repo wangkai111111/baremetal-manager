@@ -310,7 +310,7 @@ func (a *App) settings(c *gin.Context) {
 		}
 		items = append(items, gin.H{"key": key, "value": value, "category": strings.Split(key, ".")[0]})
 	}
-	ok(c, gin.H{"items": items, "total": len(items), "page": 1, "page_size": 200})
+	ok(c, gin.H{"items": items, "total": len(items), "page": 1, "page_size": 200, "catalog": settingCatalog()})
 }
 func (a *App) updateSettings(c *gin.Context) {
 	if !current(c).IsPlatformAdmin {

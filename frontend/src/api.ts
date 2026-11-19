@@ -16,7 +16,7 @@ export function clearProjectRequests() {
   globalLoading.value = false
   NProgress.done()
 }
-const projectResources = new Set(['assets', 'operations', 'operation-logs', 'tasks', 'images', 'alerts', 'audit', 'networks', 'members', 'datacenters', 'tags', 'alert-rules', 'alert-channels', 'kickstart-templates', 'ip-pools', 'firmware-packages', 'firmware-baselines', 'firmware-upgrades', 'install-plans', 'sol-sessions', 'hardware', 'firmware-inventory', 'installations', 'installation-events', 'asset-tags', 'install-plan-scripts', 'monitor-configs', 'image-templates', 'partition-templates', 'post-install-scripts', 'sensor-records', 'asset-monitor-configs', 'maintenance-windows', 'roles', 'api-keys', 'departments', 'work-orders'])
+const projectResources = new Set(['assets', 'operations', 'operation-logs', 'tasks', 'images', 'alerts', 'audit', 'networks', 'members', 'datacenters', 'tags', 'alert-rules', 'alert-rule-channels', 'alert-channels', 'kickstart-templates', 'ip-pools', 'firmware-packages', 'firmware-baselines', 'firmware-upgrades', 'install-plans', 'sol-sessions', 'hardware', 'firmware-inventory', 'installations', 'installation-events', 'asset-tags', 'install-plan-scripts', 'monitor-configs', 'image-templates', 'partition-templates', 'post-install-scripts', 'sensor-records', 'asset-monitor-configs', 'maintenance-windows', 'roles', 'api-keys', 'departments', 'work-orders'])
 export const api = axios.create({ baseURL: '/api/v1', timeout: 30000 })
 type CreateOptions = { projectId: string; sensitive: true }
 type ScopedConfig = { _expectedProjectId?: string; _expectedContextVersion?: number; _sensitive?: boolean }
@@ -123,7 +123,7 @@ export const resource = {
     return api.post(path, payload, config).then(() => undefined)
   },
   update: (path: string, id: string | number, payload: RecordData) => {
-    if (path === '/settings') return api.put(path, { [id]: id === 'app.footer_visible' ? payload.value === true || payload.value === 'true' : payload.value })
+    if (path === '/settings') return api.put(path, { [id]: payload.value })
     return api.put(`${path}/${encodeURIComponent(id)}`, payload)
   },
   remove: (path: string, id: string | number) => api.delete(`${path}/${encodeURIComponent(id)}`)

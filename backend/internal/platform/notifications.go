@@ -71,20 +71,20 @@ func validateChannel(kind string, config json.RawMessage, secret string) error {
 	decoder := json.NewDecoder(bytes.NewReader(config))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&cfg) != nil || decoder.Decode(new(any)) != io.EOF {
-		return errors.New("invalid channel configuration")
+		return errors.New("渠道配置格式不正确，请检查所填内容")
 	}
 	switch kind {
 	case "email":
 		in := smtpTestRequest{Host: cfg.Host, Port: cfg.Port, Username: cfg.Username, Password: secret, From: cfg.From, To: cfg.To, TLS: cfg.TLS}
 		if !in.valid() || (in.Username == "") != (in.Password == "") || (in.Username != "" && !in.TLS && in.Port != 465) {
-			return errors.New("invalid SMTP configuration; authentication requires TLS and a password")
+			return errors.New("邮件配置无效；请检查邮箱、端口和认证信息，认证需要 TLS 加密及密码")
 		}
 	case "webhook", "lark", "wechat", "dingtalk":
 		if string(config) != "{}" || !validWebhook(secret, kind) {
-			return errors.New("provide an HTTPS webhook URL as secret; config must be {}")
+			return errors.New("请填写有效的 HTTPS Webhook 完整地址，并确认机器人平台与渠道类型一致")
 		}
 	default:
-		return errors.New("supported channels: email, webhook, lark, wechat, dingtalk")
+		return errors.New("请选择邮件、通用 Webhook、飞书、企业微信或钉钉")
 	}
 	return nil
 }
@@ -102,7 +102,7 @@ func (a *App) writeChannel(create bool) gin.HandlerFunc {
 		dec := json.NewDecoder(c.Request.Body)
 		dec.DisallowUnknownFields()
 		if dec.Decode(&in) != nil || dec.Decode(new(any)) != io.EOF || strings.TrimSpace(in.Name) == "" || len(in.Name) > 255 {
-			fail(c, 400, "invalid channel settings")
+			fail(c, 400, "请填写有效的渠道名称和配置")
 			return
 		}
 		sc := contextScope(c)
@@ -111,14 +111,14 @@ func (a *App) writeChannel(create bool) gin.HandlerFunc {
 		if !create {
 			var old notificationChannel
 			if queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "alert_channels"}, sc).Where("id=?", id).Take(&old).Error != nil {
-				fail(c, 404, "channel not found")
+				fail(c, 404, "渠道不存在或已删除")
 				return
 			}
 			if old.SecretKeyID != "" {
 				var err error
 				secret, err = service.DecryptCredential(string(old.SecretCiphertext))
 				if err != nil || old.SecretKeyID != "v1" {
-					fail(c, 500, "channel credentials unavailable")
+					fail(c, 500, "渠道凭据暂不可用，请重新填写后保存")
 					return
 				}
 			}
@@ -136,12 +136,12 @@ func (a *App) writeChannel(create bool) gin.HandlerFunc {
 			secret = *in.Secret
 		}
 		if len(secret) > 4096 {
-			fail(c, 400, "channel secret too long")
+			fail(c, 400, "Webhook 地址或密码过长，最多 4096 字节")
 			return
 		}
 		var normalized any
 		if json.Unmarshal(in.Config, &normalized) != nil {
-			fail(c, 400, "invalid channel config")
+			fail(c, 400, "渠道配置格式不正确")
 			return
 		}
 		in.Config, _ = json.Marshal(normalized)
@@ -156,7 +156,7 @@ func (a *App) writeChannel(create bool) gin.HandlerFunc {
 		if secret != "" {
 			cipher, err := service.EncryptCredential(secret)
 			if err != nil {
-				fail(c, 500, "channel encryption failed")
+				fail(c, 500, "渠道凭据加密失败，请检查平台密钥配置")
 				return
 			}
 			values["secret_ciphertext"] = []byte(cipher)
@@ -166,7 +166,7 @@ func (a *App) writeChannel(create bool) gin.HandlerFunc {
 			values["secret_key_id"] = nil
 		}
 		if err := a.store.saveResource(c.Request.Context(), resource{table: "alert_channels"}, sc, id, values, create, &id); err != nil {
-			fail(c, 409, "channel save conflict")
+			fail(c, 409, "渠道保存失败，请检查名称是否重复或刷新后重试")
 			return
 		}
 		ok(c, gin.H{"id": id})
@@ -182,7 +182,7 @@ func sendChannel(ctx context.Context, channel notificationChannel, subject, mess
 		}
 		secret, err = service.DecryptCredential(string(channel.SecretCiphertext))
 		if err != nil {
-			return errors.New("channel credentials unavailable")
+			return errors.New("渠道凭据暂不可用，请重新填写后保存")
 		}
 	}
 	if err := validateChannel(channel.Kind, channel.Config, secret); err != nil {

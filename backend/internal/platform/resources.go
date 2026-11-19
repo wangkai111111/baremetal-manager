@@ -77,6 +77,12 @@ func resourceDocumentSQL(r resource) string {
 	if r.table == "audits" {
 		doc += " || " + auditDisplaySQL("audits")
 	}
+	if r.table == "alert_rules" {
+		doc += ` || jsonb_build_object('channel_ids',COALESCE((SELECT jsonb_agg(rc.channel_id ORDER BY rc.channel_id) FROM alert_rule_channels rc WHERE rc.rule_id=alert_rules.id AND rc.tenant_id=alert_rules.tenant_id AND rc.project_id=alert_rules.project_id AND rc.deleted_at IS NULL),'[]'::jsonb))`
+	}
+	if r.table == "alert_channels" {
+		doc += ` || jsonb_build_object('has_secret',COALESCE(secret_key_id,'')<>'')`
+	}
 	if r.table == "operations" {
 		doc += ` || jsonb_build_object(
  'operator_name', ` + auditUserSQL("operations.user_id") + `,
@@ -495,6 +501,10 @@ func (a *App) deleteResource(r resource) gin.HandlerFunc {
 			return
 		}
 		if e != nil {
+			if r.table == "alert_channels" {
+				fail(c, 409, "渠道不存在、正在测试或仍被告警规则引用；请先解除关联后重试")
+				return
+			}
 			fail(c, 409, "resource is missing, busy, or still referenced")
 			return
 		}

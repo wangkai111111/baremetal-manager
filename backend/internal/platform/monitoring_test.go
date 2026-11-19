@@ -124,7 +124,7 @@ func TestMonitorConsecutiveFailuresAndRecovery(t *testing.T) {
 }
 func TestMonitorAlertDedupAndRecovery(t *testing.T) {
 	op := operation{TenantID: 11, ProjectID: 22, AssetID: 33}
-	for _, severity := range []string{"warning", "critical"} {
+	for _, severity := range []string{"warning"} {
 		db, conn := monitoringDB(t, monitorSQLStep{`alert_shields`, []string{"id"}, nil}, monitorSQLStep{`SELECT id,severity`, []string{"id", "severity"}, [][]driver.Value{{int64(7), "warning"}}}, monitorSQLStep{`UPDATE "alerts"`, nil, nil})
 		if err := monitorAlert(db, op, "bmc.health", severity, 1, false); err != nil {
 			t.Fatal(err)
@@ -132,6 +132,19 @@ func TestMonitorAlertDedupAndRecovery(t *testing.T) {
 		if len(conn.queries) != 3 {
 			t.Fatal("continuous incident created another event or delivery")
 		}
+	}
+	// Escalation retains the incident but records an event and reevaluates routing.
+	escalationDB, escalation := monitoringDB(t,
+		monitorSQLStep{`alert_shields`, []string{"id"}, nil},
+		monitorSQLStep{`SELECT id,severity`, []string{"id", "severity"}, [][]driver.Value{{int64(7), "warning"}}},
+		monitorSQLStep{`UPDATE "alerts"`, nil, nil},
+		monitorSQLStep{`INSERT INTO "alert_events"`, []string{"id"}, [][]driver.Value{{int64(11)}}},
+		monitorSQLStep{`SELECT DISTINCT r.tenant_id`, nil, nil})
+	if err := monitorAlert(escalationDB, op, "bmc.health", "critical", 2, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(escalation.queries) != 5 {
+		t.Fatal("escalation did not reevaluate notification routing")
 	}
 	// 命中屏蔽规则时不得新建告警、事件或投递。
 	shielded, conn := monitoringDB(t, monitorSQLStep{`alert_shields`, []string{"id"}, [][]driver.Value{{int64(4)}}})

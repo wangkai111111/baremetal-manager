@@ -113,6 +113,8 @@ func (a *App) routes() *gin.Engine {
 		if !res.readonly {
 			if res.table == "alert_channels" {
 				p.POST("/"+res.path, a.require("alerts:write"), a.writeChannel(true))
+			} else if res.table == "alert_rules" {
+				p.POST("/"+res.path, a.require("alerts:write"), a.writeAlertRule(true))
 			} else if res.table == "images" {
 				p.POST("/"+res.path, a.require("images:write"), a.createImage)
 			} else {
@@ -121,10 +123,16 @@ func (a *App) routes() *gin.Engine {
 			if res.table == "alert_channels" {
 				p.PUT("/"+res.path+"/:id", a.require("alerts:write"), a.writeChannel(false))
 				p.POST("/"+res.path+"/:id/test", a.require("alerts:write"), a.testChannel)
+			} else if res.table == "alert_rules" {
+				p.PUT("/"+res.path+"/:id", a.require("alerts:write"), a.writeAlertRule(false))
 			} else {
 				p.PUT("/"+res.path+"/:id", a.require(code+":write"), a.writeResource(resource, false))
 			}
-			p.DELETE("/"+res.path+"/:id", a.require(code+":write"), a.deleteResource(resource))
+			if res.table == "alert_rules" {
+				p.DELETE("/"+res.path+"/:id", a.require("alerts:write"), a.deleteAlertRule)
+			} else {
+				p.DELETE("/"+res.path+"/:id", a.require(code+":write"), a.deleteResource(resource))
+			}
 		}
 	}
 

@@ -67,8 +67,8 @@ const router = createRouter({
         // === 专用页面路由（使用独立组件）===
         { path: 'datacenters', component: () => import('./views/DatacenterView.vue'), meta: { title: '机房管理', permission: 'datacenters:read' } },
         { path: 'tags', component: () => import('./views/TagManage.vue'), meta: { title: '标签管理', permission: 'assets:write' } },
-        { path: 'alert-rules', component: () => import('./views/AlertRuleView.vue'), meta: { title: '告警规则', permission: 'alerts:manage' } },
-        { path: 'alert-channels', component: () => import('./views/AlertChannelView.vue'), meta: { title: '推送渠道', permission: 'alerts:manage' } },
+        { path: 'alert-rules', component: () => import('./views/AlertRuleView.vue'), meta: { title: '告警规则', permission: 'alerts:read' } },
+        { path: 'alert-channels', component: () => import('./views/AlertChannelView.vue'), meta: { title: '推送渠道', permission: 'alerts:read' } },
         { path: 'images', component: () => import('./views/ImagesView.vue'), meta: { title: '镜像仓库', permission: 'images:read' } },
         { path: 'installations', redirect: '/images' },
         { path: 'kickstart-templates', redirect: '/images' },

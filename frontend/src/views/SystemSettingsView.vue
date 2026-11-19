@@ -6,8 +6,6 @@ import {
   NAlert,
   NInput,
   NInputNumber,
-  NDataTable,
-  NModal,
   NForm,
   NFormItem,
   NRadioGroup,
@@ -17,10 +15,10 @@ import {
 
   useMessage
 } from 'naive-ui'
-import type { DataTableColumns } from 'naive-ui'
-import { h } from 'vue'
-import { api, errorText, resource, rows, unwrap, type RecordData } from '../api'
+import { api, errorText, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
+import { useRouter } from 'vue-router'
+import SettingsCatalog, { type SettingOption } from '../components/SettingsCatalog.vue'
 import {
   applySavedSettings,
   footerText,
@@ -35,35 +33,19 @@ import {
 
 const message = useMessage()
 const auth = useAuth()
+const router = useRouter()
+const catalog = ref<SettingOption[]>([])
 
 // === 设置项分类 ===
-type SettingCategory = 'theme' | 'app' | 'operation' | 'bmc' | 'monitor' | 'alert' | 'sol' | 'pxe'
+type SettingCategory = 'all' | 'theme' | 'app' | 'operation' | 'features'
 
 // === 列表数据状态 ===
 const items = ref<RecordData[]>([])
 const loading = ref(false)
 const saving = ref(false)
-const activeTab = ref<SettingCategory>('theme')
+const activeTab = ref<SettingCategory>('all')
 
-// === 编辑弹窗状态 ===
-const editing = ref(false)
-const editKey = ref('')
-const editValue = ref('')
-
-// === 权限控制：仅 admin 可访问 ===
-const isAdmin = computed(() => auth.user?.role === 'admin' || auth.can('settings:write'))
-
-// === 按分类过滤设置项 ===
-const categoryPrefixes: Record<SettingCategory, string[]> = {
-  theme: ['brand.', 'theme.'],
-  app: ['app.'],
-  operation: ['smtp.'],
-  bmc: ['bmc.'],
-  monitor: ['monitor.', 'scan.'],
-  alert: ['alert.', 'notify.'],
-  sol: ['sol.'],
-  pxe: ['pxe.', 'dhcp.', 'tftp.', 'http.']
-}
+const isAdmin = computed(() => auth.user?.is_platform_admin === true)
 
 // === 主题设置状态（平台品牌 + 侧边栏配色） ===
 const brandName = ref(platformName.value)
@@ -178,7 +160,8 @@ async function saveOperationSettings() {
       'smtp.from': smtpFrom.value,
       'smtp.tls': smtpTls.value
     }
-    for (const [key, value] of Object.entries(smtpEntries)) await resource.update('/settings', key, { value })
+    await api.put('/settings', smtpEntries)
+    smtpPassword.value = ''
     message.success('SMTP 发信配置已保存')
     await load()
   } catch (e) {
@@ -197,68 +180,13 @@ function syncApp() {
   appLoginNotice.value = noticeItem ? String(noticeItem.value || '') : loginNotice.value
 }
 
-const filteredItems = computed(() => {
-  const prefixes = categoryPrefixes[activeTab.value] || []
-  return items.value.filter(item => {
-    // 优先按设置项自身分类匹配，兼容任意命名的新增配置项
-    if (String(item.category || '') === activeTab.value) return true
-    const key = String(item.key || '')
-    return prefixes.some(prefix => key.startsWith(prefix))
-  })
-})
-
-// === 表格列定义 ===
-const columns = computed<DataTableColumns<RecordData>>(() => [
-  {
-    title: '配置项',
-    key: 'key',
-    minWidth: 200,
-    render: (row: RecordData) =>
-      h('div', {}, [
-        h('strong', { style: 'font-size: 12px; color: #233946;' }, String(row.key || '—')),
-        row.description ? h('div', { style: 'font-size: 11px; color: #95a3ab; margin-top: 2px;' }, String(row.description)) : null
-      ])
-  },
-  {
-    title: '配置值',
-    key: 'value',
-    minWidth: 240,
-    render: (row: RecordData) => {
-      const val = String(row.value ?? '')
-      // 布尔值用开关展示
-      if (val === 'true' || val === 'false') {
-        return h(NSwitch, {
-          value: val === 'true',
-          disabled: !isAdmin.value,
-          onUpdateValue: (v: boolean) => updateSetting(row, String(v))
-        })
-      }
-      return h('span', { style: 'font-size: 12px; color: #40545e; word-break: break-all;' }, val || '—')
-    }
-  },
-  ...(isAdmin.value
-    ? [
-        {
-          title: '操作',
-          key: 'actions',
-          width: 80,
-          render: (row: RecordData) =>
-            h(
-              NButton,
-              { text: true, size: 'small', onClick: () => openEdit(row) },
-              { default: () => '编辑' }
-            )
-        }
-      ]
-    : [])
-])
-
 // === 加载设置项列表 ===
 async function load() {
   loading.value = true
   try {
-    const data = rows(await resource.list('/settings', { page: 1, page_size: 200 }))
+    const data = unwrap<{items: RecordData[]; catalog: SettingOption[]}>(await api.get('/settings'))
     items.value = data.items
+    catalog.value = data.catalog || []
     syncBrand()
     syncTheme()
     syncApp()
@@ -276,72 +204,15 @@ watch(
   { immediate: true }
 )
 
-// === 打开编辑弹窗 ===
-function openEdit(row: RecordData) {
-  editKey.value = String(row.key || '')
-  editValue.value = String(row.value ?? '')
-  editing.value = true
-}
-
-// === 更新单个设置项 ===
-async function updateSetting(row: RecordData, value: string) {
-  try {
-    await resource.update('/settings', String(row.key), { value })
-    message.success('已更新')
-    load()
-  } catch (e) {
-    message.error(errorText(e))
-  }
-}
-
-// === 保存编辑 ===
-async function saveEdit() {
-  if (!editValue.value) {
-    message.warning('配置值不能为空')
-    return
-  }
+async function saveSelectedSettings(values: Record<string, unknown>) {
+  if (!isAdmin.value || saving.value || loading.value) return
   saving.value = true
   try {
-    await resource.update('/settings', editKey.value, { value: editValue.value })
-    message.success('已更新')
-    editing.value = false
-    load()
-  } catch (e) {
-    message.error(errorText(e))
-  } finally {
-    saving.value = false
-  }
-}
-
-// === 新增设置项 ===
-const creating = ref(false)
-const newSetting = ref({ key: '', value: '', description: '' })
-
-function openCreate() {
-  newSetting.value = { key: '', value: '', description: '' }
-  creating.value = true
-}
-
-async function saveNewSetting() {
-  if (!newSetting.value.key.trim() || !newSetting.value.value.trim()) {
-    message.warning('请填写配置项与配置值')
-    return
-  }
-  saving.value = true
-  try {
-    await resource.update('/settings', newSetting.value.key.trim(), {
-      value: newSetting.value.value.trim(),
-      description: newSetting.value.description.trim(),
-      category: activeTab.value
-    })
-    message.success('设置项已保存')
-    creating.value = false
-    load()
-  } catch (e) {
-    message.error(errorText(e))
-  } finally {
-    saving.value = false
-  }
+    applySavedSettings(unwrap<RecordData>(await api.put('/settings', values)))
+    message.success('所选配置已保存')
+    await load()
+  } catch (e) { message.error(errorText(e)) }
+  finally { saving.value = false }
 }
 
 // === 将图片压缩为 data URL，限制 Logo 体积 ===
@@ -462,15 +333,16 @@ async function saveAppSettings() {
 
 // === 分类标签 ===
 const tabLabels: Record<SettingCategory, string> = {
-  theme: '主题设置',
-  app: '应用设置',
-  operation: '邮件通知',
-  bmc: 'BMC 配置',
-  monitor: '监控配置',
-  alert: '告警配置',
-  sol: 'SOL 配置',
-  pxe: 'PXE 配置'
+  all: '全部可用配置', theme: '主题设置', app: '应用设置', operation: '邮件通知', features: '功能配置入口'
 }
+const features = [
+  {name:'告警规则', description:'选择监控指标、健康等级或失败次数、设备标签范围及通知渠道。', path:'/alert-rules'},
+  {name:'推送渠道', description:'按邮件、企业微信、钉钉、飞书或 Webhook 类型配置接收目标。', path:'/alert-channels'},
+  {name:'PXE 装机服务', description:'选择宿主机网卡、子网、地址池、引导文件及标签固定 IP 规则。', path:'/pxe-config'},
+  {name:'BMC、硬件监控与 SOL', description:'在服务器中编辑 BMC 地址与凭据，打开服务器详情调整自动监控开关或使用 SOL。', path:'/assets'},
+  {name:'子网与地址池', description:'设置实际装机子网、网关、DNS 和可分配地址范围。', path:'/subnets'},
+  {name:'维保与资产折旧', description:'在服务器维保和折旧页面设置采购、供应商、维保到期及折旧参数。', path:'/asset-depreciation'}
+]
 </script>
 
 <template>
@@ -498,7 +370,8 @@ const tabLabels: Record<SettingCategory, string> = {
       </div>
 
       <!-- 主题设置：平台品牌 + 侧边栏配色 -->
-      <div v-if="activeTab === 'theme'" class="theme-settings">
+      <SettingsCatalog v-if="activeTab === 'all'" :options="catalog" :items="items" :disabled="loading || !isAdmin" :saving="saving" @save="saveSelectedSettings" />
+      <div v-else-if="activeTab === 'theme'" class="theme-settings">
         <section class="settings-section">
           <div class="settings-section-head">
             <h3>平台品牌</h3>
@@ -674,76 +547,17 @@ const tabLabels: Record<SettingCategory, string> = {
         </div>
       </div>
 
-      <template v-else>
-        <div class="panel-toolbar" style="border-top: none;">
-          <div>
-            <div class="panel-title">
-              {{ tabLabels[activeTab] }} <span class="count">{{ filteredItems.length }}</span>
-            </div>
-            <p class="panel-caption">当前分类下的配置项</p>
-          </div>
-          <div class="toolbar-actions">
-            <n-button quaternary @click="load">刷新</n-button>
-            <n-button v-if="isAdmin" type="primary" @click="openCreate">+ 新增配置项</n-button>
-          </div>
-        </div>
-        <n-data-table
-          :columns="columns"
-          :data="filteredItems"
-          :loading="loading"
-          :row-key="(row: RecordData) => row.id ?? ''"
-          :scroll-x="600"
-          :bordered="false"
-        />
-        <div v-if="!loading && !filteredItems.length" class="empty-hint">
-          当前分类下暂无配置项。
-        </div>
-      </template>
+      <section v-else class="feature-settings">
+        <n-alert type="info" :bordered="false">以下功能都有独立的设置界面，点击即可选择配置，无需输入配置项名称。</n-alert>
+        <div class="feature-grid"><article v-for="feature in features" :key="feature.path"><h3>{{ feature.name }}</h3><p>{{ feature.description }}</p><n-button @click="router.push(feature.path)">前往配置</n-button></article></div>
+      </section>
     </div>
-    <!-- 编辑配置项弹窗 -->
-    <n-modal
-      v-model:show="editing"
-      preset="card"
-      title="编辑配置项"
-      style="width: min(480px, 94vw)"
-    >
-      <n-form label-placement="top">
-        <n-form-item :label="editKey">
-          <n-input v-model:value="editValue" placeholder="请输入配置值" />
-        </n-form-item>
-        <div class="modal-actions">
-          <n-button @click="editing = false">取消</n-button>
-          <n-button type="primary" :loading="saving" @click="saveEdit">保存</n-button>
-        </div>
-      </n-form>
-    </n-modal>
-    <!-- 新增配置项弹窗 -->
-    <n-modal
-      v-model:show="creating"
-      preset="card"
-      title="新增配置项"
-      style="width: min(480px, 94vw)"
-    >
-      <n-form label-placement="top">
-        <n-form-item label="配置项" required>
-          <n-input v-model:value="newSetting.key" placeholder="如 bmc.timeout_seconds" />
-        </n-form-item>
-        <n-form-item label="配置值" required>
-          <n-input v-model:value="newSetting.value" placeholder="请输入配置值" />
-        </n-form-item>
-        <n-form-item label="说明">
-          <n-input v-model:value="newSetting.description" placeholder="可选的配置说明" />
-        </n-form-item>
-        <div class="modal-actions">
-          <n-button @click="creating = false">取消</n-button>
-          <n-button type="primary" :loading="saving" @click="saveNewSetting">保存</n-button>
-        </div>
-      </n-form>
-    </n-modal>
   </div>
 </template>
 
 <style scoped>
+.feature-settings { padding:24px; }.feature-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:20px; }.feature-grid article { border:1px solid var(--color-border); border-radius:var(--radius-sm); padding:20px; }.feature-grid h3 { margin:0; font-size:16px; }.feature-grid p { color:var(--color-text-secondary); font-size:13px; line-height:1.7; min-height:44px; }@media(max-width:700px) { .feature-grid { grid-template-columns:minmax(0,1fr); }.feature-settings { padding:16px; } }
+
 .operation-settings { background: #f6f8f9; padding: 28px; color: #1f3038; }.subsection-label { color:#74838a; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.operation-card-head p { margin:0; color:#74838a; font-size:13px; }.savebar-mark { width:7px; height:7px; display:inline-block; border-radius:50%; background:#d49644; }.operation-card { background:#fff; border:1px solid #dfe6e8; border-radius:4px; padding:24px; margin-bottom:16px; box-shadow:0 4px 14px rgba(31,48,56,.035); }.operation-card-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:22px; }.operation-card-head > div { display:flex; gap:14px; align-items:flex-start; }.operation-card h3 { margin:0 0 5px; font-size:17px; }.smtp-block { border-top:1px solid #edf0f1; padding-top:18px; margin-top:10px; }.subsection-label { margin-bottom:14px; }.subsection-label span { color:#a2adb1; letter-spacing:0; text-transform:none; font-weight:400; }.smtp-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:18px; }.smtp-form :deep(.n-form-item) { margin-bottom:16px; }.smtp-form :deep(.n-input-number) { width:100%; }.operation-savebar { display:flex; justify-content:space-between; align-items:center; padding:15px 4px 2px; color:#75848a; font-size:12px; }.operation-savebar > div:first-child { display:flex; align-items:center; gap:8px; }.operation-actions { display:flex; gap:10px; }
 @media (min-width: 1050px) {.operation-settings { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }.operation-savebar,.identity-card { grid-column:1/-1; } }.smtp-test-panel { border-top: 1px solid #e4e9ed; padding-top: 18px; }.smtp-test-panel > p { color: #64748b; font-size: 12px; line-height: 1.7; margin: 12px 0; }
 @media (max-width: 680px) {.operation-settings { padding:18px 14px; }.operation-card { padding:18px 16px; }.smtp-form { grid-template-columns:1fr; }.operation-savebar { align-items:flex-start; gap:14px; flex-direction:column; } }

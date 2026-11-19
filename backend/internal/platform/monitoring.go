@@ -182,8 +182,15 @@ func monitorAlert(tx *gorm.DB, op operation, metric, severity string, value int,
 		if escalated {
 			updates["severity"], updates["message"] = severity, message
 		}
-		// An active health incident stays one incident even if its severity changes.
-		return tx.Table("alerts").Where("id=?", current.ID).Updates(updates).Error
+		// Keep one incident, but evaluate routing again on escalation so channels
+		// configured for critical health receive the warning -> critical change.
+		if err := tx.Table("alerts").Where("id=?", current.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+		if !escalated {
+			return nil
+		}
+		eventType = "repeated"
 	}
 	event := map[string]any{"tenant_id": op.TenantID, "project_id": op.ProjectID, "alert_id": current.ID, "event_type": eventType, "message": fmt.Sprintf("Asset #%d: %s", op.AssetID, message)}
 	if err := tx.Table("alert_events").Clauses(clause.Returning{Columns: []clause.Column{{Name: "id"}}}).Create(&event).Error; err != nil {
