@@ -97,6 +97,7 @@ func (a *App) routes() *gin.Engine {
 	p.POST("/switch", func(c *gin.Context) { ok(c, contextScope(c)) })
 	p.POST("/assets/test-vm", a.testVM)
 	p.GET("/assets/test-vm", a.testVM)
+	p.DELETE("/assets/test-vm", a.testVM)
 	p.POST("/assets/test-vm/:action", a.testVM)
 	for _, res := range resources {
 		resource := res
@@ -172,6 +173,7 @@ func (a *App) routes() *gin.Engine {
 	p.GET("/assets/:id/collection", a.require("assets:read"), a.collection)
 	p.GET("/assets/:id/sol", a.require("sol:access"), a.sol)
 	p.POST("/assets/:id/sol-ticket", a.require("sol:access"), a.solTicket)
+	p.GET("/assets/:id/initial-access", a.require("assets:operate"), a.initialAccess)
 	p.POST("/assets/:id/install", a.require("install:operate"), a.installWithPreflight)
 	p.POST("/assets/:id/firmware-upgrade", a.require("firmware:operate"), unsupported)
 	p.POST("/installations", a.require("install:write"), a.installWithPreflight)

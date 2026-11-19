@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -48,7 +49,7 @@ func TestInstallAccessValidation(t *testing.T) {
 		{"key-only", installAccessInput{SSHAuthorizedKeys: []string{key}, RootSSHLogin: "prohibit-password"}, true},
 		{"remote-password", installAccessInput{RootPassword: "test-password", RootSSHLogin: "yes"}, true},
 		{"hostname", installAccessInput{Hostname: "node-01", RootPassword: "test-password"}, true},
-		{"empty", installAccessInput{}, false},
+		{"empty", installAccessInput{}, true},
 		{"short", installAccessInput{RootPassword: "short"}, false},
 		{"long", installAccessInput{RootPassword: strings.Repeat("a", 129)}, false},
 		{"unicode-bytes", installAccessInput{RootPassword: strings.Repeat("密", 43)}, false},
@@ -61,7 +62,7 @@ func TestInstallAccessValidation(t *testing.T) {
 		{"key-options", installAccessInput{SSHAuthorizedKeys: []string{"command=\"id\" " + key}}, false},
 		{"multiple-on-line", installAccessInput{SSHAuthorizedKeys: []string{key + "\n" + key}}, false},
 		{"missing-key", installAccessInput{RootPassword: "password", RootSSHLogin: "prohibit-password"}, false},
-		{"missing-password", installAccessInput{SSHAuthorizedKeys: []string{key}, RootSSHLogin: "yes"}, false},
+		{"missing-password", installAccessInput{SSHAuthorizedKeys: []string{key}, RootSSHLogin: "yes"}, true},
 		{"unknown-policy", installAccessInput{RootPassword: "password", RootSSHLogin: "all"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,8 +184,14 @@ func TestInstallAccessSnapshotAndAutoinstall(t *testing.T) {
 	if err := applyInstallAccess(ai, noPassword); err != nil {
 		t.Fatal(err)
 	}
-	if ai["late-commands"].([]any)[0].([]any)[6] != "!" {
-		t.Fatal("empty root password must be locked")
+	password, err := service.DecryptCredential(noPassword.RootPasswordEncrypted)
+	hash, _ := service.DecryptCredential(noPassword.RootHashEncrypted)
+	if err != nil || !noPassword.PasswordGenerated || len(password) < 32 || sha512_crypt.New().Verify(hash, []byte(password)) != nil {
+		t.Fatal("blank password must generate a recoverable encrypted random password and matching hash")
+	}
+	generated, err := (*installAccessInput)(nil).snapshot()
+	if err != nil || generated.RootSSHLogin != "yes" || !generated.PasswordGenerated || generated.RootPasswordEncrypted == noPassword.RootPasswordEncrypted {
+		t.Fatal("default request must generate unique credentials and enable root SSH")
 	}
 	noPassword.RootHashEncrypted = "broken"
 	if err := applyInstallAccess(ai, noPassword); err == nil {
@@ -235,8 +242,14 @@ func TestInstallAccessPersistsAndSeedExpires(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("PXE_TFTP_ROOT", root)
 	key := installTestPublicKey(t)
+	selectedMedia := makeInstallationMediaFixture(t, root, true)
+	var selectedID int64
+	if err := tx.Raw(`INSERT INTO images(tenant_id,project_id,name,object_key,size_bytes,sha256,os_type,version,architecture,status,create_by)
+ VALUES (?,?,?,?,?,?,'ubuntu','24.04.1','x86_64','ready',?) RETURNING id`, sc.Tenant, sc.Project, "Selected Ubuntu 24.04", selectedMedia.ObjectKey, selectedMedia.SizeBytes, selectedMedia.SHA256, sc.User).Scan(&selectedID).Error; err != nil {
+		t.Fatal(err)
+	}
 	input := &installAccessInput{Hostname: "pxe-access-test", RootPassword: "test-only-password", SSHAuthorizedKeys: []string{key}, RootSSHLogin: "yes"}
-	inst, opID, err := app.enqueueInstallation(context.Background(), sc, fixture.AssetID, fixture.PlanID, fixture.NetworkID, root, input, auditMeta{})
+	inst, opID, err := app.enqueueInstallation(context.Background(), sc, fixture.AssetID, fixture.PlanID, fixture.NetworkID, root, input, auditMeta{}, selectedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,8 +267,48 @@ func TestInstallAccessPersistsAndSeedExpires(t *testing.T) {
 	if err := json.Unmarshal([]byte(row.ConfigSnapshot), &snap); err != nil {
 		t.Fatal(err)
 	}
-	if snap.Hostname != input.Hostname || snap.Access == nil || snap.Access.RootSSHLogin != "yes" {
+	if snap.Hostname != input.Hostname || snap.Access == nil || snap.Access.RootSSHLogin != "yes" || snap.Media == nil || snap.Media.ID != selectedID || snap.Media.Version != "24.04.1" {
 		t.Fatal("access snapshot not saved")
+	}
+	// The credential endpoint is scoped, audited and never cacheable.
+	getAccess := func(testScope scope, guarded bool) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		router := gin.New()
+		router.Use(func(c *gin.Context) { c.Set("scope", testScope) })
+		if guarded {
+			router.GET("/assets/:id/initial-access", app.require("assets:operate"), app.initialAccess)
+		} else {
+			router.GET("/assets/:id/initial-access", app.initialAccess)
+		}
+		req := httptest.NewRequest("GET", fmt.Sprintf("/assets/%d/initial-access", fixture.AssetID), nil)
+		req.RemoteAddr = "192.0.2.45:1234"
+		router.ServeHTTP(w, req)
+		return w
+	}
+	w := getAccess(sc, true)
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("authorized initial access failed")
+	}
+	var accessResponse struct {
+		Data struct{ Password, Username, SSHCommand, Note string }
+	}
+	// JSON uses snake case for the SSH command; check account and password here.
+	if json.Unmarshal(w.Body.Bytes(), &accessResponse) != nil || accessResponse.Data.Password != input.RootPassword || accessResponse.Data.Username != "root" {
+		t.Fatal("initial credentials do not match installation")
+	}
+	wrongScope := sc
+	wrongScope.Project++
+	if getAccess(wrongScope, true).Code != 404 {
+		t.Fatal("cross-project credentials exposed")
+	}
+	unauthorized := sc
+	unauthorized.Admin = false
+	if getAccess(unauthorized, true).Code != 403 || getAccess(unauthorized, false).Code != 404 {
+		t.Fatal("unassigned user accessed credentials")
+	}
+	var auditDoc string
+	if err := tx.Raw("SELECT to_jsonb(a)::text FROM audits a WHERE action='initial-access:read' AND tenant_id=? AND project_id=? ORDER BY id DESC LIMIT 1", sc.Tenant, sc.Project).Scan(&auditDoc).Error; err != nil || auditDoc == "" || strings.Contains(auditDoc, input.RootPassword) {
+		t.Fatal("credential access audit missing or contains secret")
 	}
 	token, _ := service.DecryptCredential(snap.TokenEncrypted)
 	if service.CallbackTokenHash(token) != row.CallbackTokenHash {
@@ -320,6 +373,20 @@ func TestInstallAccessPersistsAndSeedExpires(t *testing.T) {
 	if err := tx.Table("installations").Where("id=?", inst).Update("status", "booting").Error; err != nil {
 		t.Fatal(err)
 	}
+	getMedia := func(testToken, kind, name string) int {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest("GET", "/", nil)
+		c.Params = gin.Params{{Key: "seedToken", Value: testToken}, {Key: "kind", Value: kind}, {Key: "file", Value: name}}
+		app.serveInstallationMedia(c)
+		if w.Code == 200 && name == "vmlinuz" && w.Body.String() != "selected-image-matching-kernel" {
+			t.Fatal("token served a different image kernel")
+		}
+		return w.Code
+	}
+	if getMedia(token, "netboot", "vmlinuz") != 200 || getMedia(token, "iso", DefaultISOFileName) != 404 || getMedia(strings.Repeat("x", 32), "netboot", "vmlinuz") != 404 {
+		t.Fatal("selected media token binding failed")
+	}
 	if getSeed(token, mac) != 200 {
 		t.Fatal("valid seed token rejected")
 	}
@@ -333,8 +400,8 @@ func TestInstallAccessPersistsAndSeedExpires(t *testing.T) {
 		t.Fatal("expired seed token accepted")
 	}
 	tx.Table("installations").Where("id=?", inst).Updates(map[string]any{"callback_expires_at": time.Now().Add(time.Hour), "callback_revoked_at": time.Now()})
-	if getSeed(token, mac) != 404 {
-		t.Fatal("revoked seed token accepted")
+	if getSeed(token, mac) != 404 || getMedia(token, "netboot", "vmlinuz") != 404 {
+		t.Fatal("revoked seed or media token accepted")
 	}
 	tx.Table("installations").Where("id=?", inst).Updates(map[string]any{"callback_revoked_at": nil, "status": "succeeded"})
 	if getSeed(token, mac) != 404 {

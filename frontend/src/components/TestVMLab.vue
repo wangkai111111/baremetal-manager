@@ -6,13 +6,15 @@ import { useRouter } from 'vue-router'
 import { useAuth } from '../stores/auth'
 import InstallationProgress, { type InstallationProgressData } from './InstallationProgress.vue'
 import InstallAccessSettings from './InstallAccessSettings.vue'
+import TestVMDeleteButton from './TestVMDeleteButton.vue'
 import { installAccessError, installAccessPayload, newInstallAccess } from '../utils/installAccess'
 
 const props = defineProps<{ show: boolean }>()
-const emit = defineEmits<{ 'update:show': [boolean]; updated: [] }>()
+const emit = defineEmits<{ 'update:show': [boolean]; updated: []; deleted: [] }>()
 type LabState = {
   tenant_id: number; firmware: string; running: boolean; serial_log?: string; error?: string
   asset_id: number; plan_id: number; network_known: boolean; network_ready: boolean
+  images: { id: number; name: string; version: string; architecture: string; disabled: boolean; reason: string }[]
   installation: InstallationProgressData
 }
 const state = ref<LabState | null>(null)
@@ -20,6 +22,10 @@ const firmware = ref('uefi')
 const busy = ref('')
 const failure = ref('')
 const confirmed = ref(false)
+const selectedImage = ref<number | null>(null)
+const imageOptions = computed(() => (state.value?.images || []).map(image => ({ label: `${image.name} · ${image.architecture}${image.reason ? `（${image.reason}）` : ''}`, value: image.id, disabled: image.disabled })))
+const selectedImageLabel = computed(() => state.value?.images?.find(image => image.id === selectedImage.value)?.name || '所选镜像')
+watch(selectedImage, () => { confirmed.value = false })
 const access = ref(newInstallAccess())
 const consoleElement = ref<HTMLElement>()
 const message = useMessage()
@@ -36,7 +42,7 @@ const statusLabel = computed(() => stages[state.value?.installation?.status || '
 const steps = computed(() => [
   { title: '创建虚拟机', detail: '2 vCPU · 8 GB 内存 · 40 GB 磁盘', done: !!state.value?.asset_id },
   { title: '准备 PXE 网络', detail: '隔离网段 192.168.77.0/24 · DHCP + TFTP', done: !!state.value?.network_ready },
-  { title: '网络安装 Ubuntu', detail: state.value?.installation?.id ? statusLabel.value : 'Ubuntu Server 22.04.5 · 自动分区安装', done: installed.value }
+  { title: '网络安装 Ubuntu', detail: state.value?.installation?.id ? statusLabel.value : '选择 Ubuntu Server 镜像 · 自动分区安装', done: installed.value }
 ])
 
 async function refresh(initial = false) {
@@ -48,6 +54,7 @@ async function refresh(initial = false) {
     const el = consoleElement.value
     const atBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 60
     state.value = result
+    if (!result.images?.some(image => image.id === selectedImage.value && !image.disabled)) selectedImage.value = result.images?.find(image => !image.disabled)?.id || null
     if (initial && result.firmware) firmware.value = result.firmware
     await nextTick()
     if (atBottom && consoleElement.value) consoleElement.value.scrollTop = consoleElement.value.scrollHeight
@@ -79,28 +86,36 @@ function prepareNetwork() {
 function power(action: string) {
   perform(action, async () => { await api.post(`/assets/test-vm/${action}`) })
 }
+function deleted() {
+  sequence++; clearTimeout(timer)
+  state.value = null
+  confirmed.value = false
+  access.value = newInstallAccess()
+  emit('update:show', false)
+  emit('deleted')
+}
 function install() {
-  if (!confirmed.value || !state.value?.asset_id || !state.value.plan_id) return
+  if (!confirmed.value || !state.value?.asset_id || !state.value.plan_id || !selectedImage.value) return
   const accessError = installAccessError(access.value)
   if (accessError) { message.error(accessError); return }
   perform('install', async () => {
     const vm = state.value!
-    await api.post(`/assets/${vm.asset_id}/install`, { install_plan_id: vm.plan_id, confirmed: true, access: installAccessPayload(access.value) })
+    await api.post(`/assets/${vm.asset_id}/install`, { install_plan_id: vm.plan_id, image_id: selectedImage.value, confirmed: true, access: installAccessPayload(access.value) })
     confirmed.value = false
     access.value = newInstallAccess()
     message.success('已提交 PXE 安装，进度由虚拟机实际回报')
   })
 }
-watch(() => props.show, show => {
+watch(() => [props.show, auth.projectId] as const, ([show]) => {
   clearTimeout(timer); sequence++
   access.value = newInstallAccess()
-  if (show) { state.value = null; confirmed.value = false; failure.value = ''; refresh(true) }
+  if (show) { selectedImage.value = null; state.value = null; confirmed.value = false; failure.value = ''; refresh(true) }
 }, { immediate: true })
 onBeforeUnmount(() => { disposed = true; sequence++; clearTimeout(timer) })
 </script>
 
 <template>
-  <NModal :show="show" @update:show="emit('update:show', $event)" preset="card" title="PXE 测试实验室" :mask-closable="!busy" :close-on-esc="!busy" style="width: min(880px, 96vw); max-height: 92vh; overflow: auto">
+  <NModal :show="show" @update:show="emit('update:show', $event)" preset="card" title="PXE 测试实验室" :closable="!busy" :mask-closable="!busy" :close-on-esc="!busy" style="width: min(880px, 96vw); max-height: 92vh; overflow: auto">
     <p class="lab-intro">用一台虚拟服务器，验证从网络引导到系统安装的完整流程。</p>
     <div class="lab-steps">
       <div v-for="(step, i) in steps" :key="step.title" class="lab-step" :class="{ done: step.done }">
@@ -119,12 +134,14 @@ onBeforeUnmount(() => { disposed = true; sequence++; clearTimeout(timer) })
         <NButton :loading="busy === 'network'" :disabled="!!busy || !state?.asset_id || active || state.network_ready" @click="prepareNetwork">{{ state?.network_ready ? 'PXE 网络已就绪' : '准备 PXE 网络' }}</NButton>
         <NButton :disabled="!!busy || !state?.asset_id || active" @click="power(state?.running ? 'stop' : 'start')">{{ state?.running ? '停止 VM' : '启动 VM' }}</NButton>
         <NButton v-if="state?.running" :disabled="!!busy || active" @click="power('restart')">从磁盘重启</NButton>
+        <TestVMDeleteButton v-if="state && (state.asset_id || state.tenant_id)" :asset-id="state.asset_id" :disabled="!!busy || active" @busy="busy = $event ? 'delete' : ''" @deleted="deleted" />
         <NPopconfirm v-if="active && !state?.installation.cleanup_pending" @positive-click="power('cancel-install')" positive-text="停止并取消安装" negative-text="继续等待">
           <template #trigger><NButton type="error" secondary :disabled="!!busy">取消安装</NButton></template>
           停止测试虚机并撤销本次安装回调。磁盘可能已被改写，再次测试需要重新安装。
         </NPopconfirm>
       </div>
     </div>
+    <p v-if="active" class="lab-footnote">安装或安装清理尚未结束，暂时不能删除测试 VM。</p>
     <div class="lab-install">
       <div>
         <strong>{{ statusLabel }}</strong>
@@ -135,11 +152,15 @@ onBeforeUnmount(() => { disposed = true; sequence++; clearTimeout(timer) })
       <NTag v-if="state?.installation?.id" :type="installed ? 'success' : state.installation.status === 'failed' ? 'error' : 'info'" :bordered="false">测试 VM 系统安装</NTag>
     </div>
     <template v-if="state?.installation?.id"><NButton v-if="auth.can('tasks:read')" secondary size="small" @click="viewTask">查看安装步骤与日志</NButton><InstallationProgress :installation="state.installation" /></template>
+    <NFormItem v-if="!active" label="安装镜像" :show-feedback="false" class="lab-image">
+      <NSelect v-model:value="selectedImage" aria-label="测试 VM 安装镜像" :options="imageOptions" :disabled="!!busy" filterable placeholder="选择已就绪的 Ubuntu Server 镜像" />
+    </NFormItem>
+    <p v-if="!active" class="lab-footnote">支持镜像库中的 Ubuntu Server 22.04 / 24.04 Live ISO（x86_64）。平台校验镜像并从该 ISO 提取匹配的内核；不兼容的镜像不可选择。</p>
     <InstallAccessSettings v-if="!active" v-model="access" :disabled="!!busy" />
-    <NCheckbox v-model:checked="confirmed" :disabled="!!busy || active || !state?.network_ready">我确认清空 BMM Test VM 的 40 GB 测试磁盘并安装 Ubuntu 22.04.5</NCheckbox>
+    <NCheckbox v-model:checked="confirmed" :disabled="!!busy || active || !state?.network_ready">我确认清空 BMM Test VM 的 40 GB 测试磁盘并安装 {{ selectedImageLabel }}</NCheckbox>
     <div class="lab-submit">
       <span>仅操作固定测试 VM；DHCP 绑定隔离网桥，不接入物理网卡。</span>
-      <NButton type="primary" :loading="busy === 'install'" :disabled="!!busy || active || !state?.network_ready || !state?.plan_id || !confirmed || !!installAccessError(access)" @click="install">{{ installed ? '重新安装 Ubuntu' : '开始 PXE 安装' }}</NButton>
+      <NButton type="primary" :loading="busy === 'install'" :disabled="!!busy || active || !state?.asset_id || !state?.network_ready || !state?.plan_id || !selectedImage || !confirmed || !!installAccessError(access)" @click="install">{{ installed ? '重新安装 Ubuntu' : '开始 PXE 安装' }}</NButton>
     </div>
     <div class="console-heading"><strong>实时串口日志</strong><NButton text size="small" :disabled="!!busy" @click="refresh()">刷新状态</NButton></div>
     <pre ref="consoleElement" class="lab-console" aria-label="虚拟机串口日志">{{ state?.serial_log || (state ? '等待虚拟机启动。完成网络准备后，点击“开始 PXE 安装”。' : '正在连接 PXE 控制服务…') }}</pre>
@@ -159,6 +180,7 @@ onBeforeUnmount(() => { disposed = true; sequence++; clearTimeout(timer) })
 .lab-alert { margin: 12px 0; overflow-wrap: anywhere; }
 .lab-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; }
 .lab-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.lab-image { margin-top: 20px; }
 .lab-install { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-top: 16px; border-top: 1px solid var(--color-border); }
 .lab-install p { color: var(--color-text-secondary); margin: 6px 0 14px; font-size: 13px; }
 .lab-submit { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 16px 0 24px; }

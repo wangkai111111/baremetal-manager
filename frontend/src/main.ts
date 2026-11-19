@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import { createDiscreteApi, darkTheme } from 'naive-ui'
 import App from './App.vue'
 import router from './router'
+import { loadBrand } from './stores/brand'
 import './style.css'
 
 // 在挂载前读取主题偏好，确保离散 API 使用正确的主题
@@ -30,6 +31,7 @@ const { message, dialog, notification, loadingBar } = createDiscreteApi(
   }
 )
 
+void loadBrand()
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)

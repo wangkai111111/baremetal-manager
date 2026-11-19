@@ -26,7 +26,9 @@ import { CopyOutline, ChevronDownOutline, AddOutline, RefreshOutline, ServerOutl
 import dayjs from 'dayjs'
 import { api, batchOps, errorText, exportToExcel, resource, rows, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
+import InitialAccessDialog from '../components/InitialAccessDialog.vue'
 import TestVMLab from '../components/TestVMLab.vue'
+import TestVMDeleteButton from '../components/TestVMDeleteButton.vue'
 import InstallAccessSettings from '../components/InstallAccessSettings.vue'
 import { installAccessError, installAccessPayload, newInstallAccess } from '../utils/installAccess'
 import { flattenDepartments } from '../utils/departments'
@@ -61,6 +63,8 @@ const reinstallConfirmName = ref('')
 const reinstallLoading = ref(false)
 const reinstallAccess = ref(newInstallAccess())
 watch(reinstallShowing, () => { reinstallAccess.value = newInstallAccess() })
+const initialAccessShowing = ref(false)
+const initialAccessAssetId = ref<number | null>(null)
 const testVmShowing = ref(false)
 
 // === 筛选条件 ===
@@ -449,13 +453,15 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
   cols.push({
     title: '操作',
     key: 'actions',
-    width: 204,
+    width: 260,
     fixed: fleetWidth.value >= 760 ? 'right' : undefined,
     render: row => {
       const intent = powerIntent(row)
       if (isTestVm(row)) return h('div', { class: 'table-actions row-actions' }, [
         h(NButton, { text: true, type: 'primary', onClick: openTestVm }, { default: () => 'PXE 实验室' }),
-        h(NButton, { text: true, onClick: () => router.push(`/assets/${row.id}`) }, { default: () => '详情' })
+        h(NButton, { text: true, onClick: () => router.push(`/assets/${row.id}`) }, { default: () => '详情' }),
+        h(TestVMDeleteButton, { assetId: Number(row.id), text: true, onDeleted: () => load(true) }),
+        canOperate.value ? h(NDropdown, { trigger: 'click', options: [{ label: '初始账号与 SSH 连接', key: 'initial-access' }], onSelect: (key: string) => handleRowMenu(key, row) }, { default: () => h(NButton, { text: true, 'aria-label': '更多操作' }, { default: () => '更多 ▾' }) }) : null
       ])
       const menu = rowMenuOptions(row)
       return h('div', { class: 'table-actions row-actions' }, [
@@ -496,6 +502,7 @@ const rowKey = (row: RecordData) => row.id as string | number
 
 function rowMenuOptions(row: RecordData): DropdownOption[] {
   const options: DropdownOption[] = [{ label: '查看详情', key: 'detail' }]
+  if (canOperate.value) options.push({ label: '初始账号与 SSH 连接', key: 'initial-access' })
   if (canOperate.value) options.push({ label: '重装系统', key: 'reinstall' })
   if (canOperate.value) options.push({ label: '采集硬件信息', key: 'collect' })
   options.push({ label: '打开 BMC 界面', key: 'bmc', disabled: !bmcWebUrl(row) })
@@ -794,6 +801,7 @@ function removeAsset(row: RecordData) {
 }
 
 function handleRowMenu(key: string, row: RecordData) {
+  if (key === 'initial-access') { initialAccessAssetId.value = Number(row.id); initialAccessShowing.value = true; return }
   if (key === 'reinstall') {
     startReinstall(row)
     return
@@ -1339,7 +1347,8 @@ onBeforeUnmount(() => {
         <n-button type="error" :loading="reinstallLoading" :disabled="reinstallLoading || !installPlans.length || installPlan == null || reinstallConfirmName !== String(reinstallTarget?.name || reinstallTarget?.management_ip || reinstallTarget?.bmc_address || '') || !!installAccessError(reinstallAccess)" @click="submitReinstall">确认清盘并提交</n-button>
       </div>
     </n-modal>
-    <TestVMLab v-model:show="testVmShowing" @updated="load(true)" />
+    <InitialAccessDialog v-model:show="initialAccessShowing" :asset-id="initialAccessAssetId" />
+    <TestVMLab v-model:show="testVmShowing" @updated="load(true)" @deleted="load(true)" />
     <!-- 新增 / 编辑服务器 -->
     <n-modal v-model:show="editing" preset="card" :title="currentId != null ? '编辑服务器' : '新增服务器'" style="width: min(560px, 94vw)">
       <n-form label-placement="top">

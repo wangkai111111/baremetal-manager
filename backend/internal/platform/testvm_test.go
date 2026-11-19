@@ -90,6 +90,8 @@ func TestTestVMGuards(t *testing.T) {
 		{"non-admin-read", "GET", "", false, scope{}, 403},
 		{"non-admin-create", "POST", "", false, scope{}, 403},
 		{"non-admin-reboot", "POST", "reboot", false, scope{}, 403},
+		{"non-admin-delete", "DELETE", "", false, scope{}, 403},
+		{"delete-needs-confirmation", "DELETE", "", true, scope{Tenant: 1, Project: 2}, 400},
 		{"invalid-scope", "POST", "", true, scope{}, 400},
 		{"unknown-action", "POST", "delete", true, scope{Tenant: 1, Project: 2}, 400},
 	} {
@@ -125,6 +127,7 @@ func TestTestVMRoutes(t *testing.T) {
 	for _, req := range []struct{ method, path string }{
 		{"GET", "/api/v1/projects/1/assets/test-vm"},
 		{"POST", "/api/v1/projects/1/assets/test-vm"},
+		{"DELETE", "/api/v1/projects/1/assets/test-vm"},
 		{"POST", "/api/v1/projects/1/assets/test-vm/reboot"},
 	} {
 		w := httptest.NewRecorder()

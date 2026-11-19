@@ -14,7 +14,7 @@ FROM debian:bookworm-slim
 # 时区与 ipmitool 工具
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates ipmitool wget dnsmasq-base qemu-system-x86 qemu-utils iproute2 ovmf \
+        ca-certificates xorriso ipmitool wget dnsmasq-base qemu-system-x86 qemu-utils iproute2 ovmf \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r bmm && useradd -r -g bmm bmm
 COPY --from=build /server /app/server

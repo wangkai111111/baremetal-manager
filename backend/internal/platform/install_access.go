@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 )
 
 // Install access settings belong to one installation, never to a reusable plan.
-// Only an encrypted Linux shadow hash is persisted; plaintext never reaches SQL.
+// Password and Linux shadow hash are encrypted separately; plaintext never reaches SQL.
 type installAccessInput struct {
 	Hostname          string   `json:"hostname"`
 	RootPassword      string   `json:"root_password"`
@@ -24,9 +25,11 @@ type installAccessInput struct {
 }
 
 type installAccessSnapshot struct {
-	RootHashEncrypted string   `json:"root_hash_encrypted,omitempty"`
-	SSHAuthorizedKeys []string `json:"ssh_authorized_keys"`
-	RootSSHLogin      string   `json:"root_ssh_login"`
+	RootPasswordEncrypted string   `json:"root_password_encrypted,omitempty"`
+	PasswordGenerated     bool     `json:"password_generated"`
+	RootHashEncrypted     string   `json:"root_hash_encrypted,omitempty"`
+	SSHAuthorizedKeys     []string `json:"ssh_authorized_keys"`
+	RootSSHLogin          string   `json:"root_ssh_login"`
 }
 
 var installHostnameRE = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
@@ -43,7 +46,7 @@ func writeEncryptedInstallSeed(path string, data []byte) error {
 
 func (in *installAccessInput) validate() error {
 	if in == nil {
-		return nil // Compatibility with existing clients that use plan defaults.
+		return nil // Omitted settings receive generated credentials during snapshotting.
 	}
 	if in.Hostname != "" && !installHostnameRE.MatchString(in.Hostname) {
 		return errors.New("主机名须为 1–63 位字母、数字或中划线，且不能以中划线开头或结尾")
@@ -74,11 +77,8 @@ func (in *installAccessInput) validate() error {
 		}
 	}
 	in.SSHAuthorizedKeys = keys
-	if in.RootPassword == "" && len(keys) == 0 {
-		return errors.New("请至少设置 root 密码或添加一条 SSH 公钥")
-	}
 	if in.RootSSHLogin == "" {
-		in.RootSSHLogin = "no"
+		in.RootSSHLogin = "yes"
 	}
 	switch in.RootSSHLogin {
 	case "no":
@@ -87,9 +87,6 @@ func (in *installAccessInput) validate() error {
 			return errors.New("root 仅公钥登录需要至少一条 SSH 公钥")
 		}
 	case "yes":
-		if in.RootPassword == "" {
-			return errors.New("允许 root SSH 密码登录时必须设置 root 密码")
-		}
 	default:
 		return errors.New("root SSH 登录策略无效")
 	}
@@ -98,15 +95,29 @@ func (in *installAccessInput) validate() error {
 
 func (in *installAccessInput) snapshot() (*installAccessSnapshot, error) {
 	if in == nil {
-		return nil, nil
+		in = &installAccessInput{}
 	}
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
 	snap := &installAccessSnapshot{SSHAuthorizedKeys: in.SSHAuthorizedKeys, RootSSHLogin: in.RootSSHLogin}
-	if in.RootPassword != "" {
+	password := in.RootPassword
+	if password == "" {
+		var random [24]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, errors.New("无法生成随机密码")
+		}
+		password = base64.RawURLEncoding.EncodeToString(random[:])
+		snap.PasswordGenerated = true
+	}
+	{
+		var err error
+		snap.RootPasswordEncrypted, err = service.EncryptCredential(password)
+		if err != nil {
+			return nil, errors.New("初始密码加密失败")
+		}
 		// SHA512-crypt is supported by the target Ubuntu 22.04 libcrypt/PAM stack.
-		hash, err := sha512_crypt.New().Generate([]byte(in.RootPassword), nil)
+		hash, err := sha512_crypt.New().Generate([]byte(password), nil)
 		if err != nil {
 			return nil, errors.New("无法生成系统密码哈希")
 		}

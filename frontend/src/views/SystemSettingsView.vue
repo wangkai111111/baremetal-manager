@@ -19,9 +19,10 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { h } from 'vue'
-import { api, errorText, resource, rows, type RecordData } from '../api'
+import { api, errorText, resource, rows, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
 import {
+  applySavedSettings,
   footerText,
   footerVisible,
   loginNotice,
@@ -408,51 +409,26 @@ async function saveThemeSettings() {
     return
   }
   const logo = brandLogo.value.trim()
-  // Logo 仅接受图片 URL 或 data:image Base64
-  if (logo && !(logo.startsWith('data:image/') || /^https?:\/\//i.test(logo))) {
+  // Keep supported image sources consistent with the server and tab icon.
+  if (logo && !/^(https?:\/\/|\/(?!\/)|data:image\/(png|jpeg);base64,)/i.test(logo)) {
     message.warning('Logo 需为图片 URL 或 data:image Base64 数据')
     return
   }
+  if (!isAdmin.value || themeSaving.value || loading.value) return
   const savedNavBg = themeNavBg.value
   const savedNavText = themeNavText.value
   themeSaving.value = true
   try {
-    await Promise.all([
-      resource.update('/settings', 'brand.platform_name', {
-        value: brandName.value.trim(),
-        description: '平台名称',
-        category: 'brand'
-      }),
-      resource.update('/settings', 'brand.platform_tagline', {
-        value: brandTagline.value.trim(),
-        description: '平台副标题',
-        category: 'brand'
-      }),
-      resource.update('/settings', 'brand.logo_url', {
-        value: logo,
-        description: '平台 Logo（图片 URL 或 Base64 数据）',
-        category: 'brand'
-      }),
-      resource.update('/settings', 'theme.nav_bg', {
-        value: savedNavBg,
-        description: '导航栏背景色',
-        category: 'theme'
-      }),
-      resource.update('/settings', 'theme.nav_text', {
-        value: savedNavText,
-        description: '导航栏文字颜色',
-        category: 'theme'
-      })
-    ])
-    // 同步侧边栏与登录页品牌
-    platformName.value = brandName.value.trim()
-    platformTagline.value = brandTagline.value.trim() || 'BAREMETAL CONTROL PLANE'
-    platformLogo.value = logo
-    navBackground.value = savedNavBg
-    navTextColor.value = savedNavText
-    themeNavText.value = savedNavText
+    const result = await api.put('/settings', {
+      'brand.platform_name': brandName.value.trim(),
+      'brand.platform_tagline': brandTagline.value.trim(),
+      'brand.logo_url': logo,
+      'theme.nav_bg': savedNavBg,
+      'theme.nav_text': savedNavText
+    })
+    applySavedSettings(unwrap<RecordData>(result))
     message.success('主题设置已保存')
-    load()
+    await load()
   } catch (error) {
     message.error(errorText(error))
   } finally {
@@ -462,34 +438,21 @@ async function saveThemeSettings() {
 
 // === 保存应用设置 ===
 async function saveAppSettings() {
+  if (!isAdmin.value || appSaving.value || loading.value) return
   if (!appFooterText.value.trim()) {
     message.warning('请输入侧边栏底部文案')
     return
   }
   appSaving.value = true
   try {
-    await Promise.all([
-      resource.update('/settings', 'app.footer_text', {
-        value: appFooterText.value.trim(),
-        description: '侧边栏底部文案',
-        category: 'app'
-      }),
-      resource.update('/settings', 'app.footer_visible', {
-        value: String(appFooterVisible.value),
-        description: '是否显示侧边栏底部状态',
-        category: 'app'
-      }),
-      resource.update('/settings', 'app.login_notice', {
-        value: appLoginNotice.value.trim(),
-        description: '登录页公告',
-        category: 'app'
-      })
-    ])
-    footerText.value = appFooterText.value.trim()
-    footerVisible.value = appFooterVisible.value
-    loginNotice.value = appLoginNotice.value.trim()
+    const result = await api.put('/settings', {
+      'app.footer_text': appFooterText.value.trim(),
+      'app.footer_visible': appFooterVisible.value,
+      'app.login_notice': appLoginNotice.value.trim()
+    })
+    applySavedSettings(unwrap<RecordData>(result))
     message.success('应用设置已保存')
-    load()
+    await load()
   } catch (error) {
     message.error(errorText(error))
   } finally {
@@ -539,7 +502,7 @@ const tabLabels: Record<SettingCategory, string> = {
         <section class="settings-section">
           <div class="settings-section-head">
             <h3>平台品牌</h3>
-            <p>登录页与侧边栏展示的平台名称、副标题与 Logo</p>
+            <p>平台名称与 Logo 同步用于登录页、侧边栏和浏览器标签页，副标题用于侧边栏</p>
           </div>
           <div class="brand-settings">
             <div class="brand-preview">
@@ -650,7 +613,7 @@ const tabLabels: Record<SettingCategory, string> = {
 
         <div class="modal-actions settings-actions">
           <n-button @click="resetTheme">重置</n-button>
-          <n-button v-if="isAdmin" type="primary" :loading="themeSaving" @click="saveThemeSettings">
+          <n-button v-if="isAdmin" type="primary" :loading="themeSaving" :disabled="loading" @click="saveThemeSettings">
             保存主题设置
           </n-button>
         </div>

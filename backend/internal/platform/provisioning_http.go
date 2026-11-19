@@ -486,7 +486,17 @@ func installStepMessage(key string) string {
 
 func (a *App) serveInstallationMedia(c *gin.Context) {
 	token, kind, name := c.Param("seedToken"), c.Param("kind"), c.Param("file")
-	if !provisioningCallbackTokenRe.MatchString(token) || !((kind == "netboot" && (name == "vmlinuz" || name == "initrd")) || (kind == "iso" && name == DefaultISOFileName)) {
+	if !provisioningCallbackTokenRe.MatchString(token) {
+		fail(c, 404, "media not found")
+		return
+	}
+	var row struct{ ConfigSnapshot json.RawMessage }
+	if err := a.store.db.WithContext(c.Request.Context()).Table("installations").Select("config_snapshot").Where("callback_token_hash=? AND deleted_at IS NULL AND callback_revoked_at IS NULL AND callback_expires_at>now() AND status IN ('booting','installing','post_install','unknown')", service.CallbackTokenHash(token)).Take(&row).Error; err != nil {
+		fail(c, 404, "installation inactive")
+		return
+	}
+	var snap installationSnapshot
+	if json.Unmarshal(row.ConfigSnapshot, &snap) != nil {
 		fail(c, 404, "media not found")
 		return
 	}
@@ -495,7 +505,7 @@ func (a *App) serveInstallationMedia(c *gin.Context) {
 		fail(c, 503, "media unavailable")
 		return
 	}
-	path, err := provisionResolveUnder(filepath.Join(root, kind), name)
+	path, err := installationMediaPath(root, snap, kind, name)
 	if err != nil {
 		fail(c, 404, "media not found")
 		return

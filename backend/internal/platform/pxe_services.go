@@ -119,6 +119,7 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		return
 	}
 	var in struct {
+		ImageID       int64               `json:"image_id"`
 		InstallPlanID int64               `json:"install_plan_id"`
 		Confirmed     bool                `json:"confirmed"`
 		Access        *installAccessInput `json:"access"`
@@ -162,7 +163,7 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		fail(c, 409, "PXE 预检失败："+e.Error())
 		return
 	}
-	id, opID, err := a.enqueueInstallation(c.Request.Context(), sc, asset, in.InstallPlanID, state.Config.NetworkID, state.Config.Root, in.Access, requestMeta(c, sc.User))
+	id, opID, err := a.enqueueInstallation(c.Request.Context(), sc, asset, in.InstallPlanID, state.Config.NetworkID, state.Config.Root, in.Access, requestMeta(c, sc.User), in.ImageID)
 	if err != nil {
 		fail(c, 409, err.Error())
 		return

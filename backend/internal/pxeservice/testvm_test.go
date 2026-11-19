@@ -1,11 +1,114 @@
 package pxeservice
 
 import (
+	"context"
+	"errors"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestDeleteVMStopsProcessAndOnlyRemovesVMFiles(t *testing.T) {
+	dir := t.TempDir()
+	files := []string{"test-vm.qcow2", "test-vm-vars.fd", "test-vm-serial.log", "test-vm.json.tmp", "test-vm.json", "config.json", "ubuntu.iso"}
+	for _, file := range files {
+		if err := os.WriteFile(filepath.Join(dir, file), []byte("keep or delete"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	c := &controller{commands: map[string]*exec.Cmd{"test-vm": cmd}, vmDone: done, vm: TestVMConfig{TenantID: 1, ProjectID: 2, Firmware: "uefi"}, vmError: "previous failure"}
+	if err := c.deleteTestVM(dir); err != nil {
+		t.Fatal(err)
+	}
+	if c.commands["test-vm"] != nil || c.vm != (TestVMConfig{}) || c.vmError != "" {
+		t.Fatal("VM process/ownership not released")
+	}
+	for _, file := range files[:5] {
+		if _, err := os.Lstat(filepath.Join(dir, file)); !os.IsNotExist(err) {
+			t.Fatalf("VM file remains: %s", file)
+		}
+	}
+	for _, file := range files[5:] {
+		if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
+			t.Fatalf("shared file removed: %s", file)
+		}
+	}
+	if err := c.deleteTestVM(dir); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+}
+
+func TestDeleteVMRejectsUnexpectedFilesBeforeRemovingDisk(t *testing.T) {
+	for _, kind := range []string{"directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			disk := filepath.Join(dir, "test-vm.qcow2")
+			if err := os.WriteFile(disk, []byte("disk"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			vars := filepath.Join(dir, "test-vm-vars.fd")
+			var err error
+			if kind == "directory" {
+				err = os.Mkdir(vars, 0700)
+			} else {
+				err = os.Symlink(disk, vars)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := TestVMConfig{TenantID: 1, ProjectID: 2}
+			c := &controller{commands: map[string]*exec.Cmd{}, vm: owner}
+			if c.deleteTestVM(dir) == nil {
+				t.Fatal("unexpected file accepted")
+			}
+			if _, err := os.Stat(disk); err != nil || c.vm != owner {
+				t.Fatal("disk or ownership lost on failure")
+			}
+		})
+	}
+}
+
+func TestDeleteVMHTTPGuards(t *testing.T) {
+	for _, mode := range []string{"other-project", "active", "unknown", "bad-owner", "unsupported-path"} {
+		t.Run(mode, func(t *testing.T) {
+			c := &controller{vm: TestVMConfig{TenantID: 1, ProjectID: 2, Firmware: "uefi"}, commands: map[string]*exec.Cmd{}, active: func(context.Context) (bool, error) {
+				if mode == "unknown" {
+					return false, errors.New("database unavailable")
+				}
+				return mode == "active", nil
+			}}
+			body := `{"tenant_id":1,"project_id":2,"firmware":"uefi"}`
+			if mode == "other-project" {
+				body = `{"tenant_id":1,"project_id":3,"firmware":"uefi"}`
+			}
+			if mode == "bad-owner" {
+				body = `{}`
+			}
+			path := "/test-vm"
+			if mode == "unsupported-path" {
+				path += "/delete"
+			}
+			w := httptest.NewRecorder()
+			c.ServeHTTP(w, httptest.NewRequest("DELETE", path, strings.NewReader(body)))
+			if w.Code != 409 && w.Code != 400 && w.Code != 404 {
+				t.Fatalf("delete was not rejected: %d", w.Code)
+			}
+			if c.vm.TenantID != 1 || c.vm.ProjectID != 2 {
+				t.Fatal("guard changed VM ownership")
+			}
+		})
+	}
+}
 
 func TestSerialLogBoundedAndRedacted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "serial.log")

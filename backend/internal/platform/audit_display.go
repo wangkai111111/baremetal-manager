@@ -9,7 +9,8 @@ import (
 // These labels are shared by the list, search and export. Identifiers remain
 // available to API consumers, but are never used as a display-name fallback.
 var auditActions = map[string]string{
-	"create": "创建", "update": "更新", "write": "保存", "delete": "删除",
+	"initial-access:read": "查看初始登录信息",
+	"create":              "创建", "update": "更新", "write": "保存", "delete": "删除",
 	"submit": "提交任务", "cancel": "取消任务", "claim": "认领", "assign": "分配",
 	"batch_assign": "批量分配", "reply": "回复", "settings:write": "修改系统设置",
 	"iam:write": "修改账号或密钥", "iam:manage": "管理角色授权", "access:manage": "调整访问授权",

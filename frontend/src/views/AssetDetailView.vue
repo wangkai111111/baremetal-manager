@@ -25,7 +25,9 @@ import {
   type SelectOption
 } from 'naive-ui'
 import { api, errorText, resource, rows, taskStatusType, unwrap, type RecordData } from '../api'
+import InitialAccessDialog from '../components/InitialAccessDialog.vue'
 import TestVMLab from '../components/TestVMLab.vue'
+import TestVMDeleteButton from '../components/TestVMDeleteButton.vue'
 import { flattenDepartments } from '../utils/departments'
 import { isTestVM } from '../utils/testVM'
 import { labels } from '../catalog'
@@ -939,9 +941,11 @@ async function copyText(value: string, label: string) {
   }
 }
 
+const initialAccessShowing = ref(false)
 const moreOptions = computed<DropdownOption[]>(() => {
   const url = bmcWebUrl()
   const options: DropdownOption[] = [
+    { key: 'initial-access', label: '初始账号与 SSH 连接', disabled: !canOperate.value },
     { key: 'collect', label: '采集硬件信息', disabled: !canOperate.value || collection.value.supported !== true || collectionLoading.value },
     { key: 'refresh', label: '刷新本页数据' },
     { key: 'ledger', label: '查看硬件台账' },
@@ -957,6 +961,7 @@ const moreOptions = computed<DropdownOption[]>(() => {
 })
 
 async function onMoreSelect(key: string) {
+  if (key === 'initial-access') { initialAccessShowing.value = true; return }
   if (key === 'collect') { await collectHardware(); if (activeTab.value === 'hardware') await nextTick(); return }
   if (key === 'refresh') { await refreshAll(); message.success('数据已刷新'); return }
   if (key === 'ledger') { activeTab.value = 'hardware'; return }
@@ -1125,9 +1130,11 @@ onUnmounted(() => {
       </div>
 
       <div v-if="testVm" class="titlebar-actions">
+        <TestVMDeleteButton :asset-id="Number(assetId)" @deleted="router.replace('/assets')" />
         <n-button v-if="canWrite" @click="financeOpen = true">采购 / 维保</n-button>
         <n-button type="primary" @click="testVmShowing = true">PXE 实验室</n-button>
         <n-button @click="refreshAll">刷新数据</n-button>
+        <n-dropdown trigger="click" :options="[{ key: 'initial-access', label: '初始账号与 SSH 连接', disabled: !canOperate }]" @select="onMoreSelect"><n-button>更多 ▾</n-button></n-dropdown>
       </div>
       <div v-else class="titlebar-actions">
         <n-button v-if="canWrite" @click="financeOpen = true">采购 / 维保</n-button>
@@ -1156,7 +1163,8 @@ onUnmounted(() => {
       <h3>操作记录</h3>
       <n-data-table :columns="operationColumns" :data="operations" :loading="operationsLoading" :pagination="{ pageSize: 10 }" :scroll-x="960" />
     </div>
-    <TestVMLab v-if="testVm" v-model:show="testVmShowing" @updated="refreshAll" />
+    <InitialAccessDialog v-model:show="initialAccessShowing" :asset-id="Number(assetId)" />
+    <TestVMLab v-if="testVm" v-model:show="testVmShowing" @updated="refreshAll" @deleted="router.replace('/assets')" />
     <div v-if="!testVm" class="panel detail-panel">
       <n-tabs v-model:value="activeTab" type="line" animated display-directive="show:lazy" class="detail-tabs">
         <!-- ===== Tab 1 概览 ===== -->

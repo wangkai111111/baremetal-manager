@@ -234,6 +234,31 @@ var legacyKeyMapping = map[string]string{
 	"login_notice":   "app.login_notice",
 }
 
+type publicSettingRow struct{ Key, Value string }
+
+// Legacy bootstrap keys are fallback values. Explicit modern settings always
+// win, including empty strings that intentionally remove a logo or notice.
+func mergePublicSettingRows(out map[string]any, rows []publicSettingRow) {
+	for _, legacyPass := range []bool{true, false} {
+		for _, row := range rows {
+			if row.Key == "smtp.password" {
+				continue
+			}
+			key, legacy := legacyKeyMapping[row.Key]
+			if legacy != legacyPass {
+				continue
+			}
+			if !legacy {
+				key = row.Key
+			}
+			var value any
+			if json.Unmarshal([]byte(row.Value), &value) == nil && validSetting(key, value) {
+				out[key] = value
+			}
+		}
+	}
+}
+
 func (a *App) publicSettings() map[string]any {
 	out := map[string]any{}
 	for k, v := range brandDefaults {
@@ -244,10 +269,7 @@ func (a *App) publicSettings() map[string]any {
 			out[k] = v
 		}
 	}
-	var rows []struct {
-		Key   string
-		Value string
-	}
+	var rows []publicSettingRow
 	// 查询所有已知前缀 key + 旧版无前缀 key
 	allKeys := settingKeys()
 	legacyKeys := make([]string, 0, len(legacyKeyMapping))
@@ -256,22 +278,7 @@ func (a *App) publicSettings() map[string]any {
 	}
 	queryKeys := append(allKeys, legacyKeys...)
 	a.store.db.Table("system_settings").Select("key,value::text").Where("deleted_at IS NULL AND key IN ?", queryKeys).Scan(&rows)
-	for _, r := range rows {
-		if r.Key == "smtp.password" {
-			continue
-		}
-		var value any
-		if json.Unmarshal([]byte(r.Value), &value) == nil {
-			// 映射旧版无前缀 key 到前缀 key
-			effectiveKey := r.Key
-			if mapped, isLegacy := legacyKeyMapping[r.Key]; isLegacy {
-				effectiveKey = mapped
-			}
-			if validSetting(effectiveKey, value) {
-				out[effectiveKey] = value
-			}
-		}
-	}
+	mergePublicSettingRows(out, rows)
 	var smtpConfigured int64
 	a.store.db.Table("system_settings").Where("deleted_at IS NULL AND key='smtp.password' AND value::text <> '\"\"'").Count(&smtpConfigured)
 	if smtpConfigured > 0 {
@@ -287,6 +294,7 @@ func settingKeys() []string {
 	return out
 }
 func (a *App) brand(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	s := a.publicSettings()
 	ok(c, gin.H{"platform_name": s["brand.platform_name"], "platform_tagline": s["brand.platform_tagline"], "logo_url": s["brand.logo_url"], "nav_bg_color": s["theme.nav_bg"], "nav_text_color": s["theme.nav_text"], "footer_text": s["app.footer_text"], "footer_visible": s["app.footer_visible"], "login_notice": s["app.login_notice"]})
 }
@@ -389,7 +397,7 @@ func validSetting(key string, value any) bool {
 		if !ok {
 			return false
 		}
-		return key != "brand.logo_url" || str == "" || strings.HasPrefix(str, "/") || strings.HasPrefix(str, "https://") || strings.HasPrefix(str, "data:image/png;base64,") || strings.HasPrefix(str, "data:image/jpeg;base64,")
+		return key != "brand.logo_url" || str == "" || strings.HasPrefix(str, "/") || strings.HasPrefix(str, "https://") || strings.HasPrefix(str, "http://") || strings.HasPrefix(str, "data:image/png;base64,") || strings.HasPrefix(str, "data:image/jpeg;base64,")
 	}
 	return false
 }

@@ -40,7 +40,7 @@ type installProgress struct {
 func newInstallSteps(now time.Time) []installStep {
 	steps := []installStep{
 		{Key: "queued", Title: "任务排队", TimeoutSeconds: 120},
-		{Key: "prepare", Title: "检查介质与生成安装配置", TimeoutSeconds: 120},
+		{Key: "prepare", Title: "校验所选镜像、提取内核与生成配置", TimeoutSeconds: 600},
 		{Key: "reboot", Title: "重启 VM 并强制网络引导", TimeoutSeconds: 60},
 		{Key: "pxe_boot", Title: "DHCP / TFTP / iPXE 引导", TimeoutSeconds: 180},
 		{Key: "download", Title: "下载内核、initrd 与系统镜像", TimeoutSeconds: 900},

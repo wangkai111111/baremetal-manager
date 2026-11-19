@@ -508,6 +508,9 @@ func (a *App) runOne(parent context.Context) {
 		return
 	}
 	budget := 60 * time.Second
+	if op.Kind == "install" {
+		budget = 10 * time.Minute
+	}
 	if op.Kind == "collect" {
 		budget = collectionDeadline + 10*time.Second
 	}

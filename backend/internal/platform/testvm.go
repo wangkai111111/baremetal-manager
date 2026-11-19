@@ -84,7 +84,7 @@ func (a *App) testVM(c *gin.Context) {
 		return
 	}
 	action := c.Param("action")
-	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodPost {
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodPost && c.Request.Method != http.MethodDelete {
 		fail(c, 405, "unsupported method")
 		return
 	}
@@ -93,6 +93,22 @@ func (a *App) testVM(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	if c.Request.Method == http.MethodDelete {
+		var in struct {
+			Confirmed bool   `json:"confirmed"`
+			AssetID   *int64 `json:"asset_id"`
+		}
+		if c.ShouldBindJSON(&in) != nil || !in.Confirmed || in.AssetID == nil || *in.AssetID < 0 {
+			fail(c, 400, "请确认永久删除测试 VM 及其系统磁盘")
+			return
+		}
+		if err := a.deleteTestVM(ctx, sc, *in.AssetID, testVMCall); err != nil {
+			fail(c, 409, err.Error())
+			return
+		}
+		ok(c, gin.H{"deleted": true})
+		return
+	}
 	state, status, err := testVMCall(ctx, http.MethodGet, "/test-vm", nil)
 	if err != nil {
 		fail(c, status, err.Error())

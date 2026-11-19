@@ -69,18 +69,29 @@ func (a *App) testVMLabStatus(c *gin.Context, vm pxeservice.TestVMStatus, sc sco
 			return
 		}
 	}
+	var images []installationMedia
+	if err := queryScope(db, resource{table: "images"}, sc).Order("id DESC").Find(&images).Error; err != nil {
+		fail(c, 500, "可选镜像读取失败")
+		return
+	}
+	imageOptions := make([]gin.H, 0, len(images))
+	for _, image := range images {
+		reason := image.unavailableReason()
+		imageOptions = append(imageOptions, gin.H{"id": image.ID, "name": image.Name, "version": image.Version, "architecture": image.Architecture, "disabled": reason != "", "reason": reason})
+	}
 	data, status, err := pxeservice.Call(c.Request.Context(), http.MethodGet, "/status", nil)
 	var network pxeservice.Status
 	networkKnown := err == nil && status == 200 && json.Unmarshal(data, &network) == nil
 	ready := networkKnown && network.DHCP && network.TFTP && network.Config.TenantID == sc.Tenant && network.Config.ProjectID == sc.Project && network.Config.Interface == pxeservice.TestVMBridge && network.Config.Subnet == "192.168.77.0/24" && network.Config.Server == "192.168.77.1"
 	ok(c, struct {
 		pxeservice.TestVMStatus
+		Images       []gin.H         `json:"images"`
 		AssetID      int64           `json:"asset_id"`
 		PlanID       int64           `json:"plan_id"`
 		NetworkKnown bool            `json:"network_known"`
 		NetworkReady bool            `json:"network_ready"`
 		Installation installProgress `json:"installation"`
-	}{vm, assetID, planID, networkKnown, ready, installation})
+	}{vm, imageOptions, assetID, planID, networkKnown, ready, installation})
 }
 
 // Prepare only the fixed lab bridge; never replace a running service on another network.

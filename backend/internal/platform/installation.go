@@ -23,6 +23,7 @@ import (
 const testInstallHTTPBase = "http://192.168.77.1:18080/api/v1/provision"
 
 type installationSnapshot struct {
+	Media          *installationMedia     `json:"media,omitempty"`
 	MAC            string                 `json:"mac"`
 	Root           string                 `json:"root"`
 	IP             string                 `json:"ip"`
@@ -59,7 +60,7 @@ func renderInstallationSeed(snap installationSnapshot) (map[string]any, error) {
 	return seed, nil
 }
 
-func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID, networkID int64, root string, access *installAccessInput, meta auditMeta) (int64, int64, error) {
+func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID, networkID int64, root string, access *installAccessInput, meta auditMeta, imageIDs ...int64) (int64, int64, error) {
 	var installationID, operationID int64
 	accessSnapshot, err := access.snapshot()
 	if err != nil {
@@ -85,7 +86,7 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 			return err
 		}
 		if asset.Manufacturer != "BMM Test VM" || asset.Model != "QEMU PXE Lab" || !strings.EqualFold(asset.MACAddress, pxeservice.TestVMMAC) {
-			return errors.New("仅允许 BMM Test VM Ubuntu 22.04 安装")
+			return errors.New("仅允许对 BMM Test VM 执行测试安装")
 		}
 		var active int64
 		if err := tx.Table("operations").Where("asset_id=? AND deleted_at IS NULL AND status IN ('pending','running','retry_wait','unknown')", assetID).Count(&active).Error; err != nil {
@@ -114,9 +115,28 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 		if err != nil {
 			return err
 		}
-		if plan.ID == 0 || plan.OSType != "ubuntu" || !strings.HasPrefix(plan.Version, "22.04") || (plan.Architecture != "amd64" && plan.Architecture != "x86_64") || plan.Format != "autoinstall" || plan.NetworkID != networkID {
-			return errors.New("计划必须使用当前 PXE 网络、Ubuntu 22.04 amd64 镜像及 autoinstall 模板")
+		if plan.ID == 0 || plan.OSType != "ubuntu" || !ubuntuLiveVersionRE.MatchString(plan.Version) || (plan.Architecture != "amd64" && plan.Architecture != "x86_64") || plan.Format != "autoinstall" || plan.NetworkID != networkID {
+			return errors.New("计划必须使用当前 PXE 网络、Ubuntu Server 22.04 / 24.04 amd64 镜像及 autoinstall 模板")
 		}
+		var planSnapshot map[string]json.RawMessage
+		if err := json.Unmarshal(plan.Snapshot, &planSnapshot); err != nil {
+			return err
+		}
+		var media installationMedia
+		if err := json.Unmarshal(planSnapshot["image"], &media); err != nil {
+			return err
+		}
+		if len(imageIDs) > 0 && imageIDs[0] != 0 {
+			media = installationMedia{}
+			if err := queryScope(tx, resource{table: "images"}, sc).Where("id=?", imageIDs[0]).Take(&media).Error; err != nil {
+				return errors.New("所选镜像不存在或无权使用")
+			}
+		}
+		if reason := media.unavailableReason(); reason != "" {
+			return errors.New(reason)
+		}
+		planSnapshot["image"], _ = json.Marshal(media)
+		plan.Snapshot, _ = json.Marshal(planSnapshot)
 		var scripts int64
 		if err := tx.Table("install_plan_scripts").Where("install_plan_id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL", planID, sc.Tenant, sc.Project).Count(&scripts).Error; err != nil {
 			return err
@@ -137,11 +157,11 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 		if access != nil && access.Hostname != "" {
 			cfg.Hostname = access.Hostname
 		}
-		if access != nil {
+		if accessSnapshot != nil {
 			// Explicit per-install settings replace a plan's legacy SSH key.
 			cfg.SSHKey = ""
 		}
-		snap := installationSnapshot{MAC: asset.MACAddress, IP: "192.168.77.100", Root: root, TokenEncrypted: encrypted, Hostname: cfg.Hostname, SSHKey: cfg.SSHKey, Access: accessSnapshot, Content: plan.Content, Layout: plan.Layout, Plan: plan.Snapshot}
+		snap := installationSnapshot{Media: &media, MAC: asset.MACAddress, IP: "192.168.77.100", Root: root, TokenEncrypted: encrypted, Hostname: cfg.Hostname, SSHKey: cfg.SSHKey, Access: accessSnapshot, Content: plan.Content, Layout: plan.Layout, Plan: plan.Snapshot}
 		if _, err := renderInstallationSeed(snap); err != nil {
 			return errors.New("安装配置无效，请检查 autoinstall 模板和系统访问设置")
 		}
@@ -195,6 +215,9 @@ func (a *App) runInstallation(ctx context.Context, op operation, event outbox) {
 			if installation.Status == "pending" || installation.Status == "preparing" {
 				status = "failed"
 				message = "安装准备失败，尚未重启 VM；请检查安装介质、应答配置及 PXE 网络"
+				if errors.Is(err, errInstallMedia) {
+					message = err.Error() + "；尚未重启 VM"
+				}
 			}
 			if e := tx.Table("operations").Where("id=?", op.ID).Updates(map[string]any{"status": status, "error": message, "completed_at": time.Now()}).Error; e != nil {
 				return e
@@ -244,14 +267,20 @@ func (a *App) prepareTestInstallation(ctx context.Context, op operation) error {
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{"netboot/vmlinuz", "netboot/initrd", "iso/" + DefaultISOFileName} {
-		path, err := provisionResolveUnder(snap.Root, name)
-		if err != nil {
-			return err
+	if snap.Media != nil {
+		if err := prepareInstallationMedia(ctx, snap.Root, snap.Media); err != nil {
+			return fmt.Errorf("%w：%s", errInstallMedia, err.Error())
 		}
-		st, err := os.Stat(path)
-		if err != nil || !st.Mode().IsRegular() {
-			return errors.New("真实 Ubuntu 安装介质不可用")
+	} else {
+		for _, name := range []string{"netboot/vmlinuz", "netboot/initrd", "iso/" + DefaultISOFileName} {
+			path, err := provisionResolveUnder(snap.Root, name)
+			if err != nil {
+				return err
+			}
+			st, err := os.Stat(path)
+			if err != nil || !st.Mode().IsRegular() {
+				return errors.New("真实 Ubuntu 安装介质不可用")
+			}
 		}
 	}
 	seed, err := renderInstallationSeed(snap)
@@ -288,7 +317,11 @@ func (a *App) prepareTestInstallation(ctx context.Context, op operation) error {
 	cfg.PXE.TFTPRoot = snap.Root
 	cfg.PXE.HTTPBase = testInstallHTTPBase
 	generator := NewIPXEScriptGenerator(cfg)
-	script, err := generator.UbuntuScript(snap.MAC, "", "", "", DefaultISOFileName)
+	isoName := DefaultISOFileName
+	if snap.Media != nil {
+		isoName = "image.iso"
+	}
+	script, err := generator.UbuntuScript(snap.MAC, "", "", "", isoName)
 	if err != nil {
 		return err
 	}

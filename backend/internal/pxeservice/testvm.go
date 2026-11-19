@@ -85,7 +85,8 @@ func (s *controller) testVMHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := strings.TrimPrefix(r.URL.Path, "/test-vm/")
-	if !(r.Method == "PUT" && r.URL.Path == "/test-vm") && !(r.Method == "POST" && (action == "start" || action == "stop" || action == "restart" || action == "reboot" || action == "abort" || action == "boot-disk")) {
+	deleting := r.Method == http.MethodDelete && r.URL.Path == "/test-vm"
+	if !deleting && !(r.Method == "PUT" && r.URL.Path == "/test-vm") && !(r.Method == "POST" && (action == "start" || action == "stop" || action == "restart" || action == "reboot" || action == "abort" || action == "boot-disk")) {
 		fail(404, errors.New("unsupported test VM operation"))
 		return
 	}
@@ -96,6 +97,15 @@ func (s *controller) testVMHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(409, errors.New("无法确认空闲状态或存在活动装机任务"))
 			return
 		}
+	}
+	if deleting {
+		if err := s.deleteTestVM(filepath.Dir(testVMState)); err != nil {
+			s.vmError = err.Error()
+			fail(500, err)
+			return
+		}
+		json.NewEncoder(w).Encode(s.vmStatus())
+		return
 	}
 	if action == "boot-disk" && s.commands["test-vm"] != nil {
 		fail(409, errors.New("等待安装器正常重启退出后才能从磁盘启动"))
@@ -141,6 +151,45 @@ func (s *controller) testVMHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	s.vmError = ""
 	json.NewEncoder(w).Encode(s.vmStatus())
+}
+
+// The directory is fixed by the HTTP handler; accepting it here permits tests
+// against temporary files without touching a real VM. Never recursively remove
+// a directory, follow symlinks, or delete shared PXE/network configuration.
+func (s *controller) deleteTestVM(dir string) error {
+	if err := s.stopTestVM(); err != nil {
+		return err
+	}
+	files := []string{"test-vm.qcow2", "test-vm-vars.fd", "test-vm-serial.log", "test-vm.json.tmp", "test-vm.json"}
+	info, err := os.Lstat(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil && !info.IsDir() {
+		return errors.New("测试 VM 状态目录无效")
+	}
+	for _, name := range files {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("测试 VM 文件 %s 不是普通文件，拒绝删除", name)
+		}
+	}
+	// Ownership is removed last so a partial failure cannot release the disk
+	// to another project; retrying missing files is safe.
+	for _, name := range files {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	s.vm = TestVMConfig{}
+	s.vmError = ""
+	return nil
 }
 
 func ipCommand(ctx context.Context, args ...string) error {
