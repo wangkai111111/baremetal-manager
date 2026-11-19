@@ -281,11 +281,13 @@ async function changePassword() {
   passwordSaving.value = true
   try {
     await api.put('/auth/password', {
-      current_password: passwordForm.value.oldPassword,
+      old_password: passwordForm.value.oldPassword,
       new_password: passwordForm.value.newPassword
     })
-    message.success('密码修改成功')
+    message.success('密码修改成功，请重新登录')
     passwordModal.value = false
+    auth.logout()
+    await router.replace('/login')
   } catch (e) {
     message.error(errorText(e))
   } finally {

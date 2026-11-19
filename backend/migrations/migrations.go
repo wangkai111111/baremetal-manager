@@ -74,3 +74,6 @@ var RemoveNetworkRecordsSQL string
 
 //go:embed 020_quiet_automatic_collection.sql
 var QuietAutomaticCollectionSQL string
+
+//go:embed 021_user_initial_password.sql
+var UserInitialPasswordSQL string

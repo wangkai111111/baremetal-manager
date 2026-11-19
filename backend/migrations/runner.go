@@ -8,7 +8,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const TargetVersion = "020_quiet_automatic_collection"
+const TargetVersion = "021_user_initial_password"
 
 var incrementalMigrations = []struct{ version, sql string }{
 	{"004_mode_system", ModeSystemSQL},
@@ -27,7 +27,8 @@ var incrementalMigrations = []struct{ version, sql string }{
 	{"017_installation_progress", InstallationProgressSQL},
 	{"018_asset_access", AssetAccessSQL},
 	{"019_remove_network_records", RemoveNetworkRecordsSQL},
-	{TargetVersion, QuietAutomaticCollectionSQL},
+	{"020_quiet_automatic_collection", QuietAutomaticCollectionSQL},
+	{TargetVersion, UserInitialPasswordSQL},
 }
 
 // Apply 在空库内执行目标迁移；旧数据库明确报错，不隐式破坏历史数据。

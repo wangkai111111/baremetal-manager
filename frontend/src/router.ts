@@ -35,6 +35,7 @@ const router = createRouter({
   routes: [
     // === 公开路由（白名单：/login、/setup，不做认证重定向）===
     { path: '/login', component: () => import('./views/LoginView.vue'), meta: { public: true } },
+    { path: '/change-password', component: () => import('./views/ChangePasswordView.vue'), meta: { title: '修改初始密码' } },
     {
       path: '/setup',
       component: () => import('./views/SetupView.vue'),
@@ -141,6 +142,9 @@ router.beforeEach(async to => {
       return '/login'
     }
   }
+
+  if (auth.user?.must_change_password && to.path !== '/change-password') return '/change-password'
+  if (!auth.user?.must_change_password && to.path === '/change-password') return '/'
 
   // 4. 权限检查
   if (to.meta.permission && !auth.user?.is_platform_admin) await auth.loadProjectPermissions()

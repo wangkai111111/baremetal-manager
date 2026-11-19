@@ -13,6 +13,8 @@ import {
   NSelect,
   NPopconfirm,
   NTag,
+  NAlert,
+  NSwitch,
   useMessage
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -21,6 +23,7 @@ import { api, errorText, resource, rows, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
 import { flattenDepartments } from '../utils/departments'
 import UserAccessEditor from '../components/UserAccessEditor.vue'
+import { copyToClipboard } from '../utils/clipboard'
 const accessOpen = ref(false)
 const accessUser = ref<RecordData>({})
 function openAccess(row: RecordData) { accessUser.value = row; accessOpen.value = true }
@@ -49,11 +52,23 @@ const creating = ref(false)
 const saving = ref(false)
 const currentId = ref<string | number | null>(null)
 const form = ref<RecordData>({})
-const newUser = ref<{ username: string; password: string; role: string }>({
-  username: '',
-  password: '',
-  role: 'user'
-})
+const newUser = ref(newUserDraft())
+function newUserDraft() { return {username:'', name:'', email:'', password:'', role:'user', send_email:false, must_change_password:true} }
+const optionsLoading = ref(false), smtpReady = ref(false)
+const resultOpen = ref(false)
+watch(creating, open => { if (!open) newUser.value.password = '' })
+const createdUser = ref({id:undefined as string | number | undefined, username:'', password:'', role:'user', emailStatus:'skipped', emailMessage:'', mustChange:true})
+async function copyCredentials() {
+  try { await copyToClipboard(`用户名：${createdUser.value.username}\n初始密码：${createdUser.value.password}`); message.success('初始账号密码已复制') }
+  catch { message.error('复制失败，请手动选择复制') }
+}
+function closeResult() {
+  const account = {id:createdUser.value.id, username:createdUser.value.username}
+  const assign = createdUser.value.role === 'user'
+  resultOpen.value = false
+  createdUser.value.password = ''
+  if (assign) openAccess(account)
+}
 
 // === 权限控制 ===
 const canWrite = computed(() => auth.user?.is_platform_admin === true)
@@ -63,6 +78,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
   { title: '用户名', key: 'username', minWidth: 120 },
   { title: '姓名', key: 'name', minWidth: 100 },
   { title: '邮箱', key: 'email', minWidth: 160 },
+  { title: '首次登录改密', key:'must_change_password', minWidth:120, render:row=>row.must_change_password ? '待修改密码' : '无需强制修改' },
   {
     title: '平台角色',
     key: 'role',
@@ -164,31 +180,46 @@ function openEdit(row: RecordData) {
 }
 
 // === 打开新增用户弹窗 ===
-function openCreate() {
-  newUser.value = { username: '', password: '', role: 'user' }
+async function openCreate() {
+  newUser.value = newUserDraft()
+  smtpReady.value = false
   creating.value = true
+  optionsLoading.value = true
+  try { smtpReady.value = unwrap<{smtp_ready:boolean}>(await api.get('/users/options')).smtp_ready }
+  catch (error) { message.error(errorText(error)) }
+  finally { optionsLoading.value = false }
 }
 
 // === 创建新用户 ===
 async function saveNewUser() {
+  if (!canWrite.value || saving.value || optionsLoading.value) return
   if (!newUser.value.username.trim()) {
     message.warning('请输入用户名')
     return
   }
-  if (newUser.value.password.length < 6) {
-    message.warning('密码长度不能少于 6 位')
+  const passwordBytes = new TextEncoder().encode(newUser.value.password).length
+  if (passwordBytes > 0 && (passwordBytes < 6 || passwordBytes > 72)) {
+    message.warning('密码需为 6–72 字节，或留空自动生成')
     return
   }
+  const email = newUser.value.email.trim()
+  if ((email || newUser.value.send_email) && !/^[^\s@<>;,]+@[^\s@<>;,]+$/.test(email)) { message.warning('请填写有效的邮箱地址'); return }
   saving.value = true
   try {
     const response = await api.post('/auth/users', {
       username: newUser.value.username.trim(),
       password: newUser.value.password,
-      role: newUser.value.role
+      name: newUser.value.name.trim(), email,
+      role: newUser.value.role,
+      send_email:newUser.value.send_email,
+      must_change_password:newUser.value.must_change_password
     })
+    const result = unwrap<RecordData>(response)
+    createdUser.value = {id:result.id, username:newUser.value.username.trim(), password:String(result.initial_password || newUser.value.password), role:newUser.value.role, emailStatus:String(result.email_status || 'skipped'), emailMessage:String(result.email_message || ''), mustChange:result.must_change_password === true}
+    newUser.value.password = ''
     message.success('用户已创建')
     creating.value = false
-    if (newUser.value.role === 'user') openAccess({id: unwrap<RecordData>(response).id, username: newUser.value.username})
+    resultOpen.value = true
     page.value = 1
     load()
   } catch (e) {
@@ -205,7 +236,8 @@ async function save() {
     const payload = {
       name: form.value.name || '',
       email: form.value.email || '',
-      role: form.value.role || 'user'
+      role: form.value.role || 'user',
+      ...(String(currentId.value) !== String(auth.user?.id) ? {must_change_password:form.value.must_change_password === true} : {})
     }
     await resource.update('/users', currentId.value!, payload)
     message.success('保存成功')
@@ -300,6 +332,9 @@ async function remove(row: RecordData) {
         <n-form-item label="角色">
           <n-select v-model:value="(form.role as string)" :options="roleOptions" />
         </n-form-item>
+        <n-form-item v-if="String(currentId) !== String(auth.user?.id)" label="下次登录强制修改密码">
+          <n-switch v-model:value="(form.must_change_password as boolean)" />
+        </n-form-item>
         <div class="modal-actions">
           <n-button @click="editing = false">取消</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>
@@ -311,29 +346,58 @@ async function remove(row: RecordData) {
       v-model:show="creating"
       preset="card"
       title="新增用户"
-      style="width: min(460px, 94vw)"
+      class="create-user-modal"
+      :style="{width:'min(640px, calc(100vw - 32px))', maxHeight:'calc(100dvh - 32px)'}"
+      content-style="min-height:0; overflow-y:auto;"
+      :mask-closable="!saving"
+      :closable="!saving"
+      :close-on-esc="!saving"
     >
-      <n-form label-placement="top">
+      <n-form label-placement="top" :disabled="saving">
+        <div class="resource-form-grid">
         <n-form-item label="用户名" required>
-          <n-input v-model:value="newUser.username" placeholder="请输入登录用户名" />
+          <n-input v-model:value="newUser.username" placeholder="请输入登录用户名" :maxlength="255" />
         </n-form-item>
-        <n-form-item label="初始密码" required>
+        <n-form-item label="姓名">
+          <n-input v-model:value="newUser.name" placeholder="用户显示姓名（选填）" :maxlength="255" />
+        </n-form-item>
+        <n-form-item label="初始密码（选填）">
           <n-input
             v-model:value="newUser.password"
             type="password"
             show-password-on="click"
-            placeholder="6–72 字节"
+            placeholder="留空自动生成随机密码"
+            :input-props="{autocomplete:'new-password'}"
           />
         </n-form-item>
         <n-form-item label="平台角色">
           <n-select v-model:value="newUser.role" :options="roleOptions" />
         </n-form-item>
-        <div class="modal-actions">
-          <n-button @click="creating = false">取消</n-button>
-          <n-button type="primary" :loading="saving" @click="saveNewUser">创建</n-button>
+        <n-form-item label="邮箱" :required="newUser.send_email" class="form-item-wide">
+          <n-input v-model:value="newUser.email" placeholder="接收初始账号信息的邮箱" :maxlength="254" />
+        </n-form-item>
+        <n-form-item label="发送账号邮件"><n-switch v-model:value="newUser.send_email" :disabled="saving || optionsLoading || !smtpReady" :loading="optionsLoading" /></n-form-item>
+        <n-form-item label="首次登录强制修改密码"><n-switch v-model:value="newUser.must_change_password" /></n-form-item>
+        <n-alert class="form-item-wide" :type="smtpReady ? 'info' : 'warning'" :bordered="false">{{ optionsLoading ? '正在检查系统邮件配置…' : smtpReady ? '启用后使用系统设置中已保存的 SMTP，向该邮箱发送登录用户名及初始密码。' : '系统 SMTP 尚未配置完整。请在系统设置的邮件通知中保存有效配置，再启用账号邮件。您仍可直接创建用户并复制初始密码。' }}</n-alert>
+        <n-alert type="info" :bordered="false" class="form-item-wide">创建后显示初始账号密码，请及时复制。普通用户还需由管理员分配组织或部门访问权限。</n-alert>
         </div>
       </n-form>
+      <template #footer><div class="user-modal-actions"><n-button :disabled="saving" @click="creating=false">取消</n-button><n-button type="primary" :loading="saving" :disabled="optionsLoading || !newUser.username.trim()" @click="saveNewUser">创建用户</n-button></div></template>
+    </n-modal>
+    <n-modal v-model:show="resultOpen" preset="card" title="用户已创建" class="created-user-modal" :style="{width:'min(520px, calc(100vw - 32px))',maxHeight:'calc(100dvh - 32px)'}" content-style="min-height:0; overflow-y:auto;" :mask-closable="false" :closable="false" :close-on-esc="false">
+      <n-alert :type="createdUser.emailStatus==='failed' ? 'warning' : 'success'" :bordered="false">{{ createdUser.emailMessage || '用户创建成功。请复制下方初始凭据，关闭后将不再显示初始密码。' }}</n-alert>
+      <n-form label-placement="top" class="created-user-form">
+        <n-form-item label="登录用户名"><n-input :value="createdUser.username" readonly /></n-form-item>
+        <n-form-item label="初始密码"><n-input :value="createdUser.password" type="password" show-password-on="click" readonly :input-props="{autocomplete:'off'}" /></n-form-item>
+      </n-form>
+      <p>{{ createdUser.mustChange ? '首次登录必须修改初始密码。' : '首次登录不强制修改密码，可在个人菜单中自行修改。' }}</p>
+      <template #footer><div class="user-modal-actions"><n-button @click="copyCredentials">复制账号密码</n-button><n-button type="primary" @click="closeResult">{{ createdUser.role==='user' ? '继续分配访问权限' : '完成' }}</n-button></div></template>
     </n-modal>
     <UserAccessEditor v-model:show="accessOpen" :user-id="accessUser.id" :username="String(accessUser.username || '')" @saved="load" />
   </div>
 </template>
+<style scoped>
+.user-modal-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:12px; }
+.created-user-form { margin-top:20px; }
+.created-user-modal p { color:var(--color-text-secondary); line-height:1.7; }
+</style>

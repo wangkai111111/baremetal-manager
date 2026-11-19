@@ -73,7 +73,7 @@ func (a *App) solWithTicket(c *gin.Context) {
 	}
 	t := v.(ticket)
 	u, e := a.store.activeUser(t.Scope.User)
-	if e != nil || time.Now().After(t.Expires) {
+	if e != nil || u.MustChangePassword || time.Now().After(t.Expires) {
 		fail(c, 401, "expired SOL ticket")
 		return
 	}

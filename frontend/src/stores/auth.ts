@@ -50,6 +50,7 @@ export interface User {
   name?: string
   role?: string
   is_platform_admin?: boolean
+  must_change_password?: boolean
   can_manage_organization?: boolean
   project_ids?: number[]
   permissions?: string[]
@@ -175,6 +176,7 @@ export const useAuth = defineStore('auth', () => {
 
   // 从 /auth/me 接口加载当前项目的权限列表
   async function loadProjectPermissions() {
+    if (user.value?.must_change_password) { currentPermissions.value = []; return }
     const requestedProject = projectId.value
     if (!requestedProject) { currentPermissions.value = []; return }
     try {
@@ -223,6 +225,12 @@ export const useAuth = defineStore('auth', () => {
     sessionStorage.setItem('bmm_token', accessToken)
     user.value = result.user || null
     if (!user.value) await loadUser()
+    if (user.value?.must_change_password) {
+      currentPermissions.value = []
+      memberships.value = []
+      parseTokenExpiry()
+      return
+    }
     syncProject()
     // 登录成功后解析 token 过期时间
     parseTokenExpiry()
@@ -232,6 +240,7 @@ export const useAuth = defineStore('auth', () => {
 
   async function loadUser() {
     user.value = unwrap<User>(await api.get('/auth/me'))
+    if (user.value?.must_change_password) return
     syncProject()
     await loadProjectPermissions()
   }

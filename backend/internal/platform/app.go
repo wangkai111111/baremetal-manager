@@ -22,6 +22,7 @@ import (
 type App struct {
 	trustedProxies []string
 	networkState   func(context.Context) (pxeservice.Status, error)
+	userMailSender func(context.Context, smtpTestRequest, string, string) error
 	store          *store
 	secret         []byte
 	node           string
@@ -29,12 +30,18 @@ type App struct {
 }
 type store struct{ db *gorm.DB }
 type user struct {
-	ID              int64  `json:"id"`
-	Username        string `json:"username"`
-	Name            string `json:"name"`
-	Email           string `json:"email"`
-	PasswordHash    string `json:"-"`
-	IsPlatformAdmin bool   `json:"is_platform_admin"`
+	ID                 int64  `json:"id"`
+	Username           string `json:"username"`
+	Name               string `json:"name"`
+	Email              string `json:"email"`
+	PasswordHash       string `json:"-"`
+	IsPlatformAdmin    bool   `json:"is_platform_admin"`
+	MustChangePassword bool   `json:"must_change_password"`
+	PasswordVersion    int64  `json:"-"`
+}
+type loginClaims struct {
+	jwt.RegisteredClaims
+	PasswordVersion int64 `json:"password_version,omitempty"`
 }
 type scope struct {
 	Tenant, Project, User int64
@@ -110,7 +117,7 @@ func (a *App) guard(c *gin.Context) {
 		fail(c, 401, "authentication required")
 		return
 	}
-	claims := jwt.RegisteredClaims{}
+	claims := loginClaims{}
 	t, err := jwt.ParseWithClaims(token, &claims, func(*jwt.Token) (any, error) { return a.secret, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired(), jwt.WithIssuer("baremetal-platform"))
 	if err != nil || !t.Valid {
 		fail(c, 401, "invalid token")
@@ -119,6 +126,14 @@ func (a *App) guard(c *gin.Context) {
 	u, err := a.store.activeUser(number(claims.Subject))
 	if err != nil {
 		fail(c, 401, "inactive user")
+		return
+	}
+	if claims.PasswordVersion != u.PasswordVersion {
+		fail(c, 401, "密码已变更，请重新登录")
+		return
+	}
+	if u.MustChangePassword && !passwordChangeRoute(c) {
+		c.AbortWithStatusJSON(403, gin.H{"code": 403, "message": "请先修改初始密码", "password_change_required": true})
 		return
 	}
 	c.Set("user", u)
@@ -180,7 +195,7 @@ func (a *App) login(c *gin.Context) {
 		return
 	}
 	now := time.Now()
-	claims := jwt.RegisteredClaims{Subject: strconv.FormatInt(u.ID, 10), Issuer: "baremetal-platform", IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(8 * time.Hour))}
+	claims := loginClaims{RegisteredClaims: jwt.RegisteredClaims{Subject: strconv.FormatInt(u.ID, 10), Issuer: "baremetal-platform", IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(8 * time.Hour))}, PasswordVersion: u.PasswordVersion}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(a.secret)
 	if err != nil {
 		fail(c, 500, "token creation failed")
@@ -207,15 +222,19 @@ func (a *App) authMe(c *gin.Context) {
 // “拥有全部权限”，因此无需展开成员/权限联表；其余用户按成员关系解析实际权限。
 func (a *App) buildUserContext(u user, projectID int64) gin.H {
 	out := gin.H{
-		"id":                u.ID,
-		"username":          u.Username,
-		"name":              u.Name,
-		"email":             u.Email,
-		"is_platform_admin": u.IsPlatformAdmin,
-		"role":              "user",
-		"project_ids":       []int64{},
-		"permissions":       []string{},
-		"memberships":       []gin.H{},
+		"id":                   u.ID,
+		"username":             u.Username,
+		"name":                 u.Name,
+		"email":                u.Email,
+		"is_platform_admin":    u.IsPlatformAdmin,
+		"must_change_password": u.MustChangePassword,
+		"role":                 "user",
+		"project_ids":          []int64{},
+		"permissions":          []string{},
+		"memberships":          []gin.H{},
+	}
+	if u.MustChangePassword {
+		return out
 	}
 	if u.IsPlatformAdmin {
 		out["role"] = "admin"
@@ -307,12 +326,16 @@ func (a *App) password(c *gin.Context) {
 		NewPassword string `json:"new_password"`
 	}
 	if c.ShouldBindJSON(&in) != nil || len(in.NewPassword) < 6 || len(in.NewPassword) > 72 {
-		fail(c, 400, "password must contain 6 to 72 bytes")
+		fail(c, 400, "新密码需为 6–72 字节")
 		return
 	}
 	u := current(c)
 	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(in.OldPassword)) != nil {
-		fail(c, 403, "invalid current password")
+		fail(c, 403, "当前密码不正确")
+		return
+	}
+	if in.NewPassword == in.OldPassword {
+		fail(c, 400, "新密码不能与当前密码相同")
 		return
 	}
 	hash, e := bcrypt.GenerateFromPassword([]byte(in.NewPassword), bcrypt.DefaultCost)
@@ -320,12 +343,16 @@ func (a *App) password(c *gin.Context) {
 		fail(c, 500, "password hashing failed")
 		return
 	}
-	e = a.store.db.Table("users").Where("id=? AND password_hash=?", u.ID, u.PasswordHash).Update("password_hash", string(hash)).Error
-	if e != nil {
-		fail(c, 500, "password update failed")
+	result := a.store.db.Table("users").Where("id=? AND password_hash=? AND password_version=? AND status='active' AND deleted_at IS NULL", u.ID, u.PasswordHash, u.PasswordVersion).Updates(map[string]any{"password_hash": string(hash), "must_change_password": false, "password_version": gorm.Expr("password_version+1")})
+	if result.Error != nil || result.RowsAffected != 1 {
+		fail(c, 500, "密码更新失败，请重新登录后重试")
 		return
 	}
 	ok(c, nil)
+}
+
+func passwordChangeRoute(c *gin.Context) bool {
+	return c.Request.Method == "GET" && c.FullPath() == "/api/v1/auth/me" || c.Request.Method == "PUT" && c.FullPath() == "/api/v1/auth/password"
 }
 func (a *App) readiness(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)

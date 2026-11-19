@@ -37,6 +37,10 @@ func (a *App) iamKeyGuard(c *gin.Context, secret string) {
 		fail(c, 401, "inactive API key owner")
 		return
 	}
+	if u.MustChangePassword {
+		fail(c, 403, "请先登录平台修改初始密码，再使用 API 密钥")
+		return
+	}
 	sc := scope{Tenant: key.TenantID, Project: key.ProjectID, User: u.ID, Admin: u.IsPlatformAdmin}
 	var active int64
 	e = a.store.db.Table("projects p").Joins("JOIN tenants t ON t.id=p.tenant_id AND t.status='active' AND t.deleted_at IS NULL").Where("p.id=? AND p.tenant_id=? AND p.status='active' AND p.deleted_at IS NULL", key.ProjectID, key.TenantID).Count(&active).Error
@@ -148,6 +152,7 @@ func (a *App) iamScope(c *gin.Context) {
 
 func (a *App) iamRoutes(auth, p *gin.RouterGroup) {
 	auth.GET("/users", a.iamUsers)
+	auth.GET("/users/options", a.iamAdmin, a.userCreateOptions)
 	auth.POST("/auth/users", a.iamAdmin, a.iamScope, a.iamWriteUser)
 	auth.POST("/users", a.iamAdmin, a.iamScope, a.iamWriteUser)
 	auth.PUT("/users/:id", a.iamAdmin, a.iamScope, a.iamWriteUser)
@@ -175,7 +180,7 @@ func (a *App) iamAdmin(c *gin.Context) {
 	c.Next()
 }
 func (a *App) iamUsers(c *gin.Context) {
-	q := a.store.db.Table("users").Select("users.id,username,name,email,status,is_platform_admin,last_login_at,created_at,updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role").Where("users.deleted_at IS NULL")
+	q := a.store.db.Table("users").Select("users.id,username,name,email,status,is_platform_admin,must_change_password,last_login_at,created_at,updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role").Where("users.deleted_at IS NULL")
 	if !current(c).IsPlatformAdmin || c.Param("projectId") != "" {
 		if _, exists := c.Get("scope"); !exists {
 			a.iamScope(c)
@@ -207,7 +212,7 @@ func (a *App) iamUsers(c *gin.Context) {
 	if value, exists := c.Get("scope"); exists {
 		summaryAccess = departmentAccessSQL(value.(scope), "summary_grant.department_id", true)
 	}
-	q = q.Select(`users.id,username,name,email,status,is_platform_admin,last_login_at,users.created_at,users.updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role,
+	q = q.Select(`users.id,username,name,email,status,is_platform_admin,must_change_password,last_login_at,users.created_at,users.updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role,
  COALESCE((SELECT jsonb_agg(jsonb_build_object('department_id',summary_grant.department_id,'department_name',(SELECT d.name FROM departments d WHERE d.id=summary_grant.department_id AND d.tenant_id=summary_grant.tenant_id AND d.deleted_at IS NULL),'is_admin',summary_grant.is_admin) ORDER BY summary_grant.id)
  FROM user_access_grants summary_grant WHERE summary_grant.user_id=users.id AND summary_grant.tenant_id=? AND (`+summaryAccess+`) AND (summary_grant.department_id IS NULL OR EXISTS(SELECT 1 FROM departments d WHERE d.id=summary_grant.department_id AND d.tenant_id=summary_grant.tenant_id AND d.deleted_at IS NULL))),'[]'::jsonb) AS access_grants`, tenantID)
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
@@ -252,7 +257,12 @@ func (a *App) iamWriteUser(c *gin.Context) {
 	var in struct {
 		Username, Password, Name, Email, Role, Status string
 		Admin                                         *bool `json:"is_platform_admin"`
+		MustChangePassword                            *bool `json:"must_change_password"`
+		SendEmail                                     bool  `json:"send_email"`
 	}
+	generated := false
+	var mailConfig smtpTestRequest
+	c.Header("Cache-Control", "no-store")
 	values := map[string]any{"update_by": sc.User}
 	if c.Request.Method == "DELETE" {
 		if id == sc.User {
@@ -262,12 +272,43 @@ func (a *App) iamWriteUser(c *gin.Context) {
 		values["deleted_at"] = time.Now()
 		values["status"] = "disabled"
 	} else {
-		if c.ShouldBindJSON(&in) != nil || (in.Status != "" && !validIAMStatus(in.Status)) || (in.Role != "" && in.Role != "user" && in.Role != "admin") {
+		if c.ShouldBindJSON(&in) != nil || (in.Status != "" && !validIAMStatus(in.Status)) || (in.Role != "" && in.Role != "user" && in.Role != "admin") || !create && in.SendEmail {
 			fail(c, 400, "invalid user")
 			return
 		}
+		in.Email = strings.TrimSpace(in.Email)
+		if in.Email != "" && !validUserEmail(in.Email) || in.SendEmail && in.Email == "" {
+			fail(c, 400, "请填写有效的单个邮箱地址；启用邮件通知时邮箱不能为空")
+			return
+		}
+		if in.SendEmail {
+			var err error
+			mailConfig, err = a.systemSMTP(c.Request.Context(), in.Email)
+			if err != nil {
+				fail(c, 400, "系统 SMTP 尚未配置完整，请先在系统设置的邮件通知中保存有效配置")
+				return
+			}
+		}
+		if create && in.Password == "" {
+			var err error
+			in.Password, err = newUserPassword()
+			if err != nil {
+				fail(c, 500, "生成初始密码失败，请重试")
+				return
+			}
+			generated = true
+		}
 		values["name"] = in.Name
 		values["email"] = in.Email
+		if create {
+			values["must_change_password"] = in.MustChangePassword != nil && *in.MustChangePassword
+		} else if in.MustChangePassword != nil {
+			if id == sc.User {
+				fail(c, 400, "请通过个人修改密码功能管理自己的密码")
+				return
+			}
+			values["must_change_password"] = *in.MustChangePassword
+		}
 		if in.Status != "" {
 			values["status"] = in.Status
 		}
@@ -291,13 +332,17 @@ func (a *App) iamWriteUser(c *gin.Context) {
 				return
 			}
 			values["password_hash"] = string(hash)
+			if !create {
+				values["password_version"] = gorm.Expr("password_version+1")
+			}
 		}
 		if create {
-			if strings.TrimSpace(in.Username) == "" || len(in.Username) > 255 {
+			in.Username = strings.TrimSpace(in.Username)
+			if in.Username == "" || len(in.Username) > 255 {
 				fail(c, 400, "username required")
 				return
 			}
-			values["username"] = strings.TrimSpace(in.Username)
+			values["username"] = in.Username
 			values["create_by"] = sc.User
 		}
 	}
@@ -319,10 +364,33 @@ func (a *App) iamWriteUser(c *gin.Context) {
 		return a.store.audit(tx, sc, "iam:write", "users", id)
 	})
 	if err != nil {
-		fail(c, 409, "user mutation failed")
+		fail(c, 409, "用户保存失败，请检查用户名是否重复或刷新后重试")
 		return
 	}
-	ok(c, gin.H{"id": id})
+	response := gin.H{"id": id}
+	if create {
+		response["password_generated"] = generated
+		if generated {
+			response["initial_password"] = in.Password
+		}
+		response["must_change_password"] = values["must_change_password"]
+		response["email_status"] = "skipped"
+		if in.SendEmail {
+			sender := a.userMailSender
+			if sender == nil {
+				sender = sendSMTPMessage
+			}
+			body := userWelcomeBody(in.Username, in.Password, values["must_change_password"] == true)
+			if err := sender(c.Request.Context(), mailConfig, "Your platform account", body); err != nil {
+				response["email_status"] = "failed"
+				response["email_message"] = "用户已创建，但邮件发送失败。请复制初始账号密码另行交付；检查系统 SMTP 配置，无需再次创建用户。"
+			} else {
+				response["email_status"] = "sent"
+				response["email_message"] = "SMTP 服务器已接受账号邮件，请确认收件箱或垃圾邮件。"
+			}
+		}
+	}
+	ok(c, response)
 }
 func (a *App) iamRoles(c *gin.Context) {
 	sc := contextScope(c)

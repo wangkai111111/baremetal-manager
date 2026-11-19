@@ -80,6 +80,9 @@ api.interceptors.response.use(response => {
   const sensitive = error.config?._sensitive
   if (sensitive) error.config.data = undefined
   const status = error.response?.status
+  if (status === 403 && error.response?.data?.password_change_required && window.location.pathname !== '/change-password') {
+    window.location.assign('/change-password')
+  }
   if (status === 401 && !error.config?.url?.includes('/auth/login')) {
     clearProjectRequests()
     ;['bmm_token', 'bmm_project_id', 'bmm_tenant_id'].forEach(key => sessionStorage.removeItem(key))
