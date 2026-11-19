@@ -31,6 +31,7 @@ import InstallAccessSettings from '../components/InstallAccessSettings.vue'
 import { installAccessError, installAccessPayload, newInstallAccess } from '../utils/installAccess'
 import { flattenDepartments } from '../utils/departments'
 import { isTestVM as isTestVm } from '../utils/testVM'
+import { assetLabel } from '../utils/display'
 import { copyToClipboard } from '../utils/clipboard'
 
 const router = useRouter()
@@ -67,7 +68,6 @@ const filterStatus = ref<string | null>(null)
 const searchField = ref('auto')
 const searchFieldOptions = [
   { label: '自动识别', value: 'auto' },
-  { label: '服务器 ID', value: 'id' },
   { label: '服务器名称', value: 'name' },
   { label: '管理 IP', value: 'management_ip' },
   { label: 'BMC IP', value: 'bmc_address' },
@@ -110,9 +110,9 @@ const selectable = computed(() => canWrite.value || canOperate.value || canPower
 const batchResults = ref<RecordData[]>([])
 const resultsShowing = ref(false)
 const resultColumns: DataTableColumns<RecordData> = [
-  { title: '服务器 ID', key: 'asset_id' },
+  { title: '服务器', key: 'asset_label', minWidth: 260, render: row => String(row.asset_label || '服务器不可访问或已移除') },
   { title: '结果', key: 'status', render: row => ({ accepted: '任务已提交', failed: '失败' })[String(row.status)] || String(row.status) },
-  { title: '任务', key: 'reference', render: row => String(row.operation_id || '—') },
+  { title: '任务进度', key: 'reference', render: row => row.operation_id ? h(NButton, {text: true, type: 'primary', onClick: () => router.push({path: '/tasks', query: {task: String(row.operation_id)}})}, {default: () => '查看步骤与日志'}) : '未创建任务' },
   { title: '说明', key: 'reason', render: row => String(row.reason || row.message || '已入任务队列，请在任务中心查看实际执行结果') }
 ]
 let pendingBatch: { fingerprint: string; key: string } | null = null
@@ -175,18 +175,18 @@ let filterSequence = 0
 function datacenterName(value: unknown) {
   if (value == null || value === '') return '未分配机房'
   const hit = datacenterOptions.value.find(option => option.value === Number(value))
-  return hit ? String(hit.label) : `机房 #${value}`
+  return hit ? String(hit.label) : '机房信息不可用'
 }
 
 function projectName(row: RecordData): string {
   const project = auth.projects.find(item => String(item.id) === String(row.project_id))
-  return String(row.project_name || project?.name || (row.project_id == null ? '未分配项目' : `项目 #${row.project_id}`))
+  return String(row.project_name || project?.name || (row.project_id == null ? '未分配项目' : '项目信息不可用'))
 }
 
 function departmentName(row: RecordData): string {
   const id = row.department_id
   const hit = departments.value.find(dept => String(dept.id) === String(id))
-  return String(row.department_name || hit?.name || (id == null ? '未分配部门' : `部门 #${id}`))
+  return String(row.department_name || hit?.name || (id == null ? '未分配部门' : '部门信息不可用'))
 }
 
 const healthOf = (row: RecordData): { label: string; tag: 'success' | 'warning' | 'error' | 'default' } => {
@@ -361,7 +361,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
                 router.push(`/assets/${row.id}`)
               }
             },
-            String(row.name || `#${row.id}`)
+            String(row.name || row.management_ip || row.bmc_address || '服务器信息不可用')
           )
         ])
       ])
@@ -557,7 +557,7 @@ async function loadFilterOptions() {
   try {
     const result = rows(await resource.list('/datacenters', { page_size: 200 }))
     if (sequence !== filterSequence) return
-    datacenterOptions.value = result.items.map(dc => ({ label: String(dc.name || dc.id), value: Number(dc.id) }))
+    datacenterOptions.value = result.items.map(dc => ({ label: String(dc.name || '机房名称未填写'), value: Number(dc.id) }))
   } catch (e) {
     if (sequence !== filterSequence) return
     message.warning(`机房选项加载失败：${errorText(e)}`)
@@ -565,7 +565,7 @@ async function loadFilterOptions() {
   try {
     const result = rows(await resource.list('/tags', { page_size: 200 }))
     if (sequence !== filterSequence) return
-    tagOptions.value = result.items.map(tag => ({ label: String(tag.name || tag.id), value: String(tag.name || tag.id) }))
+    tagOptions.value = result.items.map(tag => ({ label: String(tag.name || '标签名称未填写'), value: String(tag.name || '标签名称未填写') }))
   } catch {
     if (sequence !== filterSequence) return
     // 标签加载失败不阻塞主流程
@@ -709,7 +709,7 @@ function confirmSinglePower(row: RecordData, action: 'on' | 'off' | 'restart', l
   if (!canPower.value || powerLoading.value != null) return
   dialog.warning({
     title: `确认${label}`,
-    content: `将对 ${row.name || row.id} 执行${label}操作，该操作可能影响业务。`,
+    content: `将对 ${assetLabel(row)} 执行${label}操作，该操作可能影响业务。`,
     positiveText: '确认执行',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -758,13 +758,13 @@ async function startReinstall(row: RecordData) {
 
 async function submitReinstall() {
   const target = reinstallTarget.value
-  if (!target || installPlan.value == null || reinstallConfirmName.value !== String(target.name || target.id)) return
+  if (!target || installPlan.value == null || reinstallConfirmName.value !== String(target.name || target.management_ip || target.bmc_address || '')) return
   const accessError = installAccessError(reinstallAccess.value)
   if (accessError) { message.error(accessError); return }
   reinstallLoading.value = true
   try {
-    const result = unwrap<RecordData>(await api.post(`/assets/${encodeURIComponent(String(target.id))}/install`, { install_plan_id: Number(installPlan.value), confirmed: true, access: installAccessPayload(reinstallAccess.value) }))
-    message.success(`装机任务已提交：${result.task_id || result.installation_id || result.id || '请到任务中心查看'}`)
+    await api.post(`/assets/${encodeURIComponent(String(target.id))}/install`, { install_plan_id: Number(installPlan.value), confirmed: true, access: installAccessPayload(reinstallAccess.value) })
+    message.success(`${target.name || '服务器'}的装机任务已提交，请到任务中心查看步骤与日志`)
     reinstallShowing.value = false
     await load(true)
   } catch (e) { message.error(errorText(e)) }
@@ -778,7 +778,7 @@ function removeAsset(row: RecordData) {
   if (!canWrite.value) return
   dialog.warning({
     title: '确认删除服务器',
-    content: `确认删除 ${row.name || row.id}？删除后 BMC 凭据与采集历史将不可恢复。`,
+    content: `确认删除 ${assetLabel(row)}？删除后 BMC 凭据与采集历史将不可恢复。`,
     positiveText: '确认删除',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -834,11 +834,23 @@ type AssetForm = {
   model?: string
   datacenter_id?: number | null
   department_id?: number | null
+  datacenter_name?: string
+  department_name?: string
 }
 const editing = ref(false)
 const saving = ref(false)
 const currentId = ref<string | number | null>(null)
 const form = ref<AssetForm>({})
+const editDatacenterOptions = computed(() => {
+  const value = form.value.datacenter_id
+  return value == null || datacenterOptions.value.some(option => option.value === value) ? datacenterOptions.value
+    : [...datacenterOptions.value, {label:form.value.datacenter_name || '当前机房（待加载或已不可用）', value, disabled:true}]
+})
+const editDepartmentOptions = computed(() => {
+  const value = form.value.department_id
+  return value == null || departmentOptions.value.some(option => option.value === value) ? departmentOptions.value
+    : [...departmentOptions.value, {label:form.value.department_name || '当前部门（待加载或已不可用）', value, disabled:true}]
+})
 const protocols = [
   { label: 'Redfish', value: 'redfish' },
   { label: 'IPMI', value: 'ipmi' }
@@ -861,6 +873,8 @@ function openEdit(row?: RecordData) {
         management_ip: toText(row.management_ip),
         serial_number: toText(row.serial_number),
         model: toText(row.model),
+        datacenter_name: toText(row.datacenter_name),
+        department_name: toText(row.department_name),
         datacenter_id: row.datacenter_id == null ? null : Number(row.datacenter_id),
         department_id: row.department_id == null ? null : Number(row.department_id)
       }
@@ -1312,17 +1326,17 @@ onBeforeUnmount(() => {
       </n-alert>
       <n-form label-placement="top" style="margin-top: 16px">
         <n-form-item label="装机方案" required>
-          <n-select v-model:value="installPlan" :options="installPlans.map(plan => ({ label: String(plan.name || `方案 #${plan.id}`), value: Number(plan.id) }))" :disabled="reinstallLoading" placeholder="请选择已有装机方案" />
+          <n-select v-model:value="installPlan" :options="installPlans.map(plan => ({ label: String(plan.name || '安装方案信息不可用'), value: Number(plan.id) }))" :disabled="reinstallLoading" placeholder="请选择已有装机方案" />
           <small v-if="!installPlans.length">暂无可用方案。测试 VM 可在“PXE 实验室”自动创建 Ubuntu 安装方案。</small>
         </n-form-item>
         <InstallAccessSettings v-model="reinstallAccess" :disabled="reinstallLoading" />
         <n-form-item label="输入服务器名称确认" required>
-          <n-input v-model:value="reinstallConfirmName" :placeholder="String(reinstallTarget?.name || reinstallTarget?.id || '')" :disabled="reinstallLoading" />
+          <n-input v-model:value="reinstallConfirmName" :placeholder="String(reinstallTarget?.name || reinstallTarget?.management_ip || reinstallTarget?.bmc_address || '')" :disabled="reinstallLoading" />
         </n-form-item>
       </n-form>
       <div class="modal-actions">
         <n-button @click="reinstallShowing = false">取消</n-button>
-        <n-button type="error" :loading="reinstallLoading" :disabled="reinstallLoading || !installPlans.length || installPlan == null || reinstallConfirmName !== String(reinstallTarget?.name || reinstallTarget?.id || '') || !!installAccessError(reinstallAccess)" @click="submitReinstall">确认清盘并提交</n-button>
+        <n-button type="error" :loading="reinstallLoading" :disabled="reinstallLoading || !installPlans.length || installPlan == null || reinstallConfirmName !== String(reinstallTarget?.name || reinstallTarget?.management_ip || reinstallTarget?.bmc_address || '') || !!installAccessError(reinstallAccess)" @click="submitReinstall">确认清盘并提交</n-button>
       </div>
     </n-modal>
     <TestVMLab v-model:show="testVmShowing" @updated="load(true)" />
@@ -1361,10 +1375,10 @@ onBeforeUnmount(() => {
             <n-input v-model:value="form.management_ip" placeholder="留空表示未分配" />
           </n-form-item>
           <n-form-item v-if="auth.can('departments:read')" label="所属部门" :feedback="departmentLoadError" :validation-status="departmentLoadError ? 'error' : undefined">
-            <n-select v-model:value="form.department_id" :options="departmentOptions" :disabled="!!departmentLoadError" :clearable="!departmentRequired" filterable :placeholder="departmentRequired ? '请选择管理范围内的部门' : '未分配部门（可选）'" />
+            <n-select v-model:value="form.department_id" :options="editDepartmentOptions" :disabled="!!departmentLoadError" :clearable="!departmentRequired" filterable :placeholder="departmentRequired ? '请选择管理范围内的部门' : '未分配部门（可选）'" />
           </n-form-item>
           <n-form-item label="所属机房">
-            <n-select v-model:value="form.datacenter_id" :options="datacenterOptions" clearable filterable placeholder="未分配机房" />
+            <n-select v-model:value="form.datacenter_id" :options="editDatacenterOptions" clearable filterable placeholder="未分配机房" />
           </n-form-item>
           <n-form-item label="序列号">
             <n-input v-model:value="form.serial_number" placeholder="采集后可自动回填" />

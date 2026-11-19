@@ -142,7 +142,7 @@ func (a *App) iamScope(c *gin.Context) {
 		fail(c, 400, "provide project_id or X-Project-ID for an accessible project")
 		return
 	}
-	c.Set("scope", scope{projects[0].TenantID, projects[0].ID, u.ID, u.IsPlatformAdmin})
+	c.Set("scope", scope{Tenant: projects[0].TenantID, Project: projects[0].ID, User: u.ID, Admin: u.IsPlatformAdmin, Audit: requestMeta(c, u.ID)})
 	c.Next()
 }
 
@@ -208,7 +208,7 @@ func (a *App) iamUsers(c *gin.Context) {
 		summaryAccess = departmentAccessSQL(value.(scope), "summary_grant.department_id", true)
 	}
 	q = q.Select(`users.id,username,name,email,status,is_platform_admin,last_login_at,users.created_at,users.updated_at,CASE WHEN is_platform_admin THEN 'admin' ELSE 'user' END AS role,
- COALESCE((SELECT jsonb_agg(jsonb_build_object('department_id',summary_grant.department_id,'is_admin',summary_grant.is_admin) ORDER BY summary_grant.id)
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('department_id',summary_grant.department_id,'department_name',(SELECT d.name FROM departments d WHERE d.id=summary_grant.department_id AND d.tenant_id=summary_grant.tenant_id AND d.deleted_at IS NULL),'is_admin',summary_grant.is_admin) ORDER BY summary_grant.id)
  FROM user_access_grants summary_grant WHERE summary_grant.user_id=users.id AND summary_grant.tenant_id=? AND (`+summaryAccess+`) AND (summary_grant.department_id IS NULL OR EXISTS(SELECT 1 FROM departments d WHERE d.id=summary_grant.department_id AND d.tenant_id=summary_grant.tenant_id AND d.deleted_at IS NULL))),'[]'::jsonb) AS access_grants`, tenantID)
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		q = q.Where("(lower(username) LIKE lower(?) OR lower(name) LIKE lower(?))", "%"+search+"%", "%"+search+"%")

@@ -229,7 +229,7 @@ function stateOf(group: string) {
 // 字段格式化（沿用采集快照的 Redfish 语义）
 // ============================================================
 const monitorLabels: Record<string, string> = {
-  id: '标识', name: '名称', kind: '类型', manufacturer: '制造商', model: '型号', serial_number: '序列号',
+  id: '部件位置', name: '名称', kind: '类型', manufacturer: '制造商', model: '型号', serial_number: '序列号',
   part_number: '部件号', health: '健康状态', state: '在位状态', cores: '物理核心', threads: '逻辑线程',
   max_speed_mhz: '最大主频', capacity_mib: '容量', capacity_bytes: '容量', media_type: '介质', protocol: '接口协议',
   raid_type: 'RAID 类型', mac: 'MAC 地址', speed_mbps: '速率', link: '链路状态', version: '版本',
@@ -269,7 +269,7 @@ function formatField(key: string, value: unknown): string {
   if (Array.isArray(value)) return `${value.length} 项`
   if (typeof value === 'object') {
     const parts = Object.entries(value as RecordData)
-      .filter(([, item]) => item != null && item !== '' && typeof item !== 'object')
+      .filter(([itemKey, item]) => itemKey !== 'id' && !itemKey.endsWith('_id') && item != null && item !== '' && typeof item !== 'object')
       .map(([itemKey, item]) => `${labelOf(itemKey)}: ${formatField(itemKey, item)}`)
     return parts.length ? parts.join(' · ') : '—'
   }
@@ -407,14 +407,14 @@ const powerLabel = computed(() => ({ on: '电源开启', off: '电源关闭', un
 const ownerScope = computed(() => '部门')
 const ownerName = computed(() => {
   const hit = departmentRows.value.find(dept => String(dept.id) === str(asset.value.department_id))
-  if (hit?.name) return str(hit.name)
-  return asset.value.department_id == null ? '未分配' : `部门 #${str(asset.value.department_id)}`
+  if (asset.value.department_name || hit?.name) return str(asset.value.department_name || hit?.name)
+  return asset.value.department_id == null ? '未分配' : '部门信息不可用'
 })
 const datacenterName = computed(() => {
   const id = str(asset.value.datacenter_id)
   if (!id) return '未分配机房'
   const hit = datacenterRows.value.find(dc => String(dc.id) === id)
-  return str(hit?.name) || `机房 #${id}`
+  return str(asset.value.datacenter_name) || str(hit?.name) || '机房信息不可用'
 })
 
 // ============================================================
@@ -595,14 +595,14 @@ function operatorName(userId: unknown) {
   const id = str(userId)
   if (!id) return '系统'
   const hit = memberRows.value.find(m => String(m.user_id) === id)
-  return str(hit?.name) || str(hit?.username) || `用户 #${id}`
+  return str(hit?.name) || str(hit?.username) || '操作人信息不可用'
 }
 
 function operationDetail(row: RecordData) {
   const parts: string[] = []
   const attempts = numOf(row.attempts), max = numOf(row.max_attempts)
   if (Number.isFinite(max) && max > 0) parts.push(`尝试 ${attempts || 0}/${max}`)
-  if (row.worker_id) parts.push(`执行节点 ${str(row.worker_id)}`)
+  if (row.client_ip) parts.push(`操作 IP ${str(row.client_ip)}`)
   if (row.error) parts.push(`错误：${str(row.error)}`)
   return parts.join(' · ') || '—'
 }
@@ -610,7 +610,7 @@ function operationDetail(row: RecordData) {
 const operationColumns = computed<DataTableColumns<RecordData>>(() => [
   { title: '时间', key: 'created_at', minWidth: 158, render: row => h('span', { class: 'mono' }, fmtTime(row.created_at)) },
   { title: '操作', key: 'kind', minWidth: 100, render: row => kindLabel(row.kind) },
-  { title: '操作人', key: 'user_id', minWidth: 104, render: row => operatorName(row.user_id) },
+  { title: '操作人', key: 'user_id', minWidth: 104, render: row => str(row.operator_name) || operatorName(row.user_id) },
   { title: '详情', key: 'detail', minWidth: 240, ellipsis: { tooltip: true }, render: row => operationDetail(row) },
   {
     title: '状态', key: 'status', minWidth: 92,
@@ -622,7 +622,7 @@ const operationColumns = computed<DataTableColumns<RecordData>>(() => [
 const powerHistoryColumns: DataTableColumns<RecordData> = [
   { title: '时间', key: 'created_at', minWidth: 158, render: row => h('span', { class: 'mono' }, fmtTime(row.created_at)) },
   { title: '动作', key: 'kind', minWidth: 100, render: row => kindLabel(row.kind) },
-  { title: '操作人', key: 'user_id', minWidth: 104, render: row => operatorName(row.user_id) },
+  { title: '操作人', key: 'user_id', minWidth: 104, render: row => str(row.operator_name) || operatorName(row.user_id) },
   {
     title: '结果', key: 'status', minWidth: 92,
     render: row => h(NTag, { size: 'small', bordered: false, type: taskStatusType(row.status) }, { default: () => opStatusLabel(row.status) })
@@ -1027,7 +1027,7 @@ const boundTagIds = computed(() => tagBindings.value.map(row => str(row.tag_id))
 const boundTags = computed(() => tagBindings.value
   .map(row => tagCatalog.value.find(tag => String(tag.id) === str(row.tag_id)))
   .filter((tag): tag is RecordData => !!tag))
-const tagOptions = computed<SelectOption[]>(() => tagCatalog.value.map(tag => ({ label: str(tag.name) || `#${str(tag.id)}`, value: str(tag.id) })))
+const tagOptions = computed<SelectOption[]>(() => tagCatalog.value.map(tag => ({ label: str(tag.name) || '标签信息不可用', value: str(tag.id) })))
 function openTagManager() {
   selectedTagIds.value = [...boundTagIds.value]
   tagModal.value = true
@@ -1095,15 +1095,15 @@ onUnmounted(() => {
     <nav class="crumbs">
       <router-link to="/assets">服务器管理</router-link>
       <span class="crumb-sep">/</span>
-      <span class="crumb-current">{{ asset.name || `#${assetId}` }}</span>
-      <span class="crumb-id mono">ID {{ assetId }}</span>
+      <span class="crumb-current">{{ asset.name || asset.bmc_address || '服务器详情' }}</span>
+      <span class="crumb-id mono">{{ asset.serial_number ? `SN: ${asset.serial_number}` : asset.management_ip || asset.bmc_address || '' }}</span>
     </nav>
 
     <!-- 顶部标题栏 -->
     <header class="titlebar">
       <div class="titlebar-row">
         <div class="title-identity">
-          <div class="eyebrow">{{ testVm ? 'TEST VM · QEMU PXE' : `BARE METAL · ${str(asset.bmc_protocol).toUpperCase() || 'REDFISH'}` }} · ID {{ assetId }}</div>
+          <div class="eyebrow">{{ testVm ? 'TEST VM · QEMU PXE' : `BARE METAL · ${str(asset.bmc_protocol).toUpperCase() || 'REDFISH'}` }} · {{ asset.serial_number ? `SN: ${asset.serial_number}` : asset.management_ip || asset.bmc_address || '未采集序列号' }}</div>
           <h1 class="server-name">
             <span class="name-text">{{ asset.name || (loading ? '正在读取资产…' : '未知资产') }}</span>
             <n-tag size="small" :bordered="false" :type="statusTag.tag" class="status-tag">{{ statusTag.label }}</n-tag>
@@ -1197,7 +1197,7 @@ onUnmounted(() => {
                 </template>
                 <div v-if="boundTags.length" class="tag-list">
                   <n-tag v-for="tag in boundTags" :key="String(tag.id)" size="small" :bordered="false"
-                    :style="{ background: tag.color ? String(tag.color) : undefined }">{{ tag.name || tag.id }}</n-tag>
+                    :style="{ background: tag.color ? String(tag.color) : undefined }">{{ tag.name || '标签名称未填写' }}</n-tag>
                 </div>
                 <div v-else class="rail-empty">未绑定标签</div>
               </n-card>

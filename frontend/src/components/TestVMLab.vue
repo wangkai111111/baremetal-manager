@@ -132,9 +132,9 @@ onBeforeUnmount(() => { disposed = true; sequence++; clearTimeout(timer) })
         <p v-else-if="installed">Ubuntu 已安装，并已从虚拟磁盘启动验证通过。再次安装会清空测试磁盘。</p>
         <p v-else>安装镜像、应答文件和装机方案由平台自动准备，无需物理机或 BMC。</p>
       </div>
-      <NTag v-if="state?.installation?.id" :type="installed ? 'success' : state.installation.status === 'failed' ? 'error' : 'info'" :bordered="false">安装 #{{ state.installation.id }}</NTag>
+      <NTag v-if="state?.installation?.id" :type="installed ? 'success' : state.installation.status === 'failed' ? 'error' : 'info'" :bordered="false">测试 VM 系统安装</NTag>
     </div>
-    <template v-if="state?.installation?.id"><NButton v-if="auth.can('tasks:read')" secondary size="small" @click="viewTask">在任务中心查看 #{{ state.installation.operation_id }}</NButton><InstallationProgress :installation="state.installation" /></template>
+    <template v-if="state?.installation?.id"><NButton v-if="auth.can('tasks:read')" secondary size="small" @click="viewTask">查看安装步骤与日志</NButton><InstallationProgress :installation="state.installation" /></template>
     <InstallAccessSettings v-if="!active" v-model="access" :disabled="!!busy" />
     <NCheckbox v-model:checked="confirmed" :disabled="!!busy || active || !state?.network_ready">我确认清空 BMM Test VM 的 40 GB 测试磁盘并安装 Ubuntu 22.04.5</NCheckbox>
     <div class="lab-submit">

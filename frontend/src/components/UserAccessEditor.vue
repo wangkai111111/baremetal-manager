@@ -8,17 +8,23 @@ const props = defineProps<{show: boolean; userId?: string | number; username?: s
 const emit = defineEmits<{ 'update:show': [v: boolean]; saved: [] }>()
 const auth = useAuth()
 const message = useMessage()
-const grants = ref<{department_id: number; is_admin: boolean}[]>([])
+const grants = ref<{department_id: number; is_admin: boolean; department_name?: string}[]>([])
 const departments = ref<{label: string; value: number}[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
 let sequence = 0
 const organization = computed(() => String(auth.tenants.find(t => String(t.id) === auth.tenantId)?.name || '当前组织'))
-const scopeOptions = computed(() => [
+const scopeOptions = computed(() => {
+ const options: {label:string;value:number;disabled?:boolean}[] = [
   ...(auth.user?.is_platform_admin || auth.user?.can_manage_organization ? [{label: `整个组织：${organization.value}`, value: 0}] : []),
   ...departments.value
-])
+ ]
+ for (const grant of grants.value) {
+  if (!options.some(option => option.value === grant.department_id)) options.push({label: grant.department_name || '授权部门（已不可用）', value: grant.department_id, disabled:true})
+ }
+ return options
+})
 watch(() => [props.show, props.userId, auth.projectId] as const, async ([show, userId, project], previous) => {
   const key = ++sequence
   if (previous && previous[2] !== project) {emit('update:show', false); return}
@@ -29,7 +35,7 @@ watch(() => [props.show, props.userId, auth.projectId] as const, async ([show, u
       api.get(`/projects/${project}/users/${userId}/access-grants`), resource.list('/departments')
     ])
     if (key !== sequence) return
-    grants.value = rows(response).items.map(g => ({ department_id: g.department_id == null ? 0 : Number(g.department_id), is_admin: g.is_admin === true }))
+    grants.value = rows(response).items.map(g => ({ department_id: g.department_id == null ? 0 : Number(g.department_id), is_admin: g.is_admin === true, department_name: String(g.department_name || '') }))
     const tree = rows(treeResponse).items
     const manageable = new Set<number>()
     const walk = (nodes: typeof tree) => nodes.forEach(d => {if (d.can_manage === true) manageable.add(Number(d.id)); if (Array.isArray(d.children)) walk(d.children as typeof tree)})
@@ -44,7 +50,7 @@ async function save() {
   const project = auth.projectId
   saving.value = true
   try {
-    await api.put(`/projects/${project}/users/${props.userId}/access-grants`, {grants:grants.value.map(g => ({...g,department_id:g.department_id || null}))})
+    await api.put(`/projects/${project}/users/${props.userId}/access-grants`, {grants:grants.value.map(g => ({department_id:g.department_id || null,is_admin:g.is_admin}))})
     if (auth.projectId !== project) return
     message.success('访问授权已保存，后续请求立即生效'); emit('saved'); emit('update:show',false)
   } catch (e) {message.error(errorText(e))}

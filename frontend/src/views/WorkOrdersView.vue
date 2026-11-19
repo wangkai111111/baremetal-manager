@@ -29,6 +29,7 @@ import {
   type WorkOrderTransition,
   type WorkOrderType
 } from '../api'
+import { personLabel } from '../utils/display'
 import { useAuth } from '../stores/auth'
 
 const message = useMessage()
@@ -219,7 +220,13 @@ const messageTotal = ref(0)
 const reply = ref('')
 const collaborationBusy = ref(false)
 const assigneeId = ref<number | null>(null)
-const assigneeOptions = ref<{label:string;value:number}[]>([])
+const loadedAssignees = ref<{label:string;value:number}[]>([])
+const assigneeOptions = computed(() => {
+  const options: {label:string;value:number;disabled?:boolean}[] = [...loadedAssignees.value]
+  const id = current.value?.assigned_to
+  if (id && !options.some(option => option.value === id)) options.push({label: current.value?.assignee_name || '当前处理人（已不可用）', value:id, disabled:true})
+  return options
+})
 
 watch(() => auth.projectId, () => {
   drawerVisible.value = false
@@ -269,7 +276,7 @@ async function openDetail(row: WorkOrderRecord) {
   messageTotal.value = 0
   reply.value = ''
   assigneeId.value = row.assigned_to || null
-  assigneeOptions.value = []
+  loadedAssignees.value = []
   drawerVisible.value = true
   detailLoading.value = true
   try {
@@ -280,7 +287,7 @@ async function openDetail(row: WorkOrderRecord) {
     if (isStaff.value && auth.can('iam:read')) {
       const users = rows(await api.get(`/projects/${auth.projectId}/users`, { params: { page_size: 200 } })).items
       if (current.value?.id !== row.id) return
-      assigneeOptions.value = users.filter(u => u.status === 'active').map(u => ({ label: String(u.name || u.username || u.id), value: Number(u.id) }))
+      loadedAssignees.value = users.filter(u => u.status === 'active').map(u => ({ label: personLabel(u.name, u.username), value: Number(u.id) }))
     }
     await loadMessages(row.id)
   } catch (e) {
@@ -333,8 +340,8 @@ const timeline = computed(() => {
   if (!row) return []
   const rank = statusMeta[row.status]?.rank ?? 0
   return [
-    { label: '已提交', detail: `提交人 #${row.user_id}`, at: row.created_at ?? null, done: true },
-    { label: '开始处理', detail: row.assigned_to ? `处理人 #${row.assigned_to}` : '等待指派处理人', at: null as string | null, done: rank >= 1 },
+    { label: '已提交', detail: `提交人：${row.submitter_name || '用户信息不可用'}`, at: row.created_at ?? null, done: true },
+    { label: '开始处理', detail: row.assigned_to ? `处理人：${row.assignee_name || '用户信息不可用'}` : '等待指派处理人', at: null as string | null, done: rank >= 1 },
     { label: '已解决', detail: '解决方案记录在回复中', at: row.resolved_at ?? null, done: !!row.resolved_at },
     { label: '已关闭', detail: '由有权限的用户关闭', at: row.closed_at ?? null, done: !!row.closed_at }
   ]
@@ -382,8 +389,8 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
     key: 'user_id',
     minWidth: 132,
     render: row => h('div', { class: 'wo-people' }, [
-      h('span', `提交人 #${row.user_id}`),
-      h('em', row.assigned_to ? `处理人 #${row.assigned_to}` : '未指派')
+      h('span', `提交人：${row.submitter_name || '用户信息不可用'}`),
+      h('em', row.assigned_to ? `处理人：${row.assignee_name || '用户信息不可用'}` : '未指派')
     ])
   },
   {
@@ -502,7 +509,7 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
 
     <!-- 详情抽屉 -->
     <n-drawer v-model:show="drawerVisible" :width="'min(460px, 100vw)'" placement="right">
-      <n-drawer-content :title="current ? `工单 #${current.id}` : '工单详情'" closable>
+      <n-drawer-content :title="current ? current.title : '工单详情'" closable>
         <div v-if="current" class="wo-detail" :class="`wo-detail--${current.priority}`">
           <div class="detail-head">
             <h2>{{ current.title }}</h2>
@@ -543,7 +550,7 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
             <h3>沟通与解决方案</h3>
             <p v-if="!messages.length" class="detail-note">暂无回复</p>
             <article v-for="entry in messages" :key="String(entry.id)" class="reply-entry">
-              <strong>{{ entry.author_name || entry.author_username || `用户 #${entry.user_id}` }} · {{ entry.is_support ? '处理方' : '提交方' }}</strong>
+              <strong>{{ entry.author_name || entry.author_username || '用户信息不可用' }} · {{ entry.is_support ? '处理方' : '提交方' }}</strong>
               <p class="detail-desc">{{ entry.content }}</p>
               <time>{{ stamp(String(entry.created_at)) }}</time>
             </article>
@@ -554,8 +561,8 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
             </div>
           </section>
           <section class="detail-block detail-meta">
-            <div><span>提交人</span><strong>#{{ current.user_id }}</strong></div>
-            <div><span>处理人</span><strong>{{ current.assigned_to ? `#${current.assigned_to}` : '未指派' }}</strong></div>
+            <div><span>提交人</span><strong>{{ current.submitter_name || '用户信息不可用' }}</strong></div>
+            <div><span>处理人</span><strong>{{ current.assigned_to ? current.assignee_name || '用户信息不可用' : '未指派' }}</strong></div>
             <div><span>创建时间</span><strong>{{ stamp(current.created_at, 'YYYY-MM-DD HH:mm:ss') }}</strong></div>
             <div><span>最后更新</span><strong>{{ stamp(current.updated_at, 'YYYY-MM-DD HH:mm:ss') }}</strong></div>
           </section>
@@ -604,7 +611,7 @@ const columns = computed<DataTableColumns<WorkOrderRecord>>(() => [
             v-model:value="createForm.description"
             type="textarea"
             :autosize="{ minRows: 4, maxRows: 8 }"
-            placeholder="复现步骤、影响范围、期望时间；故障类建议附资产 ID"
+            placeholder="复现步骤、影响范围、期望时间；故障类建议附服务器名称、IP 或序列号"
           />
         </label>
         <p class="form-item form-note">

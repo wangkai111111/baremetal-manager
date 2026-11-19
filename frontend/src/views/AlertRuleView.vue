@@ -199,7 +199,7 @@ async function save() {
       ruleId = result?.data?.data?.id
       currentId.value = ruleId
     }
-    if (ruleId == null) throw new Error('规则已保存但未返回 ID，请刷新后重新关联渠道')
+    if (ruleId == null) throw new Error('规则已保存，但关联信息未完整返回，请刷新后重新关联渠道')
     for (const link of channelLinks.value) {
       if (!selectedChannels.value.includes(Number(link.channel_id))) await resource.remove('/alert-rule-channels', link.id!)
     }

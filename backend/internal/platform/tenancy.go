@@ -166,7 +166,7 @@ func (a *App) switchProject(c *gin.Context) {
 	var p struct{ ID, TenantID int64 }
 	e := a.store.db.Table("projects p").Select("p.id,p.tenant_id").Joins("JOIN tenants t ON t.id=p.tenant_id AND t.deleted_at IS NULL AND t.status='active'").Where("p.id=? AND p.deleted_at IS NULL AND p.status='active'", in.ProjectID).Take(&p).Error
 	u := current(c)
-	sc := scope{p.TenantID, p.ID, u.ID, u.IsPlatformAdmin}
+	sc := scope{Tenant: p.TenantID, Project: p.ID, User: u.ID, Admin: u.IsPlatformAdmin, Audit: requestMeta(c, u.ID)}
 	if e != nil || (!u.IsPlatformAdmin && !a.store.member(sc)) {
 		fail(c, 403, "project access denied")
 		return

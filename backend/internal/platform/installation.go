@@ -167,7 +167,7 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 		if err := tx.Table("task_outbox").Create(map[string]any{"tenant_id": sc.Tenant, "project_id": sc.Project, "operation_id": op.ID, "event_key": key, "event_type": "operation.execute"}).Error; err != nil {
 			return err
 		}
-		return a.store.audit(tx, sc, "submit", "installations", inst.ID)
+		return a.store.recordAudit(tx, sc, meta, "submit", "installations", inst.ID, "success")
 	})
 	return installationID, operationID, err
 }

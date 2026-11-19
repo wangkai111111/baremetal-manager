@@ -17,6 +17,7 @@ import {
 import type { DataTableColumns } from 'naive-ui'
 import { h } from 'vue'
 import { errorText, rows, type RecordData, api } from '../api'
+import { personLabel } from '../utils/display'
 import { useAuth } from '../stores/auth'
 
 const message = useMessage()
@@ -48,7 +49,7 @@ const canWrite = computed(() => auth.can('iam:manage'))
 
 // === 表格列定义 ===
 const columns = computed<DataTableColumns<RecordData>>(() => [
-  { title: '用户名', key: 'username', minWidth: 140, render: (row: RecordData) => String(row.username || row.user_id || '—') },
+  { title: '用户名', key: 'username', minWidth: 140, render: (row: RecordData) => String(row.username || row.name || '用户信息不可用') },
   {
     title: '角色',
     key: 'role',
@@ -122,7 +123,7 @@ async function loadUsers() {
   try {
     const data = rows(await api.get(`/projects/${auth.projectId}/users`, { params: { page: 1, page_size: 200 } }))
     userOptions.value = data.items.map(u => ({
-      label: `${String(u.username || u.id)} (${String(u.name || '')})`,
+      label: personLabel(u.name, u.username),
       value: u.id as string | number
     }))
   } catch {

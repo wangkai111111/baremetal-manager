@@ -94,7 +94,7 @@ const menuThemeOverrides = computed<NonNullable<MenuProps['themeOverrides']>>(()
 
 const projectOptions = computed(() =>
   projects.value.map(p => ({
-    label: String(p.name ?? p.id),
+    label: String(p.name || '项目名称未填写'),
     value: String(p.id)
   }))
 )
@@ -523,7 +523,7 @@ function handleMenuSelect(key: string) {
       <n-descriptions :column="1" label-placement="left" size="small" class="settings-list">
         <n-descriptions-item label="登录账号">{{ auth.user?.username || '—' }}</n-descriptions-item>
         <n-descriptions-item label="平台角色">{{ auth.user?.role || '—' }}</n-descriptions-item>
-        <n-descriptions-item label="用户 ID">{{ auth.user?.id ?? '—' }}</n-descriptions-item>
+        <n-descriptions-item label="姓名">{{ auth.user?.name || auth.user?.username || '未填写' }}</n-descriptions-item>
         <n-descriptions-item label="Token 到期">{{ tokenExpiryText }}</n-descriptions-item>
         <n-descriptions-item label="当前项目">
           <n-select

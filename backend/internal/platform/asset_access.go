@@ -122,7 +122,7 @@ func (a *App) userAccessGrants(c *gin.Context) {
 		return
 	}
 	if c.Request.Method == "GET" {
-		q := a.store.db.Table("user_access_grants").Select("department_id,is_admin,created_at").Where("tenant_id=? AND user_id=?", sc.Tenant, id)
+		q := a.store.db.Table("user_access_grants").Select("department_id,is_admin,created_at,(SELECT d.name FROM departments d WHERE d.id=user_access_grants.department_id AND d.tenant_id=user_access_grants.tenant_id AND d.deleted_at IS NULL) AS department_name").Where("tenant_id=? AND user_id=?", sc.Tenant, id)
 		if !sc.Admin {
 			q = q.Where(departmentAccessSQL(sc, "user_access_grants.department_id", true))
 		}

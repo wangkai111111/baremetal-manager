@@ -39,6 +39,7 @@ type user struct {
 type scope struct {
 	Tenant, Project, User int64
 	Admin                 bool
+	Audit                 auditMeta `gorm:"-" json:"-"`
 }
 
 func New(db *gorm.DB) (*App, error) {
@@ -136,7 +137,7 @@ func (a *App) project(c *gin.Context) {
 		fail(c, 404, "project not found")
 		return
 	}
-	sc := scope{p.TenantID, p.ID, u.ID, u.IsPlatformAdmin}
+	sc := scope{Tenant: p.TenantID, Project: p.ID, User: u.ID, Admin: u.IsPlatformAdmin, Audit: requestMeta(c, u.ID)}
 	if value, exists := c.Get("api_key"); exists {
 		key := value.(iamAuthenticatedKey)
 		if key.TenantID != p.TenantID || key.ProjectID != p.ID {

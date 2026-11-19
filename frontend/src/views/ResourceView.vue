@@ -21,6 +21,9 @@ import {
 import type { DataTableColumns, DataTableRowKey, DropdownOption } from 'naive-ui'
 import { h } from 'vue'
 import dayjs from 'dayjs'
+import { assetLabel, personLabel } from '../utils/display'
+import { relationResources } from '../utils/relations'
+import { flattenDepartments } from '../utils/departments'
 import { hostIP, dnsAddresses, networkLabel } from '../utils/networkOptions'
 import type { Field, Section } from '../catalog'
 import { labels } from '../catalog'
@@ -46,7 +49,6 @@ const search = ref('')
 const searchField = ref('auto')
 const assetSearchOptions = [
   { label: '自动识别', value: 'auto' },
-  { label: '服务器 ID', value: 'id' },
   { label: '服务器名称', value: 'name' },
   { label: 'BMC 地址', value: 'bmc_address' },
   { label: '管理 IP', value: 'management_ip' },
@@ -134,9 +136,9 @@ const canSelectAssets = computed(() => props.section.api === '/assets' && (canWr
 const batchResults = ref<RecordData[]>([])
 const resultsShowing = ref(false)
 const resultColumns: DataTableColumns<RecordData> = [
-  { title: '服务器 ID', key: 'asset_id' },
+  { title: '服务器', key: 'asset_label', minWidth: 260, render: row => String(row.asset_label || '服务器不可访问或已移除') },
   { title: '结果', key: 'status', render: row => ({ accepted: '任务已提交', failed: '失败' })[String(row.status)] || String(row.status) },
-  { title: '任务', key: 'reference', render: row => String(row.operation_id || '—') },
+  { title: '任务进度', key: 'reference', render: row => row.operation_id ? h(NButton, {text: true, type: 'primary', onClick: () => router.push({path: '/tasks', query: {task: String(row.operation_id)}})}, {default: () => '查看步骤与日志'}) : '未创建任务' },
   { title: '说明', key: 'reason', render: row => String(row.reason || row.message || '已入任务队列，请在任务中心查看实际执行结果') }
 ]
 let pendingBatch: { fingerprint: string; key: string } | null = null
@@ -164,6 +166,7 @@ async function submitSelectedBatch(kind: string, ids: number[], projectId: strin
   } finally { batchLoading.value = false }
 }
 
+const relationRows = ref<Record<string, RecordData[]>>({})
 const networkItems = ref<RecordData[]>([])
 const relationLoading = ref(false)
 const relationError = ref('')
@@ -171,34 +174,49 @@ let relationSequence = 0
 const networkResource = computed(() => ['/networks', '/ip-pools'].includes(props.section.api))
 const selectedNetwork = computed(() => networkItems.value.find(row => Number(row.id) === Number(form.value.network_id)))
 function fieldOptions(field: Field) {
-  if (field.key === 'datacenter_id') return datacenterOptions.value
-  if (field.key === 'network_id') return networkItems.value.map(row => ({label: networkLabel(row), value: Number(row.id)}))
-  return field.options?.map(value => ({label: value, value})) || []
+  const definition = relationResources[field.key]
+  if (!definition) return field.options?.map(value => ({label: value, value})) || []
+  const options = (relationRows.value[field.key] || []).map(row => ({
+    label: field.key === 'asset_id' ? assetLabel(row) : field.key === 'network_id' ? networkLabel(row)
+      : field.key === 'user_id' ? personLabel(row.name, row.username)
+      : [row.name, row.version, row.component].filter(Boolean).join(' · ') || `${definition.label}名称未填写`,
+    value: Number(field.key === 'user_id' ? row.user_id || row.id : row.id), disabled: false
+  }))
+  const selected = form.value[field.key]
+  if (selected != null && selected !== '' && !options.some(o => o.value === Number(selected))) {
+    const name = form.value[field.key.replace(/_id$/, '_name')]
+    options.push({label: name ? `${name}（当前不可用，请重新选择）` : `${definition.label}（${relationLoading.value ? '正在加载' : '已不可用，请重新选择'}）`, value: Number(selected), disabled: true})
+  }
+  return options
 }
 async function loadNetworkOptions() {
   const sequence = ++relationSequence
-  networkItems.value = []; relationError.value = ''
-  if (!networkResource.value || props.section.api === '/networks' || !auth.projectId) return
+  relationRows.value = {}; networkItems.value = []; relationError.value = ''
+  const fields = props.section.fields.filter(field => relationResources[field.key])
+  if (!fields.length || !auth.projectId) { relationLoading.value = false; return }
   relationLoading.value = true
-  try {
-    const all = async (path: string) => {
-      const result: RecordData[] = []
-      for (let page = 1; ; page++) {
-        const data = rows(await resource.list(path, {page, page_size: 200}))
-        result.push(...data.items)
-        if (!data.items.length || result.length >= data.total) return result
-      }
+  const results = await Promise.allSettled(fields.map(async field => {
+    const collected: RecordData[] = []
+    const path = relationResources[field.key]!.path
+    for (let page = 1; ; page++) {
+      const data = rows(await resource.list(path, {page, page_size: 200}))
+      if (sequence !== relationSequence || disposed) return
+      collected.push(...data.items)
+      if (!data.items.length || collected.length >= data.total) break
     }
-    const networks = await all('/networks')
-    if (sequence === relationSequence) { networkItems.value = networks }
-  } catch (e) { if (sequence === relationSequence) relationError.value = errorText(e) }
-  finally { if (sequence === relationSequence) relationLoading.value = false }
+    relationRows.value[field.key] = path === '/departments' ? flattenDepartments(collected) : collected
+    if (field.key === 'network_id') networkItems.value = collected
+  }))
+  if (sequence !== relationSequence || disposed) return
+  const errors = results.flatMap((result, i) => result.status === 'rejected' ? [`${fields[i]!.label}选项加载失败：${errorText(result.reason)}`] : [])
+  relationError.value = errors.join('；')
+  relationLoading.value = false
 }
 const datacenterOptions = ref<{ label: string; value: number }[]>([])
 
 function datacenterName(value: unknown) {
   if (value == null) return '未关联机房'
-  return datacenterOptions.value.find(option => option.value === Number(value))?.label || `机房 #${value}`
+  return datacenterOptions.value.find(option => option.value === Number(value))?.label || '机房信息不可用'
 }
 
 function bmcWebUrl(row: RecordData): string | null {
@@ -252,7 +270,7 @@ async function operateAssetPower(row: RecordData) {
   const label = powerActionLabel(row)
   dialog.warning({
     title: `确认${label}`,
-    content: `将对 ${row.name || row.id} 执行${label}操作。该操作可能影响业务，请确认目标资产及影响范围。`,
+    content: `将对 ${assetLabel(row)} 执行${label}操作。该操作可能影响业务，请确认目标资产及影响范围。`,
     positiveText: '确认执行',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -308,18 +326,18 @@ const installationStageLabels: Record<string, string> = {
 
 // === 列定义（含排序） ===
 const columns = computed<DataTableColumns<RecordData>>(() => {
-  const useEnumLabels = enumLabelApis.includes(props.section.api)
+  const useEnumLabels = enumLabelApis.includes(props.section.api) || props.section.readonly === true
   const fields = (props.section.columns || [
     ...props.section.fields.map(f => f.key).filter(key => !key.includes('password')),
     'status',
     'created_at'
   ])
-  const cols: DataTableColumns<RecordData> = fields.filter(key => !/password|secret/i.test(key)).map(key => ({
+  const cols: DataTableColumns<RecordData> = fields.filter(key => key !== 'id' && !/password|secret/i.test(key)).map(key => ({
     // 列标题优先取本 section 的字段标签：全局 labels 里存在同名字段（如 method 在折旧语境下为「折旧方式」），
     // 会让支付记录的「支付方式」列显示错误文案
     title: props.section.fields.find(f => f.key === key)?.label || labels[key] || key,
     key,
-    minWidth: 125,
+    minWidth: props.section.api === '/audit' && key === 'target_name' ? 320 : key === 'asset_label' || key === 'asset_id' ? 260 : 125,
     sorter: (a: RecordData, b: RecordData) => {
       const va = key === 'datacenter_id' ? datacenterName(a[key]) : key === 'status' && props.section.api === '/assets' ? assetStatus(a) : a[key]
       const vb = key === 'datacenter_id' ? datacenterName(b[key]) : key === 'status' && props.section.api === '/assets' ? assetStatus(b) : b[key]
@@ -332,14 +350,18 @@ const columns = computed<DataTableColumns<RecordData>>(() => {
       return String(va).localeCompare(String(vb))
     },
     render: row =>
-      key === 'status' || key === 'severity'
+      key === 'client_ip' ? String(row[key] || '未记录')
+      : key === 'asset_label' ? String(row[key] || '服务器信息不可用')
+      : key === 'operator_name' ? String(row[key] || '系统或历史操作人')
+      : key === 'status' || key === 'severity'
         ? h(
             NTag,
             { size: 'small', bordered: false, type: key === 'status' && props.section.api === '/assets' && assetStatus(row) === 'running' ? 'success' : tagType(key === 'status' && props.section.api === '/assets' ? assetStatus(row) : row[key]) },
             { default: () => key === 'status' && props.section.api === '/assets' ? assetStatusLabels[assetStatus(row)] || '状态未知' : (useEnumLabels ? enumLabel(key, row[key]) : String(row[key] ?? '—')) }
           )
         : key === 'installation_stage' ? String(row.installation_step || installationStageLabels[String(row[key])] || row[key] || '—')
-          : key === 'network_id' && networkResource.value ? (networkItems.value.find(n => Number(n.id) === Number(row[key])) ? networkLabel(networkItems.value.find(n => Number(n.id) === Number(row[key]))!) : `子网 #${row[key]}`)
+          : key === 'asset_id' ? String(row.asset_label || row.asset_name || '服务器信息不可用')
+          : /_id$/.test(key) && key !== 'vlan_id' ? String(row[key.replace(/_id$/, '_name')] || (key === 'user_id' ? row.operator_name : '') || (row[key] == null ? '未关联' : '关联信息不可用'))
           : key === 'dns_servers' ? dnsAddresses(row[key]).join(', ') || '未配置'
           : ['gateway','start_address','end_address'].includes(key) && networkResource.value ? hostIP(row[key]) || '—'
           : key === 'datacenter_id' ? datacenterName(row[key])
@@ -478,7 +500,7 @@ async function loadFilterOptions() {
     // 加载机房列表
     const dcResult = rows(await resource.list('/datacenters', { page_size: 200 }))
     datacenterOptions.value = dcResult.items.map(dc => ({
-      label: String(dc.name || dc.id),
+      label: String(dc.name || '机房名称未填写'),
       value: Number(dc.id)
     }))
   } catch (e) {
@@ -488,8 +510,8 @@ async function loadFilterOptions() {
     // 加载标签列表
     const tagResult = rows(await resource.list('/tags'))
     tagOptions.value = tagResult.items.map(t => ({
-      label: String(t.name || t.id),
-      value: String(t.name || t.id)
+      label: String(t.name || '标签名称未填写'),
+      value: String(t.name || '标签名称未填写')
     }))
   } catch {
     // 加载标签失败不影响主流程
@@ -535,7 +557,7 @@ function openEdit(row?: RecordData) {
   for (const field of props.section.fields) {
     if (!row && field.default !== undefined) form.value[field.key] = field.default
     if (networkResource.value && ['gateway','start_address','end_address'].includes(field.key)) form.value[field.key] = hostIP(row?.[field.key])
-    if (networkResource.value && ['network_id'].includes(field.key)) form.value[field.key] = row?.[field.key] == null ? null : Number(row[field.key])
+    if (relationResources[field.key]) form.value[field.key] = row?.[field.key] == null ? null : Number(row[field.key])
     if (field.key === 'dns_servers') form.value[field.key] = dnsAddresses(row?.[field.key]).join('\n')
     if (field.type === 'json' && row?.[field.key] != null) form.value[field.key] = JSON.stringify(row[field.key], null, 2)
   }
@@ -711,6 +733,7 @@ async function testChannel(row: RecordData) {
 }
 
 async function save() {
+  if (relationLoading.value || relationError.value) return message.warning('请等待关联选项加载完成，或重新加载后再保存')
   for (const field of props.section.fields) {
     if (field.required && !(currentId.value != null && field.type === 'password') && (form.value[field.key] == null || form.value[field.key] === '')) {
       message.warning(`请填写${field.label}`)
@@ -787,10 +810,16 @@ function openBatchAdding() {
 async function handleExportExcel() {
   try {
     const fields = props.section.columns || props.section.fields.map(f => f.key)
-    const exportItems = props.section.api === '/assets'
+    let exportItems: RecordData[] = props.section.api === '/assets'
       ? items.value.map(row => ({ ...row, status: assetStatusLabels[assetStatus(row)] || '状态未知' }))
+      : props.section.api === '/audit' ? items.value.map(row => ({ ...row, client_ip: row.client_ip || '未记录', outcome: enumLabel('outcome', row.outcome) }))
       : items.value
-    await exportToExcel(exportItems, fields.filter(k => !k.includes('password') && !k.includes('secret')), props.section.title)
+    let exportFields = fields.filter(k => !k.includes('password') && !k.includes('secret'))
+    if (props.section.api === '/audit') {
+      exportItems = exportItems.map(row => Object.fromEntries(exportFields.map(key => [labels[key] || key, row[key]])))
+      exportFields = exportFields.map(key => labels[key] || key)
+    }
+    await exportToExcel(exportItems, exportFields, props.section.title)
     message.success('导出成功')
   } catch (e) {
     message.error(errorText(e))
@@ -933,7 +962,7 @@ function handleBatchPower(action: string) {
           <n-input
             v-model:value="search"
             class="filter-search"
-            placeholder="搜索资源..."
+            :placeholder="section.api === '/audit' ? '搜索操作人、对象名称、IP 或操作...' : section.api === '/tasks' ? '搜索服务器名称、IP、序列号或操作人...' : section.api === '/alerts' ? '搜索告警内容、服务器名称、IP 或序列号...' : '搜索资源...'"
             clearable
             @keyup.enter="page = 1; load()"
             @clear="page = 1; load()"
@@ -1041,7 +1070,7 @@ function handleBatchPower(action: string) {
       </div>
     </div>
     <n-modal v-model:show="resultsShowing" preset="card" title="逐台操作结果" style="width: min(1050px, 96vw)">
-      <p>共 {{ batchResults.length }} 台；失败 {{ batchResults.filter(row => row.status === 'failed').length }} 台。电源操作异步执行，请根据任务 ID 核对实际结果。</p>
+      <p>共 {{ batchResults.length }} 台；失败 {{ batchResults.filter(row => row.status === 'failed').length }} 台。电源操作异步执行，请在任务中心查看对应服务器的执行步骤与结果。</p>
       <n-data-table :columns="resultColumns" :data="batchResults" :row-key="row => row.asset_id" :scroll-x="850" :pagination="{ pageSize: 20 }" />
     </n-modal>
     <n-modal
@@ -1056,6 +1085,7 @@ function handleBatchPower(action: string) {
         {{ relationError || (selectedNetwork ? `当前子网：${selectedNetwork.subnet}；网关：${hostIP(selectedNetwork.gateway) || '未配置'}` : '请先选择所属子网；没有选项时请先在子网管理中创建。') }}
         <n-button v-if="relationError" text @click="loadNetworkOptions">重新加载选项</n-button>
       </n-alert>
+      <n-alert v-if="relationError && !networkResource" type="error" :bordered="false" style="margin-bottom: 16px">{{ relationError }}<n-button text @click="loadNetworkOptions">重新加载选项</n-button></n-alert>
       <n-form label-placement="top">
         <div class="resource-form-grid">
           <n-form-item
@@ -1067,12 +1097,12 @@ function handleBatchPower(action: string) {
           >
             <div class="field-control">
             <n-select
-              v-if="field.type === 'select'"
+              v-if="field.type === 'select' || relationResources[field.key]"
               v-model:value="form[field.key] as string | number | null"
               :options="fieldOptions(field)"
               :clearable="!field.required"
               filterable
-              :loading="field.key === 'network_id' && relationLoading"
+              :loading="!!relationResources[field.key] && relationLoading"
               :placeholder="field.key === 'datacenter_id' ? '请选择机房（可留空）' : `请选择${field.label}`"
             />
             <n-input-number

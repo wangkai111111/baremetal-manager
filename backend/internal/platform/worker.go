@@ -62,14 +62,25 @@ func (a *App) batchActions(c *gin.Context) {
 		fail(c, 400, "idempotency key too long")
 		return
 	}
+	// Resolve labels once, under exactly the same visibility rules as asset lists.
+	var visible []struct {
+		ID    int64
+		Label string
+	}
+	queryScope(a.store.db, resource{table: "assets"}, contextScope(c)).
+		Where("id IN ?", in.AssetIDs).Select("assets.id, " + auditAssetSQL("assets") + " AS label").Scan(&visible)
+	labels := make(map[int64]string, len(visible))
+	for _, asset := range visible {
+		labels[asset.ID] = asset.Label
+	}
 	results := make([]gin.H, 0, len(in.AssetIDs))
 	for _, id := range in.AssetIDs {
 		op, err := a.store.enqueue(c.Request.Context(), contextScope(c), id, kind, fmt.Sprintf("%s-%d", key, id), requestMeta(c, contextScope(c).User))
 		if err != nil {
-			results = append(results, gin.H{"asset_id": id, "status": "failed", "reason": "资产不存在、无权访问或已有冲突操作"})
+			results = append(results, gin.H{"asset_id": id, "asset_label": labels[id], "status": "failed", "reason": "资产不存在、无权访问或已有冲突操作"})
 			continue
 		}
-		results = append(results, gin.H{"asset_id": id, "status": "accepted", "operation_id": op.ID, "kind": op.Kind})
+		results = append(results, gin.H{"asset_id": id, "asset_label": labels[id], "status": "accepted", "operation_id": op.ID, "kind": op.Kind})
 	}
 	c.JSON(202, gin.H{"code": 0, "data": gin.H{"results": results}, "message": "批量操作已逐台提交"})
 }
@@ -344,7 +355,7 @@ func (s *store) enqueue(ctx context.Context, sc scope, asset int64, kind, key st
 		if e = tx.Table("task_outbox").Create(map[string]any{"tenant_id": sc.Tenant, "project_id": sc.Project, "operation_id": op.ID, "event_key": key, "event_type": "operation.execute"}).Error; e != nil {
 			return e
 		}
-		return s.audit(tx, sc, "submit", "operations", op.ID)
+		return s.recordAudit(tx, sc, meta, "submit", "operations", op.ID, "success")
 	})
 	return op, e
 }

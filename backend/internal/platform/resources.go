@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
-	"time"
 
 	"baremetal-manager/backend/internal/service"
 	"github.com/gin-gonic/gin"
@@ -72,9 +71,15 @@ func queryScope(db *gorm.DB, r resource, sc scope) *gorm.DB {
 }
 func resourceDocumentSQL(r resource) string {
 	doc := "(to_jsonb(" + r.table + ")" + hidden + ")"
+	if display := resourceDisplaySQL(r); display != "" {
+		doc += " || " + display
+	}
+	if r.table == "audits" {
+		doc += " || " + auditDisplaySQL("audits")
+	}
 	if r.table == "operations" {
 		doc += ` || jsonb_build_object(
- 'operator_name', (SELECT NULLIF(u.name,'') FROM users u WHERE u.id=operations.user_id AND u.deleted_at IS NULL),
+ 'operator_name', ` + auditUserSQL("operations.user_id") + `,
  'client_ip', host(operations.client_ip),
  'bmc_ip', (SELECT host(ast.bmc_address) FROM assets ast
   WHERE ast.tenant_id=operations.tenant_id AND ast.project_id=operations.project_id
@@ -249,11 +254,11 @@ func (a *App) listResource(r resource) gin.HandlerFunc {
 			if search := strings.TrimSpace(c.Query("search")); search != "" {
 				switch r.table {
 				case "operations":
-					q = q.Where("(kind ILIKE ? OR status ILIKE ? OR error ILIKE ?)", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+					q = q.Where("concat_ws(' ',kind,status,error,host(operations.client_ip),"+auditUserSQL("operations.user_id")+",(SELECT "+auditAssetSQL("rel")+" FROM assets rel WHERE rel.id=operations.asset_id AND rel.tenant_id=operations.tenant_id AND rel.project_id=operations.project_id)) ILIKE ?", "%"+search+"%")
 				case "alerts":
-					q = q.Where("message ILIKE ?", "%"+search+"%")
+					q = q.Where("concat_ws(' ',message,(SELECT "+auditAssetSQL("rel")+" FROM assets rel WHERE rel.id=alerts.asset_id AND rel.tenant_id=alerts.tenant_id AND rel.project_id=alerts.project_id)) ILIKE ?", "%"+search+"%")
 				case "audits":
-					q = q.Where("(action ILIKE ? OR target_type ILIKE ? OR target_id ILIKE ?)", "%"+search+"%", "%"+search+"%", "%"+search+"%")
+					q = q.Where(auditSearchSQL("audits"), "%"+search+"%")
 				}
 			}
 		}
@@ -487,5 +492,5 @@ func (a *App) deleteResource(r resource) gin.HandlerFunc {
 	}
 }
 func (s *store) audit(tx *gorm.DB, sc scope, action, table string, id int64) error {
-	return tx.Table("audits").Create(map[string]any{"tenant_id": sc.Tenant, "project_id": sc.Project, "user_id": sc.User, "request_id": fmt.Sprintf("%d-%d", time.Now().UnixNano(), sc.User), "action": action, "target_type": table, "target_id": fmt.Sprint(id), "outcome": "success"}).Error
+	return s.recordAudit(tx, sc, sc.Audit, action, table, id, "success")
 }

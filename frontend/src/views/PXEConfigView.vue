@@ -33,9 +33,9 @@ const fields = [
   { key: 'bios', label: 'BIOS 引导文件', placeholder: 'undionly.kpxe', help: '相对于 TFTP 根目录，传统 BIOS 使用。' },
   { key: 'efi', label: 'UEFI 引导文件', placeholder: 'ipxe.efi', help: '相对于 TFTP 根目录，x86 UEFI 使用。' }
 ]
-const selectOptions = (values: RecordData[]) => values.map(row => ({label: String(row.name || row.id), value: String(row.id)}))
+const selectOptions = (values: RecordData[]) => values.map(row => ({label: String(row.name || '名称未填写'), value: String(row.id)}))
 function withCurrent(values: {label: string; value: string; disabled?: boolean}[], value: string, label: string) {
-  return value && !values.some(row => row.value === value) ? [...values, {label: `${label} #${value}（待加载或已不可用）`, value}] : values
+  return value && !values.some(row => row.value === value) ? [...values, {label: `${label}（待加载或已不可用）`, value}] : values
 }
 async function all(path: string, params: Record<string, unknown> = {}) {
   const result: RecordData[] = []

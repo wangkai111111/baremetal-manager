@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -85,6 +86,14 @@ func TestOperationClientIPIntegration(t *testing.T) {
 		var ip string
 		if err := tx.Raw("SELECT host(client_ip) FROM operations WHERE idempotency_key=?", key).Scan(&ip).Error; err != nil || ip != tc.want {
 			t.Fatalf("stored IP %q, want %q: %v", ip, tc.want, err)
+		}
+		logs, err := decodeRows(queryScope(tx, resource{table: "audits"}, sc).
+			Where("target_type='operations' AND action='submit' AND target_id=(SELECT id::text FROM operations WHERE idempotency_key=?)", key), resource{table: "audits"})
+		if err != nil || len(logs) != 1 {
+			t.Fatalf("task audit missing: %v", err)
+		}
+		if logs[0]["client_ip"] != tc.want || !strings.Contains(fmt.Sprint(logs[0]["target_name"]), "client-ip-test · 192.0.2.254 / 硬件采集") {
+			t.Fatal("task audit must preserve its request IP and readable server/operation")
 		}
 		// Complete without executing, so the second request creates a separate task.
 		if err := tx.Exec("UPDATE operations SET status='cancelled' WHERE idempotency_key=?", key).Error; err != nil {

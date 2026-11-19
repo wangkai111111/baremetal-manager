@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { NAlert, NButton, NDatePicker, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpin, useMessage } from 'naive-ui'
 import { api, errorText, resource, rows, unwrap, type RecordData } from '../api'
+import { assetLabel } from '../utils/display'
 import { useAuth } from '../stores/auth'
 const props = defineProps<{ show: boolean; assetId?: string | number; kind: 'depreciation' | 'lifecycle' }>()
 const emit = defineEmits<{ 'update:show': [value: boolean]; saved: [] }>()
@@ -9,6 +10,12 @@ const auth = useAuth()
 const message = useMessage()
 const selected = ref<string | null>(null)
 const options = ref<{label: string; value: string}[]>([])
+const currentOption = ref<{label: string; value: string} | null>(null)
+const displayOptions = computed(() => {
+  if (!selected.value || options.value.some(option => option.value === selected.value)) return options.value
+  const label = currentOption.value?.value === selected.value ? currentOption.value.label : '服务器信息正在加载或已不可用'
+  return [...options.value, {label, value:selected.value, disabled:true}]
+})
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -29,7 +36,7 @@ async function searchAssets(search = '') {
   try {
     const data = rows(await resource.list('/assets', { search, manageable: true, page_size: 200 }))
     if (key !== searchSequence || !props.show) return
-    options.value = data.items.map(a => ({ label: `${a.name} · #${a.id}`, value: String(a.id) }))
+    options.value = data.items.map(a => ({ label: assetLabel(a), value: String(a.id) }))
   } catch (e) { if (key === searchSequence) error.value = errorText(e) }
 }
 watch(() => [props.show, props.assetId, auth.projectId] as const, ([show, id], previous) => {
@@ -39,6 +46,7 @@ watch(() => [props.show, props.assetId, auth.projectId] as const, ([show, id], p
   selected.value = id == null ? null : String(id)
   error.value = ''
   options.value = []
+  currentOption.value = null
   void searchAssets()
   if (selected.value) void load()
 }, { immediate: true })
@@ -59,7 +67,7 @@ async function load() {
     if (asset.can_manage !== true) throw new Error('当前账号无权编辑此服务器')
     const date = (v: unknown) => v ? String(v).slice(0, 10) : null
     purchased.value = date(asset.purchase_date); warranty.value = date(asset.warranty_expiry); vendor.value = String(asset.vendor || '')
-    if (!options.value.some(o => o.value === selected.value)) options.value.push({ label: `${asset.name} · #${asset.id}`, value: selected.value })
+    currentOption.value = {label: assetLabel(asset), value: selected.value!}
     const dep = depResponse ? unwrap<RecordData>(depResponse) : null
     if (dep?.has_depreciation) {
       cost.value = Number(dep.purchase_cost); salvage.value = Number(dep.salvage_value); months.value = Number(dep.useful_life_months)
@@ -90,7 +98,7 @@ async function save() {
   <n-modal :show="show" preset="card" :title="title" style="width: min(520px, 94vw)" :mask-closable="!saving" :closable="!saving" @update:show="emit('update:show', $event)">
     <n-form label-placement="top" :disabled="saving || loading">
       <n-form-item label="服务器" required>
-        <n-select v-model:value="selected" :options="options" filterable remote :disabled="assetId != null || saving || loading" placeholder="搜索并选择可管理的服务器" @search="searchAssets" @update:value="load" />
+        <n-select v-model:value="selected" :options="displayOptions" filterable remote :disabled="assetId != null || saving || loading" placeholder="搜索并选择可管理的服务器" @search="searchAssets" @update:value="load" />
       </n-form-item>
       <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }}</n-alert>
       <n-spin :show="loading">

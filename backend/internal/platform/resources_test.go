@@ -135,7 +135,7 @@ func TestOperationResourceDocumentSQL(t *testing.T) {
 		q := queryScope(db, r, scope{Tenant: 11, Project: 22, Admin: true}).
 			Where("id=?", 33).Select(resourceDocumentSQL(r)).Find(&rows)
 		sql := q.Statement.SQL.String()
-		for _, part := range []string{"jsonb_build_object(", "'operator_name'", "u.id=operations.user_id AND u.deleted_at IS NULL", "'client_ip', host(operations.client_ip)", "'bmc_ip'", "ast.tenant_id=operations.tenant_id", "ast.project_id=operations.project_id", "ast.id=operations.asset_id AND ast.deleted_at IS NULL", "'installation_stage'", "SELECT inst.status", "inst.tenant_id=operations.tenant_id", "inst.project_id=operations.project_id", "inst.operation_id=operations.id AND inst.asset_id=operations.asset_id", "operations.kind='install' AND inst.deleted_at IS NULL", "tenant_id=$1 AND project_id=$2 AND deleted_at IS NULL", "- 'payload'", "- 'result'"} {
+		for _, part := range []string{"jsonb_build_object(", "'operator_name'", "u.id=operations.user_id", "NULLIF(NULLIF(u.name,''), u.username)", "'client_ip', host(operations.client_ip)", "'bmc_ip'", "ast.tenant_id=operations.tenant_id", "ast.project_id=operations.project_id", "ast.id=operations.asset_id AND ast.deleted_at IS NULL", "'installation_stage'", "SELECT inst.status", "inst.tenant_id=operations.tenant_id", "inst.project_id=operations.project_id", "inst.operation_id=operations.id AND inst.asset_id=operations.asset_id", "operations.kind='install' AND inst.deleted_at IS NULL", "tenant_id=$1 AND project_id=$2 AND deleted_at IS NULL", "- 'payload'", "- 'result'"} {
 			if !strings.Contains(sql, part) {
 				t.Errorf("%s missing %q: %s", path, part, sql)
 			}
@@ -194,7 +194,9 @@ func TestOperationResourceResponseIntegration(t *testing.T) {
 		`INSERT INTO assets VALUES (101,11,22,'192.0.2.1',NULL), (101,99,22,'192.0.2.99',NULL), (102,99,22,'192.0.2.98',NULL)`,
 		`INSERT INTO installations VALUES (1,101,11,22,'post_install',NULL), (1,101,99,22,'failed',NULL), (1,101,11,99,'failed',NULL), (1,999,11,22,'failed',NULL), (1,101,11,22,'failed',now())`,
 		`ALTER TABLE installations ADD COLUMN progress jsonb NOT NULL DEFAULT '[]'`,
-		`ALTER TABLE operations ADD COLUMN automatic boolean NOT NULL DEFAULT false`,
+		`ALTER TABLE operations ADD COLUMN automatic boolean NOT NULL DEFAULT false, ADD COLUMN error text`,
+		`ALTER TABLE users ADD COLUMN username text NOT NULL DEFAULT ''`,
+		`ALTER TABLE assets ADD COLUMN name text NOT NULL DEFAULT '测试服务器', ADD COLUMN management_ip inet, ADD COLUMN serial_number text`,
 	} {
 		if err := tx.Exec(sql).Error; err != nil {
 			t.Fatal(err)
@@ -239,7 +241,7 @@ func TestOperationResourceResponseIntegration(t *testing.T) {
 				item := raw.(map[string]any)
 				want := map[string]any{"operator_name": nil, "client_ip": nil, "bmc_ip": nil, "installation_stage": nil}
 				if item["id"] == float64(1) {
-					want = map[string]any{"operator_name": "操作员", "client_ip": "2001:db8::12", "bmc_ip": "192.0.2.1", "installation_stage": "post_install"}
+					want = map[string]any{"operator_name": "操作员", "client_ip": "2001:db8::12", "bmc_ip": "192.0.2.1", "installation_stage": "post_install", "asset_name": "测试服务器", "asset_label": "测试服务器 · 192.0.2.1"}
 				}
 				for key, expected := range want {
 					if value, exists := item[key]; !exists || value != expected {
@@ -254,6 +256,23 @@ func TestOperationResourceResponseIntegration(t *testing.T) {
 			}
 		}
 	}
+	// Historical tasks keep their server identity after removal. Searching a
+	// displayed IP must still find the task without matching foreign assets.
+	if err := tx.Exec("UPDATE assets SET deleted_at=now() WHERE tenant_id=11").Error; err != nil {
+		t.Fatal(err)
+	}
+	for search, want := range map[string]float64{"192.0.2.1": 1, "192.0.2.99": 0} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest("GET", "/tasks?search="+search, nil)
+		c.Set("scope", scope{Tenant: 11, Project: 22, Admin: true})
+		a.listResource(resource{path: "tasks", table: "operations", readonly: true})(c)
+		var body struct{ Data struct{ Total float64 } }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil || body.Data.Total != want {
+			t.Fatalf("historical identity search: %d %s", w.Code, w.Body.String())
+		}
+	}
+
 }
 
 func TestListAssetsRejectsInvalidSearchField(t *testing.T) {

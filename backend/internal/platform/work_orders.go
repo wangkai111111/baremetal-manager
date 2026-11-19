@@ -42,6 +42,11 @@ var validPriorities = map[string]bool{"low": true, "medium": true, "high": true,
 // listWorkOrders 查询工单列表。
 // 可见范围：平台管理员或持有 work_orders:manage 的客服角色→租户全量；
 // 其余用户→自己提交的 + 指派给自己的工单。
+func workOrderDisplayColumns() string {
+	return "work_orders.*, " + auditUserSQL("work_orders.user_id") + " AS submitter_name, " +
+		auditUserSQL("work_orders.assigned_to") + " AS assignee_name"
+}
+
 func (a *App) listWorkOrders(c *gin.Context) {
 	sc := contextScope(c)
 	viewer := a.workOrderAccess(c)
@@ -86,7 +91,7 @@ func (a *App) listWorkOrders(c *gin.Context) {
 	}
 	p, n := page(c)
 	var items []map[string]any
-	if e := q.Select("id, tenant_id, user_id, type, title, description, status, priority, assigned_to, resolved_at, closed_at, created_at, updated_at").
+	if e := q.Select(workOrderDisplayColumns()).
 		Order("CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, id DESC").
 		Limit(n).Offset((p - 1) * n).
 		Find(&items).Error; e != nil {
@@ -106,6 +111,7 @@ func (a *App) getWorkOrder(c *gin.Context) {
 	}
 	var item map[string]any
 	e := a.store.db.Table("work_orders").
+		Select(workOrderDisplayColumns()).
 		Where("id=? AND tenant_id=? AND deleted_at IS NULL", id, sc.Tenant).
 		Take(&item).Error
 	if e != nil {

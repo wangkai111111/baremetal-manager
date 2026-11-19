@@ -201,6 +201,8 @@ export interface WorkOrderRecord {
   status: WorkOrderStatus
   priority: WorkOrderPriority
   assigned_to?: number | null
+  submitter_name?: string | null
+  assignee_name?: string | null
   resolved_at?: string | null
   closed_at?: string | null
   created_at?: string

@@ -167,8 +167,8 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
         text: true,
         type: 'primary',
         onClick: () => router.push(`/assets/${row.asset_id}`)
-      }, { default: () => String(row.name ?? `资产 #${row.asset_id}`) }),
-      h('span', { class: 'wa-asset-meta' }, `#${row.asset_id} · SN ${String(row.serial_number || '—')}`)
+      }, { default: () => String(row.name || row.bmc_address || row.management_ip || '服务器信息不可用') }),
+      h('span', { class: 'wa-asset-meta' }, [row.management_ip || row.bmc_address, row.serial_number ? `SN: ${row.serial_number}` : '序列号未采集'].filter(Boolean).join(' · '))
     ])
   },
   {
@@ -230,7 +230,8 @@ async function exportExcel() {
     return
   }
   const data = filtered.value.map(row => ({
-    资产ID: row.asset_id,
+    管理IP: row.management_ip || '',
+    BMC地址: row.bmc_address || '',
     服务器名称: row.name ?? '',
     序列号: row.serial_number ?? '',
     厂商: row.manufacturer ?? '',

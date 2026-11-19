@@ -24,7 +24,7 @@ const auth = useAuth()
 const assets = ref<RecordData[]>([])
 const departments = ref<{ id: number; name: string }[]>([])
 function departmentName(id: string) {
-  return departments.value.find(dept => String(dept.id) === id)?.name || `部门 #${id}`
+  return departments.value.find(dept => String(dept.id) === id)?.name || '部门信息不可用'
 }
 const depreciations = ref<RecordData[]>([])
 const loading = ref(false)

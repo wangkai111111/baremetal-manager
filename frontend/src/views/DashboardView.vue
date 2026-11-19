@@ -182,12 +182,12 @@ function inRange(value: unknown): boolean {
 
 const assetIndex = computed(() => {
   const map = new Map<string, string>()
-  assets.value.forEach(a => map.set(String(a.id), String(a.name || a.bmc_address || `资产 #${a.id}`)))
+  assets.value.forEach(a => map.set(String(a.id), String(a.name || a.bmc_address || '服务器信息不可用')))
   return map
 })
 function assetName(id: unknown): string {
   if (id == null || id === '') return '—'
-  return assetIndex.value.get(String(id)) || `资产 #${id}`
+  return assetIndex.value.get(String(id)) || '服务器信息不可用'
 }
 function assetById(id: unknown): RecordData | undefined {
   if (id == null || id === '') return undefined
@@ -222,12 +222,12 @@ const alertRows = computed(() => recentAlerts.value.map(alert => {
   const stamp = alert.last_seen_at || alert.created_at
   const severity = severityOf(alert.severity)
   const asset = assetById(alert.asset_id)
-  return { id: alert.id, message: String(alert.message || alert.title || '告警事件'), time: formatTime(stamp), relative: relativeTime(stamp), severityLabel: severity.label, severityColor: severity.color, severityBg: severity.bg, assetName: assetName(alert.asset_id), assetStatus: asset ? statusLabel(asset.display_status || asset.status) : '', assetStatusClass: asset ? statusClass(asset.display_status || asset.status) : '' }
+  return { id: alert.id, message: String(alert.message || alert.title || '告警事件'), time: formatTime(stamp), relative: relativeTime(stamp), severityLabel: severity.label, severityColor: severity.color, severityBg: severity.bg, assetName: String(alert.asset_label || alert.asset_name || assetName(alert.asset_id)), assetStatus: asset ? statusLabel(asset.display_status || asset.status) : '', assetStatusClass: asset ? statusClass(asset.display_status || asset.status) : '' }
 }))
 
 const taskRows = computed(() => recentTasks.value.map(task => ({
   id: task.id, kind: taskKindLabel(task.kind), time: formatTime(task.created_at || task.started_at),
-  assetName: assetName(task.asset_id), status: taskStatusLabel(task.status), statusType: taskStatusType(task.status)
+  assetName: String(task.asset_label || task.asset_name || assetName(task.asset_id)), status: taskStatusLabel(task.status), statusType: taskStatusType(task.status)
 })))
 
 // ============================================================
@@ -248,11 +248,11 @@ const dcRows = computed<DcRow[]>(() => {
     if (!row) { row = { id, name, total: 0, counts: { running: 0, idle: 0, fault: 0, maintenance: 0 } }; map.set(id, row) }
     return row
   }
-  datacenters.value.forEach(dc => ensure(String(dc.id), String(dc.name || `机房 #${dc.id}`)))
+  datacenters.value.forEach(dc => ensure(String(dc.id), String(dc.name || '机房信息不可用')))
   assets.value.forEach(asset => {
     const id = asset.datacenter_id == null ? 'unassigned' : String(asset.datacenter_id)
     const known = datacenters.value.find(dc => String(dc.id) === id)
-    const row = ensure(id, known ? String(known.name || id) : (id === 'unassigned' ? '未分配机房' : `机房 #${id}`))
+    const row = ensure(id, known ? String(known.name || '未命名机房') : (id === 'unassigned' ? '未分配机房' : '机房信息不可用'))
     row.total++; row.counts[bucketOf(asset.display_status || asset.status)]++
   })
   return [...map.values()].sort((a, b) => b.total - a.total).slice(0, 6)

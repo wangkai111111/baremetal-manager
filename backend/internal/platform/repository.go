@@ -149,7 +149,11 @@ func (s *store) saveResource(ctx context.Context, r resource, sc scope, id int64
 			}
 		}
 		*out = id
-		return s.audit(tx, sc, "write", r.table, id)
+		action := "update"
+		if create {
+			action = "create"
+		}
+		return s.audit(tx, sc, action, r.table, id)
 	})
 }
 func asInt(v any) int64 {

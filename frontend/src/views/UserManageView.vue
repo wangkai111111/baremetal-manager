@@ -95,7 +95,7 @@ const columns = computed<DataTableColumns<RecordData>>(() => [
     const grants = Array.isArray(row.access_grants) ? row.access_grants as RecordData[] : []
     if (!grants.length) return h('span', { style: 'color: var(--color-text-tertiary)' }, '未授权')
     return h('div', { style: 'display:flex; flex-direction:column; gap:4px' }, grants.map(g => h('span', {},
-      `${g.department_id == null ? '整个组织' : departmentNames.value.find(d => d.id === Number(g.department_id))?.name || `部门 #${g.department_id}`} · ${g.is_admin ? '管理员' : '普通用户'}`)))
+      `${g.department_id == null ? '整个组织' : g.department_name || departmentNames.value.find(d => d.id === Number(g.department_id))?.name || '部门信息不可用'} · ${g.is_admin ? '管理员' : '普通用户'}`)))
   } },
   { title: '最后登录', key: 'last_login_at', minWidth: 150, render: (row: RecordData) => formatTime(row.last_login_at) },
   { title: '创建时间', key: 'created_at', minWidth: 150, render: (row: RecordData) => formatTime(row.created_at) },

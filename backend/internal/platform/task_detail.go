@@ -40,10 +40,13 @@ func (a *App) getTask(c *gin.Context) {
  operations.user_id, operations.kind, operations.status, operations.attempts, operations.max_attempts,
  operations.timeout_seconds, operations.automatic, operations.worker_id, operations.started_at,
  operations.completed_at, operations.created_at, operations.updated_at, operations.error,
+ host(operations.client_ip) AS client_ip,
+ `+auditUserSQL("operations.user_id")+` AS operator_name,
  (SELECT jsonb_build_object('id',ast.id,'name',ast.name,'status',ast.status,'power_state',ast.power_state,
-    'monitor_health',ast.monitor_health,'bmc_protocol',ast.bmc_protocol)
+    'monitor_health',ast.monitor_health,'bmc_protocol',ast.bmc_protocol,
+    'bmc_address',host(ast.bmc_address),'management_ip',host(ast.management_ip),'serial_number',ast.serial_number)
   FROM assets ast WHERE ast.id=operations.asset_id AND ast.tenant_id=operations.tenant_id
-   AND ast.project_id=operations.project_id AND ast.deleted_at IS NULL)::text AS asset,
+   AND ast.project_id=operations.project_id)::text AS asset,
  (SELECT COUNT(*) FROM operation_logs l WHERE l.operation_id=operations.id AND l.deleted_at IS NULL) AS log_count`).
 		Where("operations.id=?", id).Take(&item).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {

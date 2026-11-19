@@ -1,13 +1,5 @@
 package platform
 
-// ============================================================
-// 审计增强（两种模式通用）
-// ============================================================
-//
-// 注册路由（routes.go）：
-// GET /api/v1/projects/:projectId/audit-logs         → listAuditLogs    → audit:read
-// GET /api/v1/projects/:projectId/audit-logs/export   → exportAuditLogs  → audit:read
-//
 // 唯一权威审计证据表是 003 引入的 audits（应用账户仅可追加，见 migrations/grants.go）：
 // 行为用户、请求标识、动作、对象类型/标识、结果 outcome、客户端 IP 与 User-Agent 均已落库。
 // 历史实现只写入最小字段，来源信息缺失；本文件补齐带来源信息的写入路径 recordAudit，
@@ -25,12 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
-
-// auditColumns 是审计列表/导出的显式字段集：快照列（before_snapshot/after_snapshot）
-// 可能含变更前后资源详情，一律不外泄，与 resources.go 的 hidden 白名单保持一致。
-const auditColumns = `au.id, au.tenant_id, au.project_id, au.user_id, au.api_key_id, au.request_id,
- au.action, au.target_type, au.target_id, au.outcome, host(au.client_ip) AS client_ip, au.user_agent,
- au.occurred_at, au.created_at, u.username AS operator_username, u.name AS operator_name`
 
 // auditMeta 承载一次请求的来源信息，用于审计留痕。
 type auditMeta struct {
@@ -58,21 +44,49 @@ func requestMeta(c *gin.Context, actor int64) auditMeta {
 // recordAudit 在给定事务内追加一条带来源信息的审计证据。
 // outcome 取值沿用 audits DDL CHECK：success|denied|failed。
 func (s *store) recordAudit(tx *gorm.DB, sc scope, meta auditMeta, action, targetType string, targetID any, outcome string) error {
-	return tx.Table("audits").Create(auditRow(sc, meta, action, targetType, targetID, outcome)).Error
+	return s.recordAuditNote(tx, sc, meta, action, targetType, targetID, outcome, nil)
 }
 
 // recordAuditNote 在标准审计字段之外附加一段处置详情，写入 after_snapshot 供复核。
 // 详情必须是已脱敏的结构化数据，不得包含凭据、密钥或明文个人信息。
 func (s *store) recordAuditNote(tx *gorm.DB, sc scope, meta auditMeta, action, targetType string, targetID any, outcome string, note any) error {
 	row := auditRow(sc, meta, action, targetType, targetID, outcome)
-	if encoded, err := json.Marshal(note); err == nil {
-		row["after_snapshot"] = gorm.Expr("?::jsonb", string(encoded))
+	// Store only the display allowlist, never resource configuration or secrets.
+	// Capturing at write time also preserves names after renames and deletion.
+	var display string
+	if err := tx.Raw(`SELECT (`+auditDisplaySQL("e")+`)::text FROM
+ (SELECT ?::bigint AS tenant_id, ?::bigint AS project_id, ?::bigint AS user_id,
+ ?::text AS action, ?::text AS target_type, ?::text AS target_id,
+ NULL::jsonb AS after_snapshot, NULL::inet AS client_ip) e`,
+		sc.Tenant, sc.Project, sc.User, action, targetType, fmt.Sprint(targetID)).Scan(&display).Error; err != nil {
+		return err
 	}
+	snapshot := map[string]any{"audit_display": json.RawMessage(display)}
+	if note != nil {
+		snapshot["note"] = note
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	row["after_snapshot"] = gorm.Expr("?::jsonb", string(encoded))
 	return tx.Table("audits").Create(row).Error
 }
 
 // auditRow 组装 audits 行；client_ip 仅在合法 IP 时写入，避免 inet 类型转换失败回滚业务事务。
 func auditRow(sc scope, meta auditMeta, action, targetType string, targetID any, outcome string) map[string]any {
+	if meta.RequestID == "" {
+		meta.RequestID = sc.Audit.RequestID
+	}
+	if meta.RequestID == "" {
+		meta.RequestID = fmt.Sprintf("%d-%d", time.Now().UnixNano(), sc.User)
+	}
+	if meta.ClientIP == "" {
+		meta.ClientIP = sc.Audit.ClientIP
+	}
+	if meta.UserAgent == "" {
+		meta.UserAgent = sc.Audit.UserAgent
+	}
 	if outcome != "success" && outcome != "denied" && outcome != "failed" {
 		outcome = "success"
 	}
@@ -87,53 +101,43 @@ func auditRow(sc scope, meta auditMeta, action, targetType string, targetID any,
 		"outcome":     outcome,
 		"user_agent":  meta.UserAgent,
 	}
-	if meta.ClientIP != "" {
-		row["client_ip"] = meta.ClientIP
+	if ip, err := netip.ParseAddr(meta.ClientIP); err == nil {
+		row["client_ip"] = ip.Unmap().String()
 	}
 	return row
 }
 
 // auditQuery 按筛选条件构造审计查询。非平台管理员只能看到本项目作用域内的记录。
 func (a *App) auditQuery(c *gin.Context, sc scope) *gorm.DB {
-	q := a.store.db.Table("audits au").
-		Joins("LEFT JOIN users u ON u.id=au.user_id").
-		Where("au.deleted_at IS NULL")
-	if !sc.Admin {
-		q = q.Where("au.tenant_id=? AND au.project_id=?", sc.Tenant, sc.Project)
-	} else if tenant := number(c.Query("tenant_id")); tenant > 0 {
-		q = q.Where("au.tenant_id=?", tenant)
-	}
-	if project := number(c.Query("project_id")); project > 0 {
-		q = q.Where("au.project_id=?", project)
-	}
+	q := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "audits"}, sc)
 	if operator := strings.TrimSpace(c.Query("operator")); operator != "" {
 		if id := number(operator); id > 0 {
-			q = q.Where("au.user_id=?", id)
+			q = q.Where("audits.user_id=?", id)
 		} else {
-			q = q.Where("(u.username ILIKE ? OR u.name ILIKE ?)", "%"+operator+"%", "%"+operator+"%")
+			q = q.Where("("+auditUserSQL("audits.user_id")+" ILIKE ?)", "%"+operator+"%")
 		}
 	}
 	if ip := strings.TrimSpace(c.Query("ip")); ip != "" {
-		q = q.Where("host(au.client_ip) ILIKE ?", "%"+ip+"%")
+		q = q.Where("host(audits.client_ip) ILIKE ?", "%"+ip+"%")
 	}
 	if action := strings.TrimSpace(c.Query("action")); action != "" {
-		q = q.Where("au.action ILIKE ?", "%"+action+"%")
+		q = q.Where("audits.action ILIKE ?", "%"+action+"%")
 	}
 	if result := strings.TrimSpace(c.Query("result")); result != "" {
-		q = q.Where("au.outcome=?", result)
+		q = q.Where("audits.outcome=?", result)
 	}
 	if target := strings.TrimSpace(c.Query("target_type")); target != "" {
-		q = q.Where("au.target_type=?", target)
+		q = q.Where("audits.target_type=?", target)
 	}
 	if from := parseQueryTime(c.Query("from")); from != nil {
-		q = q.Where("au.occurred_at>=?", *from)
+		q = q.Where("audits.occurred_at>=?", *from)
 	}
 	if to := parseQueryTime(c.Query("to")); to != nil {
-		q = q.Where("au.occurred_at<=?", *to)
+		q = q.Where("audits.occurred_at<=?", *to)
 	}
 	if search := strings.TrimSpace(c.Query("search")); search != "" {
 		like := "%" + search + "%"
-		q = q.Where("(au.action ILIKE ? OR au.target_type ILIKE ? OR au.target_id ILIKE ? OR au.request_id ILIKE ?)", like, like, like, like)
+		q = q.Where(auditSearchSQL("audits"), like)
 	}
 	return q
 }
@@ -169,8 +173,8 @@ func (a *App) listAuditLogs(c *gin.Context) {
 		return
 	}
 	p, n := page(c)
-	var items []map[string]any
-	if err := q.Select(auditColumns).Order("au.id DESC").Limit(n).Offset((p - 1) * n).Scan(&items).Error; err != nil {
+	items, err := decodeRows(q.Order("audits.id DESC").Limit(n).Offset((p-1)*n), resource{table: "audits"})
+	if err != nil {
 		fail(c, 500, "audit query failed")
 		return
 	}
@@ -178,7 +182,7 @@ func (a *App) listAuditLogs(c *gin.Context) {
 }
 
 // auditExportColumns 是 CSV 导出的列顺序，JSON 导出复用查询结果字段。
-var auditExportColumns = []string{"id", "occurred_at", "operator_username", "operator_name", "action", "target_type", "target_id", "outcome", "client_ip", "user_agent", "request_id", "tenant_id", "project_id"}
+var auditExportColumns = []string{"occurred_at", "operator_name", "action_label", "target_type_label", "target_name", "project_name", "outcome", "client_ip"}
 
 // exportAuditLogs 导出审计记录，支持 format=csv|json（默认 json），风格与
 // orders/bills 的单对象导出一致：设置 Content-Disposition 附件头后直接输出。
@@ -188,10 +192,17 @@ func (a *App) exportAuditLogs(c *gin.Context) {
 		fail(c, 403, "permission denied")
 		return
 	}
-	var items []map[string]any
-	if err := a.auditQuery(c, sc).Select(auditColumns).Order("au.id DESC").Limit(10000).Scan(&items).Error; err != nil {
+	items, err := decodeRows(a.auditQuery(c, sc).Order("audits.id DESC").Limit(10000), resource{table: "audits"})
+	if err != nil {
 		fail(c, 500, "audit export failed")
 		return
+	}
+	for i, item := range items {
+		readable := make(map[string]any, len(auditExportColumns))
+		for _, column := range auditExportColumns {
+			readable[column] = item[column]
+		}
+		items[i] = readable
 	}
 	stamp := time.Now().UTC().Format("20060102150405")
 	if strings.EqualFold(strings.TrimSpace(c.Query("format")), "csv") {

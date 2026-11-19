@@ -3,13 +3,14 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NAlert, NButton, NModal, NSpin, NTag } from 'naive-ui'
 import dayjs from 'dayjs'
 import { api, errorText, unwrap } from '../api'
+import { assetLabel } from '../utils/display'
 import { useAuth } from '../stores/auth'
 import InstallationProgress, { type InstallationProgressData } from './InstallationProgress.vue'
 const props = defineProps<{ taskId: number | null }>()
 const emit = defineEmits<{ close: [] }>()
 const auth = useAuth()
 type Entry = { message: string; occurred_at: string; stage?: string; level?: string }
-type Task = { id: number; kind: string; status: string; error?: string; asset?: { id: number; name: string }; created_at: string; completed_at?: string; installation?: InstallationProgressData; events?: Entry[]; recent_logs?: Entry[]; server_time?: string }
+type Task = { id: number; kind: string; status: string; error?: string; operator_name?: string; client_ip?: string; asset?: { id: number; name: string; bmc_address?: string; management_ip?: string; serial_number?: string }; created_at: string; completed_at?: string; installation?: InstallationProgressData; events?: Entry[]; recent_logs?: Entry[]; server_time?: string }
 const task = ref<Task | null>(null)
 const logs = ref<Entry[]>([])
 const failure = ref('')
@@ -44,11 +45,12 @@ watch([() => props.taskId, () => auth.projectId], () => { generation++; clearTim
 onBeforeUnmount(() => { disposed = true; generation++; clearTimeout(timer) })
 </script>
 <template>
-  <NModal :show="!!taskId" preset="card" :title="`任务 #${taskId} · ${kindLabels[task?.kind || ''] || '执行详情'}`" @update:show="!$event && emit('close')" style="width: min(880px, 96vw); max-height: 92vh; overflow: auto">
+  <NModal :show="!!taskId" preset="card" :title="`${kindLabels[task?.kind || ''] || '任务详情'}${task?.asset?.name ? ` · ${task.asset.name}` : ''}`" @update:show="!$event && emit('close')" style="width: min(880px, 96vw); max-height: 92vh; overflow: auto">
     <NSpin :show="loading">
       <NAlert v-if="failure" type="error" :bordered="false">{{ failure }}</NAlert>
       <template v-if="task">
-        <div class="task-meta"><span>{{ task.asset?.name || `服务器 #${task.asset?.id || '—'}` }}</span><NTag :bordered="false" :type="task.status === 'succeeded' ? 'success' : ['failed', 'timeout'].includes(task.status) ? 'error' : 'info'">{{ statusLabels[task.status] || task.status }}</NTag><NButton text size="small" @click="refresh()">刷新进度</NButton></div>
+        <div class="task-meta"><span>{{ assetLabel(task.asset) }}</span><NTag :bordered="false" :type="task.status === 'succeeded' ? 'success' : ['failed', 'timeout'].includes(task.status) ? 'error' : 'info'">{{ statusLabels[task.status] || task.status }}</NTag><NButton text size="small" @click="refresh()">刷新进度</NButton></div>
+        <p class="task-times">操作人 {{ task.operator_name || '系统或历史操作人' }} · 操作 IP {{ task.client_ip || '未记录' }}</p>
         <p class="task-times">提交 {{ stamp(task.created_at) }} · 结束 {{ stamp(task.completed_at) }} · 执行中每 3 秒同步</p>
         <InstallationProgress v-if="task.installation" :installation="task.installation" :server-time="task.server_time" />
         <NAlert v-else-if="task.error" type="error" :bordered="false">{{ task.error }}</NAlert>

@@ -245,7 +245,7 @@ const datacenterSummary = computed(() => {
   const counter = new Map<string, number>()
   for (const asset of currentAssets.value) {
     const id = String(asset.datacenter_id ?? '')
-    const name = datacenterNames.value[id] || (id ? `机房 #${id}` : '未归属机房')
+    const name = datacenterNames.value[id] || (id ? '机房信息不可用' : '未归属机房')
     counter.set(name, (counter.get(name) ?? 0) + 1)
   }
   return [...counter.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count).slice(0, 4)

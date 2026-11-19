@@ -341,7 +341,7 @@ func (a *App) updateSettings(c *gin.Context) {
 			if e := tx.Exec("INSERT INTO system_settings(key,value,create_by) VALUES (?,?::jsonb,?) ON CONFLICT (key) WHERE deleted_at IS NULL DO UPDATE SET value=EXCLUDED.value,update_by=EXCLUDED.create_by", k, string(data), sc.User).Error; e != nil {
 				return e
 			}
-			if e := tx.Table("audits").Create(map[string]any{"tenant_id": sc.Tenant, "project_id": sc.Project, "user_id": sc.User, "request_id": uuid.NewString(), "action": "settings:write", "target_type": "system_settings", "target_id": k, "outcome": "success"}).Error; e != nil {
+			if e := a.store.recordAudit(tx, sc, requestMeta(c, sc.User), "settings:write", "system_settings", k, "success"); e != nil {
 				return e
 			}
 		}

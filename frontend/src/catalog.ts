@@ -91,7 +91,7 @@ export const sections: Section[] = [
       { ...field('name', '子网名称', true), placeholder: '例如：机房装机网络' },
       { ...field('subnet', '子网 CIDR', true), placeholder: '192.168.10.0/24', help: '填写网络地址；IPv6 可用于 IPAM，当前 PXE 使用 IPv4。' },
       { ...field('gateway', '默认网关'), placeholder: '192.168.10.1（可留空）', help: '必须是网段内的可用地址，不能落入地址池。' },
-      { ...field('vlan_id', 'VLAN ID'), type: 'number', min: 1, max: 4094, help: '1–4094；留空表示不打标，登记不会创建网卡或交换机 VLAN。' },
+      { ...field('vlan_id', 'VLAN 标签'), type: 'number', min: 1, max: 4094, help: '1–4094；留空表示不打标，登记不会创建网卡或交换机 VLAN。' },
       { ...field('dns_servers', 'DNS 服务器'), type: 'textarea', placeholder: '192.168.10.1, 223.5.5.5', help: '选填，逗号或换行分隔，最多 8 个 IP；仅记录网络规划。' },
       { ...field('dhcp_enabled', '允许 DHCP 装机'), type: 'switch', default: false, help: '允许全局 PXE 服务绑定此子网；实际启停在 PXE 配置中操作。' }
     ],
@@ -190,7 +190,7 @@ export const sections: Section[] = [
     api: '/members',
     permission: 'iam:read',
     fields: [
-      field('user_id', '用户 ID', true),
+      field('user_id', '用户', true),
       { ...field('role', '角色'), type: 'select', options: ['admin', 'manager', 'operator', 'viewer'] }
     ],
     columns: ['user_id', 'role', 'created_at']
@@ -202,7 +202,7 @@ export const sections: Section[] = [
     api: '/tasks',
     permission: 'tasks:read',
     fields: [],
-    columns: ['kind', 'bmc_ip', 'operator_name', 'client_ip', 'status', 'installation_stage', 'error', 'created_at'],
+    columns: ['asset_label', 'kind', 'operator_name', 'client_ip', 'status', 'installation_stage', 'error', 'created_at'],
     readonly: true
   },
   {
@@ -237,7 +237,7 @@ export const sections: Section[] = [
     api: '/tasks',
     permission: 'tasks:read',
     fields: [],
-    columns: ['kind', 'bmc_ip', 'operator_name', 'client_ip', 'status', 'installation_stage', 'error', 'created_at'],
+    columns: ['asset_label', 'kind', 'operator_name', 'client_ip', 'status', 'installation_stage', 'error', 'created_at'],
     readonly: true
   },
   {
@@ -247,7 +247,7 @@ export const sections: Section[] = [
     api: '/audit',
     permission: 'audit:read',
     fields: [],
-    columns: ['user_id', 'action', 'target_type', 'target_id', 'outcome', 'created_at'],
+    columns: ['operator_name', 'action_label', 'target_type_label', 'target_name', 'project_name', 'client_ip', 'outcome', 'created_at'],
     readonly: true
   },
   {
@@ -272,7 +272,7 @@ export const sections: Section[] = [
     permission: 'departments:read',
     fields: [
       field('name', '部门名称', true),
-      { ...field('parent_id', '上级部门 ID'), type: 'number' },
+      { ...field('parent_id', '上级部门'), type: 'number' },
       field('description', '描述')
     ],
     columns: ['name', 'parent_id', 'description', 'created_at']
@@ -285,14 +285,14 @@ export const sections: Section[] = [
     api: '/assets/depreciation',
     permission: 'assets:read',
     fields: [
-      { ...field('asset_id', '资产 ID', true), type: 'number' },
+      { ...field('asset_id', '服务器', true), type: 'number' },
       field('asset_name', '资产名称'),
       field('depreciation_method', '折旧方式'),
       { ...field('useful_life_months', '使用年限（月）'), type: 'number' },
       { ...field('purchase_cost', '资产原值'), type: 'number' },
       { ...field('salvage_value', '残值'), type: 'number' }
     ],
-    columns: ['asset_id', 'asset_name', 'depreciation_method', 'purchase_cost', 'useful_life_months', 'salvage_value', 'created_at'],
+    columns: ['asset_name', 'depreciation_method', 'purchase_cost', 'useful_life_months', 'salvage_value', 'created_at'],
     readonly: true
   },
   // === 自用模式专属：维保告警 ===
@@ -325,7 +325,8 @@ export const sections: Section[] = [
 ]
 
 export const labels: Record<string, string> = {
-  id: 'ID',
+  id: '记录',
+  asset_label: '服务器', asset_id: '服务器', firmware_package_id: '固件包', image_id: '系统镜像', image_template_id: '镜像模板', kickstart_template_id: '应答模板', partition_template_id: '分区模板', install_plan_id: '安装方案',
   name: '名称',
   code: '编码',
   description: '描述',
@@ -343,34 +344,33 @@ export const labels: Record<string, string> = {
   bmc_port: 'BMC 端口',
   bmc_protocol: 'BMC 协议',
   power_state: '电源状态',
-  tenant_id: '组织 ID',
+  tenant_id: '组织',
   mac_address: 'MAC 地址',
   size: '大小 (字节)',
   kind: '任务类型',
   resolved: '已解决',
   target: '目标',
+  action_label: '操作', target_type_label: '资源类型', target_name: '操作对象', project_name: '所属项目',
   target_type: '资源类型',
-  target_id: '资源 ID',
+  target_id: '操作对象',
   outcome: '操作结果',
   subnet: 'CIDR',
-  vlan_id: 'VLAN ID',
+  vlan_id: 'VLAN 标签',
   dhcp_enabled: 'DHCP',
   start_address: '起始 IP',
   end_address: '结束 IP',
-  user_id: '用户 ID',
-  network_id: '子网 ID',
+  user_id: '用户',
+  network_id: '所属子网',
   error: '错误',
   serial_number: '序列号',
   bmc_ip: 'BMC IP',
   operator_name: '操作人',
   client_ip: '操作 IP',
   installation_stage: '安装阶段',
-  project_id: '项目 ID',
+  project_id: '所属项目',
   datacenter_id: '机房',
   location: '位置',
   contact: '联系人',
-  asset_id: '资产 ID',
-  image_id: '镜像 ID',
   os_type: '操作系统',
   version: '版本',
   address: '地址',
