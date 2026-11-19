@@ -5,6 +5,8 @@ import { api, errorText, rows, unwrap, type RecordData } from '../api'
 import { hostIP, networkLabel } from '../utils/networkOptions'
 import { useAuth } from '../stores/auth'
 import { hostAddressOptions, hostInterfaceOptions, includeSavedOption, retainOrChooseAddress, type HostOptions } from '../utils/pxeOptions'
+import DHCPReservations from '../components/DHCPReservations.vue'
+import { validateDHCPReservations, type DHCPReservation } from '../utils/dhcpReservations'
 const auth = useAuth()
 const message = useMessage()
 const dialog = useDialog()
@@ -17,6 +19,10 @@ const tftp = ref(false)
 const binding = ref(true)
 const snapshot = ref('')
 const config = reactive<Record<string, string>>({ tenant_id: '', project_id: '', network_id: '', pool_id: '', dhcp_mode: 'direct', gateway: '', dns_servers: '', interface: '', subnet: '', start: '', end: '', server: '', root: '/var/lib/tftpboot', bios: 'undionly.kpxe', efi: 'ipxe.efi' })
+const reservations = ref<DHCPReservation[]>([])
+const taggedOnly = ref(false)
+const relayProxy = ref(false)
+const currentSnapshot = () => JSON.stringify({config, reservations: reservations.value, taggedOnly: taggedOnly.value, relayProxy: relayProxy.value})
 const tenants = ref<RecordData[]>([])
 const projects = ref<RecordData[]>([])
 const networks = ref<RecordData[]>([])
@@ -28,7 +34,7 @@ const hostOptions = ref<HostOptions>({ interfaces: [], roots: [] })
 const hostKnown = ref(false)
 let optionSequence = 0
 const locked = computed(() => busy.value || !known.value || dhcp.value || tftp.value)
-const dirty = computed(() => snapshot.value !== JSON.stringify(config) || binding.value !== !!Number(config.network_id))
+const dirty = computed(() => snapshot.value !== currentSnapshot() || binding.value !== !!Number(config.network_id))
 const boundNetwork = computed(() => networks.value.find(row => String(row.id) === config.network_id))
 const boundPool = computed(() => pools.value.find(row => String(row.id) === config.pool_id))
 const selectedInterface = computed(() => hostOptions.value.interfaces.find(row => row.name === config.interface))
@@ -41,11 +47,13 @@ const selectedRoot = computed(() => hostOptions.value.roots.find(row => row.path
 const rootChoices = computed(() => includeSavedOption(hostOptions.value.roots.map(row => ({value: row.path, label: `${row.path}${row.path === '/var/lib/tftpboot' ? ' · 平台默认目录' : ''}`, disabled: !row.bios_files.length || !row.efi_files.length || !row.chain_ready})), config.root!))
 const biosChoices = computed(() => includeSavedOption((selectedRoot.value?.bios_files || []).map(row => ({value: row.name, label: row.label})), config.bios!))
 const efiChoices = computed(() => includeSavedOption((selectedRoot.value?.efi_files || []).map(row => ({value: row.name, label: row.label})), config.efi!))
+const ruleError = computed(() => binding.value ? validateDHCPReservations(reservations.value, {subnet: String(boundNetwork.value?.subnet || config.subnet || ''), gateway: boundNetwork.value ? hostIP(boundNetwork.value.gateway) : config.gateway || '', server: config.server || '', mode: config.dhcp_mode || '', taggedOnly: taggedOnly.value, relayProxy: relayProxy.value}) : '')
 const selectionError = computed(() => {
   if (!hostKnown.value) return '请先成功读取宿主机选项。'
   if (!selectedInterface.value?.up || !selectedInterface.value.addresses.length) return '请选择已启用且配置了 IPv4 的宿主机网卡。'
   if (!addressChoices.value.some(row => row.value === config.server && !row.disabled)) return config.dhcp_mode === 'relay' ? '请选择宿主机网卡的 IPv4，且不能位于客户端地址池内。' : '请选择与装机子网匹配且位于地址池之外的宿主机 IPv4；跨网段请选择三层 DHCP Relay 模式。'
   if (binding.value && config.dhcp_mode === 'relay' && boundNetwork.value && !hostIP(boundNetwork.value.gateway)) return '三层 DHCP Relay 需要客户端网关，请先在子网管理中填写该装机子网的网关。'
+  if (ruleError.value) return ruleError.value
   if (!selectedRoot.value) return '请选择系统已检测到的 TFTP 目录。'
   if (!selectedRoot.value.chain_ready) return '所选目录缺少 default.ipxe；新部署请配置 PXE_HTTP_BASE 后重启 PXE 控制服务。'
   if (!selectedRoot.value.bios_files.some(row => row.name === config.bios) || !selectedRoot.value.efi_files.some(row => row.name === config.efi)) return '所选目录中没有对应的 BIOS / UEFI 引导文件。'
@@ -112,8 +120,10 @@ async function load() {
     const state = unwrap<any>(await api.get('/pxe-services'))
     known.value = true; dhcp.value = state.dhcp_running; tftp.value = state.tftp_running
     Object.keys(config).forEach(key => { config[key] = String(state.config[key] || (key === 'dhcp_mode' ? 'direct' : '')) })
+    reservations.value = (state.config.reservations || []).map((row: DHCPReservation) => ({...row, circuit_format: row.circuit_format || 'text', remote_format: row.remote_format || 'text'}))
+    taggedOnly.value = !!state.config.tagged_only; relayProxy.value = !!state.config.relay_proxy
     binding.value = !!Number(config.network_id)
-    snapshot.value = JSON.stringify(config)
+    snapshot.value = currentSnapshot()
     failure.value = state.error || ''
     await loadOptions()
   } catch (e) { known.value = false; failure.value = errorText(e) }
@@ -127,7 +137,7 @@ async function save() {
   }
   busy.value = true
   try {
-    const body: Record<string, string | number> = { ...config }
+    const body: Record<string, unknown> = { ...config, reservations: binding.value ? reservations.value : [], tagged_only: binding.value && taggedOnly.value, relay_proxy: binding.value && relayProxy.value }
     for (const key of ['tenant_id', 'project_id', 'network_id', 'pool_id']) body[key] = binding.value ? Number(config[key]) : 0
     if (!binding.value) { body.subnet = ''; body.start = ''; body.end = ''; body.gateway = ''; body.dns_servers = ''; body.dhcp_mode = '' }
     await api.put('/pxe-services', body)
@@ -165,7 +175,7 @@ onMounted(() => { void load(); void loadHostOptions() })
       <NAlert v-else-if="hostKnown && selectionError" type="warning" class="pxe-notice">{{ selectionError }}</NAlert>
       <NForm label-placement="top" :disabled="locked">
         <NFormItem label="绑定 DHCP 装机网络">
-          <div class="pxe-control"><NSwitch v-model:value="binding" /><p class="field-help">关闭后只保存 TFTP 配置；开启后按组织、项目、子网选择地址池。</p></div>
+          <div class="pxe-control"><NSwitch v-model:value="binding" /><p class="field-help">开启后按组织、项目、子网选择地址池；关闭并保存会清除 DHCP 网络绑定及标签规则，只保留 TFTP 配置。</p></div>
         </NFormItem>
         <div v-if="binding" class="pxe-form">
           <NFormItem label="DHCP 网络模式" required class="pxe-mode"><div class="pxe-control">
@@ -184,6 +194,20 @@ onMounted(() => { void load(); void loadHostOptions() })
         <NAlert v-if="binding && config.dhcp_mode === 'relay'" type="info" :bordered="false" class="pxe-notice">
           在客户端 VLAN 的三层网关上，将 DHCP Relay / IP Helper 指向 {{ config.server || '所选宿主机 IPv4' }}。Relay 的 giaddr 应属于所选装机子网；客户端网关填写该子网的网关，不是 PXE 服务器地址。需保证双向路由，以及 DHCP、TFTP（含返回数据端口）、HTTP 下载和安装回调连通。当前全局服务一次绑定一个装机子网。
         </NAlert>
+        <template v-if="binding">
+          <DHCPReservations v-model="reservations" :disabled="locked || optionBusy || !boundNetwork" :subnet="String(boundNetwork?.subnet || config.subnet || '')" :gateway="hostIP(boundNetwork?.gateway)" :server="config.server || ''" :mode="config.dhcp_mode || ''" />
+          <div class="pxe-form">
+            <NFormItem label="未匹配规则的设备"><div class="pxe-control">
+              <NSelect :value="taggedOnly ? 'only' : 'dynamic'" :options="[{label:'仍从动态地址池分配',value:'dynamic'},{label:'不分配，仅允许已启用的规则',value:'only'}]" @update:value="value => taggedOnly = value === 'only'" />
+              <p class="field-help">仅按规则分配时，缺少标签、标签不符或规则停用的设备都不会获得租约。固定 IP 保留给对应规则。</p>
+            </div></NFormItem>
+            <NFormItem v-if="config.dhcp_mode === 'relay'" label="续租经 Relay 代理（dhcp-proxy）"><div class="pxe-control">
+              <NSwitch v-model:value="relayProxy" />
+              <p class="field-help">启用后以 Relay 地址作为 DHCP 服务器标识，引导客户端经 Relay 续租。交换机需支持代理转发；否则保持关闭，并确保续租也携带匹配所需的 Option 82 信息。平台不会修改交换机。</p>
+            </div></NFormItem>
+          </div>
+          <NAlert v-if="reservations.length" type="info" :bordered="false" class="pxe-notice">规则随全局 PXE 配置保存；添加、编辑、删除或启停后，请点击下方“保存全局配置”。已有租约不会立即迁移，需客户端重新获取地址；同一固定 IP 同时只分配给一个客户端。</NAlert>
+        </template>
         <div class="pxe-form">
           <NFormItem label="宿主机装机网卡" required><div class="pxe-control">
             <NSelect :value="config.interface || null" :options="interfaceChoices" :loading="hostBusy" :disabled="locked || !hostKnown" filterable placeholder="选择宿主机网卡" @update:value="selectInterface" />

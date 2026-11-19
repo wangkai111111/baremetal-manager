@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,22 +23,37 @@ const Socket = "/run/bmm-pxe/control.sock"
 const StateFile = "/var/lib/bmm-pxe/config.json"
 
 type Config struct {
-	TenantID  int64  `json:"tenant_id"`
-	ProjectID int64  `json:"project_id"`
-	NetworkID int64  `json:"network_id"`
-	PoolID    int64  `json:"pool_id"`
-	Interface string `json:"interface"`
-	Subnet    string `json:"subnet"`
-	Start     string `json:"start"`
-	End       string `json:"end"`
-	Server    string `json:"server"`
-	DHCPMode  string `json:"dhcp_mode"`
-	Gateway   string `json:"gateway"`
-	DNS       string `json:"dns_servers"` // Canonical comma-separated IPv4 addresses; Config stays comparable.
-	Root      string `json:"root"`
-	BIOS      string `json:"bios"`
-	EFI       string `json:"efi"`
+	TenantID     int64             `json:"tenant_id"`
+	ProjectID    int64             `json:"project_id"`
+	NetworkID    int64             `json:"network_id"`
+	PoolID       int64             `json:"pool_id"`
+	Interface    string            `json:"interface"`
+	Subnet       string            `json:"subnet"`
+	Start        string            `json:"start"`
+	End          string            `json:"end"`
+	Server       string            `json:"server"`
+	DHCPMode     string            `json:"dhcp_mode"`
+	Gateway      string            `json:"gateway"`
+	DNS          string            `json:"dns_servers"` // Canonical comma-separated IPv4 addresses.
+	Reservations []DHCPReservation `json:"reservations,omitempty"`
+	TaggedOnly   bool              `json:"tagged_only,omitempty"`
+	RelayProxy   bool              `json:"relay_proxy,omitempty"`
+	Root         string            `json:"root"`
+	BIOS         string            `json:"bios"`
+	EFI          string            `json:"efi"`
 }
+
+// Equal treats an omitted rule list and an explicitly cleared list equally.
+func (c Config) Equal(other Config) bool {
+	if len(c.Reservations) == 0 {
+		c.Reservations = nil
+	}
+	if len(other.Reservations) == 0 {
+		other.Reservations = nil
+	}
+	return reflect.DeepEqual(c, other)
+}
+
 type Status struct {
 	Config Config `json:"config"`
 	DHCP   bool   `json:"dhcp_running"`
@@ -106,6 +122,9 @@ func (c Config) Validate(service string, host bool) error {
 				}
 			}
 		}
+		if err := c.validateReservations(p, last); err != nil {
+			return err
+		}
 	}
 	if host {
 		iface, e := net.InterfaceByName(c.Interface)
@@ -172,7 +191,7 @@ func (c Config) Render(service string) string {
 		}
 		options += "\n"
 	}
-	return base + fmt.Sprintf("dhcp-range=%s,%s,%s,12h\ndhcp-leasefile=/var/lib/bmm-pxe/dnsmasq.leases\n%sdhcp-match=set:efi,option:client-arch,7\ndhcp-match=set:efi,option:client-arch,9\ndhcp-match=set:ipxe,175\ndhcp-userclass=set:ipxe,iPXE\ndhcp-boot=tag:!ipxe,tag:!efi,%s,,%s\ndhcp-boot=tag:!ipxe,tag:efi,%s,,%s\ndhcp-boot=tag:ipxe,default.ipxe,,%s\n", c.Start, c.End, net.IP(mask).String(), options, c.BIOS, c.Server, c.EFI, c.Server, c.Server)
+	return base + c.renderReservations() + fmt.Sprintf("dhcp-range=%s,%s,%s,12h\ndhcp-leasefile=/var/lib/bmm-pxe/dnsmasq.leases\n%sdhcp-match=set:efi,option:client-arch,7\ndhcp-match=set:efi,option:client-arch,9\ndhcp-match=set:ipxe,175\ndhcp-userclass=set:ipxe,iPXE\ndhcp-boot=tag:!ipxe,tag:!efi,%s,,%s\ndhcp-boot=tag:!ipxe,tag:efi,%s,,%s\ndhcp-boot=tag:ipxe,default.ipxe,,%s\n", c.Start, c.End, net.IP(mask).String(), options, c.BIOS, c.Server, c.EFI, c.Server, c.Server)
 }
 
 type controller struct {
@@ -290,7 +309,7 @@ func (s *controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var c Config
-		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 262144))
 		d.DisallowUnknownFields()
 		if e = d.Decode(&c); e != nil {
 			failure(400, e)
@@ -405,6 +424,9 @@ func Call(ctx context.Context, method, path string, body []byte) ([]byte, int, e
 		return nil, 0, errors.New("PXE 控制服务不可达，实际状态未知")
 	}
 	defer resp.Body.Close()
-	b, e := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	b, e := io.ReadAll(io.LimitReader(resp.Body, 262145))
+	if len(b) > 262144 {
+		return nil, 0, errors.New("PXE 控制服务响应超过大小限制")
+	}
 	return b, resp.StatusCode, e
 }

@@ -65,6 +65,7 @@ func (a *App) pxeServices(c *gin.Context) {
 		var validation error
 		if cfg.NetworkID == 0 && cfg.PoolID == 0 && cfg.TenantID == 0 && cfg.ProjectID == 0 {
 			cfg.Subnet, cfg.Start, cfg.End, cfg.Gateway, cfg.DNS, cfg.DHCPMode = "", "", "", "", "", ""
+			cfg.Reservations, cfg.TaggedOnly, cfg.RelayProxy = nil, false, false
 			validation = cfg.Validate("tftp", false)
 		} else {
 			validation = a.validatePXEBinding(c.Request.Context(), &cfg)
@@ -98,7 +99,7 @@ func (a *App) pxeServices(c *gin.Context) {
 				fail(c, 409, e.Error())
 				return
 			}
-			if state.Config != original {
+			if !state.Config.Equal(original) {
 				fail(c, 409, "网络或地址池已变化，请停止服务并重新保存全局配置")
 				return
 			}
@@ -163,7 +164,7 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		return
 	}
 	original := state.Config
-	if e = a.validatePXEBinding(c.Request.Context(), &state.Config); e != nil || state.Config != original {
+	if e = a.validatePXEBinding(c.Request.Context(), &state.Config); e != nil || !state.Config.Equal(original) {
 		fail(c, 409, "PXE 预检失败：网络/地址池配置无效或已经变化")
 		return
 	}

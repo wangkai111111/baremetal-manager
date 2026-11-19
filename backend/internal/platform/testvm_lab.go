@@ -116,7 +116,7 @@ func (a *App) prepareTestVMNetwork(ctx context.Context, sc scope) error {
 	if err != nil || status != 200 || json.Unmarshal(data, &current) != nil {
 		return errors.New("无法读取实际 PXE 服务状态")
 	}
-	if current.Config != cfg {
+	if !current.Config.Equal(cfg) {
 		if current.DHCP || current.TFTP {
 			return errors.New("PXE 正在使用其他配置，请先在 PXE 配置页确认并停止服务")
 		}
