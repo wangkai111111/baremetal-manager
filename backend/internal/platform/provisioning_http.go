@@ -97,7 +97,7 @@ func (a *App) serveIPXEScript(c *gin.Context) {
 		var snap installationSnapshot
 		if json.Unmarshal(snapJSON, &snap) == nil {
 			if token, err := service.DecryptCredential(snap.TokenEncrypted); err == nil {
-				if err := a.observeInstallRequest(c.Request.Context(), token, "download", "ipxe_requested", "已收到 VM 的 iPXE 请求，正在下载内核、initrd 与系统镜像"); err != nil {
+				if err := a.observeInstallRequest(c.Request.Context(), token, "download", "ipxe_requested", "已收到目标机的 iPXE 请求，正在下载内核、initrd 与系统镜像"); err != nil {
 					fail(c, 503, "progress persistence unavailable")
 					return
 				}
@@ -310,7 +310,7 @@ func (a *App) installCallback(c *gin.Context) {
 				return err
 			}
 			if status == "succeeded" {
-				if err := tx.Table("assets").Where("id=? AND tenant_id=? AND project_id=? AND manufacturer='BMM Test VM' AND model='QEMU PXE Lab' AND mac_address='52:54:00:77:00:10'::macaddr AND deleted_at IS NULL", row.AssetID, row.TenantID, row.ProjectID).Updates(map[string]any{"power_state": "on", "status": "online", "collection_error": nil, "monitor_health": "unknown"}).Error; err != nil {
+				if err := tx.Table("assets").Where("id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL", row.AssetID, row.TenantID, row.ProjectID).Updates(map[string]any{"power_state": "on", "status": "online", "collection_error": nil, "monitor_health": "unknown"}).Error; err != nil {
 					return err
 				}
 			}
@@ -328,11 +328,9 @@ func (a *App) installCallback(c *gin.Context) {
 	}
 
 	if status == "succeeded" && row.Status != "failed" && row.Status != "cancelled" {
-		var snapshot struct {
-			IP string `json:"ip"`
-		}
+		var snapshot installationSnapshot
 		if json.Unmarshal([]byte(row.ConfigSnapshot), &snapshot) == nil {
-			if ip, err := netip.ParseAddr(strings.TrimSpace(snapshot.IP)); err == nil && ip.IsGlobalUnicast() {
+			if ip, err := netip.ParseAddr(physicalCallbackIP(snapshot, c.ClientIP())); err == nil && ip.IsGlobalUnicast() {
 				err = a.store.db.WithContext(c.Request.Context()).Exec(`
 					UPDATE assets SET management_ip=?::inet, updated_at=now()
 					WHERE id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL AND management_ip IS NULL

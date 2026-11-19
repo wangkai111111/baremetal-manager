@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 
+	"baremetal-manager/backend/config"
 	"baremetal-manager/backend/internal/pxeservice"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -129,7 +131,7 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		Access        *installAccessInput `json:"access"`
 	}
 	if c.ShouldBindJSON(&in) != nil || in.InstallPlanID <= 0 || !in.Confirmed || number(c.Param("id")) <= 0 {
-		fail(c, 400, "必须指定 install_plan_id 并以 confirmed:true 明确授权清空测试虚机磁盘")
+		fail(c, 400, "必须指定 install_plan_id 并以 confirmed:true 明确授权清空目标服务器磁盘")
 		return
 	}
 	if err := in.Access.validate(); err != nil {
@@ -167,10 +169,27 @@ func (a *App) installWithPreflight(c *gin.Context) {
 		fail(c, 409, "PXE 预检失败："+e.Error())
 		return
 	}
+	var identity struct{ Manufacturer, Model, MACAddress string }
+	if err := queryScope(a.store.db.WithContext(c.Request.Context()), resource{table: "assets"}, sc).Where("id=?", asset).Take(&identity).Error; err != nil {
+		fail(c, 404, "服务器不存在或无权操作")
+		return
+	}
+	target, err := installationTarget(identity.Manufacturer, identity.Model, identity.MACAddress)
+	if err != nil {
+		fail(c, 409, err.Error())
+		return
+	}
+	if target == "physical" {
+		base, parseErr := url.Parse(config.Load().PXE.HTTPBase)
+		if state.Config.Interface == pxeservice.TestVMBridge || parseErr != nil || base.Hostname() != state.Config.Server {
+			fail(c, 409, "物理机需要绑定宿主机实际装机网卡，且 PXE_HTTP_BASE 必须使用该网卡 IPv4；不能使用隔离测试 VM 网络")
+			return
+		}
+	}
 	id, opID, err := a.enqueueInstallation(c.Request.Context(), sc, asset, in.InstallPlanID, state.Config.NetworkID, state.Config.Root, in.Access, requestMeta(c, sc.User), in.ImageID)
 	if err != nil {
 		fail(c, 409, err.Error())
 		return
 	}
-	c.JSON(202, gin.H{"code": 0, "data": gin.H{"installation_id": id, "operation_id": opID, "status": "pending"}, "message": "已授权测试虚机清盘，等待 PXE 安装回调"})
+	c.JSON(202, gin.H{"code": 0, "data": gin.H{"installation_id": id, "operation_id": opID, "status": "pending"}, "message": "已提交装机任务，请在任务中心查看引导说明与安装进度"})
 }

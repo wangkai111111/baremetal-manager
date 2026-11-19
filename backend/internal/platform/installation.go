@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,9 @@ import (
 const testInstallHTTPBase = "http://192.168.77.1:18080/api/v1/provision"
 
 type installationSnapshot struct {
+	Target         string                 `json:"target,omitempty"`
+	HTTPBase       string                 `json:"http_base,omitempty"`
+	Subnet         string                 `json:"subnet,omitempty"`
 	Media          *installationMedia     `json:"media,omitempty"`
 	MAC            string                 `json:"mac"`
 	Root           string                 `json:"root"`
@@ -39,7 +44,11 @@ type installationSnapshot struct {
 // Validate and render before enqueueing and again in the worker. This keeps a
 // malformed template from becoming an accepted, but unusable installation job.
 func renderInstallationSeed(snap installationSnapshot) (map[string]any, error) {
-	rendered, err := service.RenderInstallConfig(model.KickstartTemplate{Format: "autoinstall", TemplateContent: snap.Content}, service.InstallVars{Hostname: snap.Hostname, MAC: snap.MAC, SSHKey: snap.SSHKey, PasswordHash: "!", HTTPBase: testInstallHTTPBase})
+	base, err := installationHTTPBase(snap)
+	if err != nil {
+		return nil, err
+	}
+	rendered, err := service.RenderInstallConfig(model.KickstartTemplate{Format: "autoinstall", TemplateContent: snap.Content}, service.InstallVars{Hostname: snap.Hostname, MAC: snap.MAC, SSHKey: snap.SSHKey, PasswordHash: "!", HTTPBase: base})
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +65,14 @@ func renderInstallationSeed(snap installationSnapshot) (map[string]any, error) {
 	}
 	if snap.Access != nil {
 		ai["identity"].(map[string]any)["hostname"] = snap.Hostname
+	}
+	if snap.Target == "physical" {
+		// Bind DHCP to the NIC the operator registered, including when a plan
+		// was copied from the VM lab or the host has several network adapters.
+		ai["network"] = map[string]any{"version": 2, "ethernets": map[string]any{
+			"pxe": map[string]any{"match": map[string]any{"macaddress": snap.MAC}, "dhcp4": true},
+		}}
+		ai["shutdown"] = "reboot"
 	}
 	return seed, nil
 }
@@ -85,8 +102,29 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 		if err := queryScope(tx, resource{table: "assets"}, sc).Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL AND status<>'retired'", assetID, sc.Tenant, sc.Project).Take(&asset).Error; err != nil {
 			return err
 		}
-		if asset.Manufacturer != "BMM Test VM" || asset.Model != "QEMU PXE Lab" || !strings.EqualFold(asset.MACAddress, pxeservice.TestVMMAC) {
-			return errors.New("仅允许对 BMM Test VM 执行测试安装")
+		target, err := installationTarget(asset.Manufacturer, asset.Model, asset.MACAddress)
+		if err != nil {
+			return err
+		}
+		var duplicates int64
+		if err := tx.Table("assets").Where("mac_address=? AND deleted_at IS NULL", asset.MACAddress).Count(&duplicates).Error; err != nil {
+			return err
+		}
+		if duplicates != 1 {
+			return errors.New("装机网卡 MAC 在资产中重复，请先修正，避免引导错误机器")
+		}
+		httpBase := testInstallHTTPBase
+		subnet := "192.168.77.0/24"
+		ip := "192.168.77.100"
+		if target == "physical" {
+			httpBase, err = provisioningBootBase(config.Load().PXE.HTTPBase)
+			if err != nil {
+				return errors.New("请配置物理机可达的 PXE_HTTP_BASE")
+			}
+			if err := tx.Table("networks").Select("subnet::text").Where("id=? AND tenant_id=? AND project_id=? AND deleted_at IS NULL", networkID, sc.Tenant, sc.Project).Scan(&subnet).Error; err != nil {
+				return err
+			}
+			ip = ""
 		}
 		var active int64
 		if err := tx.Table("operations").Where("asset_id=? AND deleted_at IS NULL AND status IN ('pending','running','retry_wait','unknown')", assetID).Count(&active).Error; err != nil {
@@ -105,7 +143,7 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 			OSType, Version, Architecture, Format, Content string
 			Config, Layout, Snapshot                       json.RawMessage
 		}
-		err := tx.Raw(`SELECT p.id,p.network_id,i.os_type,i.version,i.architecture,k.format,k.content,p.config,pt.layout,
+		err = tx.Raw(`SELECT p.id,p.network_id,i.os_type,i.version,i.architecture,k.format,k.content,p.config,pt.layout,
    jsonb_build_object('plan',to_jsonb(p),'image_template',to_jsonb(it),'image',to_jsonb(i),'kickstart_template',to_jsonb(k),'partition_template',to_jsonb(pt)) AS snapshot
    FROM install_plans p JOIN image_templates it ON it.id=p.image_template_id AND it.tenant_id=p.tenant_id AND it.project_id=p.project_id AND it.deleted_at IS NULL
    JOIN images i ON i.id=it.image_id AND i.tenant_id=p.tenant_id AND i.project_id=p.project_id AND i.deleted_at IS NULL
@@ -142,7 +180,7 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 			return err
 		}
 		if scripts != 0 {
-			return errors.New("测试虚机安装暂不支持附加装机脚本")
+			return errors.New("PXE 安装暂不支持附加装机脚本")
 		}
 		var cfg struct {
 			Hostname string `json:"hostname"`
@@ -152,7 +190,7 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 			return err
 		}
 		if cfg.Hostname == "" {
-			cfg.Hostname = "bmm-test-vm"
+			cfg.Hostname = "bmm-" + strings.ReplaceAll(asset.MACAddress, ":", "")
 		}
 		if access != nil && access.Hostname != "" {
 			cfg.Hostname = access.Hostname
@@ -161,7 +199,7 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 			// Explicit per-install settings replace a plan's legacy SSH key.
 			cfg.SSHKey = ""
 		}
-		snap := installationSnapshot{Media: &media, MAC: asset.MACAddress, IP: "192.168.77.100", Root: root, TokenEncrypted: encrypted, Hostname: cfg.Hostname, SSHKey: cfg.SSHKey, Access: accessSnapshot, Content: plan.Content, Layout: plan.Layout, Plan: plan.Snapshot}
+		snap := installationSnapshot{Target: target, HTTPBase: httpBase, Subnet: subnet, Media: &media, MAC: asset.MACAddress, IP: ip, Root: root, TokenEncrypted: encrypted, Hostname: cfg.Hostname, SSHKey: cfg.SSHKey, Access: accessSnapshot, Content: plan.Content, Layout: plan.Layout, Plan: plan.Snapshot}
 		if _, err := renderInstallationSeed(snap); err != nil {
 			return errors.New("安装配置无效，请检查 autoinstall 模板和系统访问设置")
 		}
@@ -180,7 +218,11 @@ func (a *App) enqueueInstallation(ctx context.Context, sc scope, assetID, planID
 			return err
 		}
 		installationID = inst.ID
-		progress, _ := json.Marshal(newInstallSteps(time.Now()))
+		steps := newInstallSteps(time.Now())
+		if target == "physical" {
+			steps[2].Title = "准备物理机手动网络引导"
+		}
+		progress, _ := json.Marshal(steps)
 		if err := tx.Table("installations").Where("id=?", inst.ID).Updates(map[string]any{"progress": string(progress), "deadline_at": gorm.Expr("now()+interval '60 minutes'")}).Error; err != nil {
 			return err
 		}
@@ -206,7 +248,7 @@ func (a *App) runInstallation(ctx context.Context, op operation, event outbox) {
 		}
 		if err != nil && current.Status == "running" {
 			status := "unknown"
-			message := "重启结果未确认，请查看串口日志；任务仍受阶段时限约束，超时将停止测试 VM"
+			message := "网络引导结果未确认，请查看任务事件和目标机控制台；任务仍受阶段时限约束"
 			var installation struct{ Status string }
 			if e := tx.Table("installations").Select("status").Where("operation_id=?", op.ID).Take(&installation).Error; e != nil {
 				return e
@@ -214,9 +256,9 @@ func (a *App) runInstallation(ctx context.Context, op operation, event outbox) {
 			// pending 阶段尚未调用虚拟机重启，可以明确判定为准备失败。
 			if installation.Status == "pending" || installation.Status == "preparing" {
 				status = "failed"
-				message = "安装准备失败，尚未重启 VM；请检查安装介质、应答配置及 PXE 网络"
+				message = "安装准备失败，尚未请求目标机引导；请检查安装介质、应答配置及 PXE 网络"
 				if errors.Is(err, errInstallMedia) {
-					message = err.Error() + "；尚未重启 VM"
+					message = err.Error() + "；尚未请求目标机引导"
 				}
 			}
 			if e := tx.Table("operations").Where("id=?", op.ID).Updates(map[string]any{"status": status, "error": message, "completed_at": time.Now()}).Error; e != nil {
@@ -299,7 +341,11 @@ func (a *App) prepareTestInstallation(ctx context.Context, op operation) error {
 	// Subiquity 6066 in the bundled 22.04.5 ISO supports explicit offline fallback.
 	// No external mirror candidates: install packages (including SSH) from the ISO.
 	autoinstall["apt"] = testVMOfflineAPT()
-	callbackURL := testInstallHTTPBase + "/install-callback/" + token
+	base, err := installationHTTPBase(snap)
+	if err != nil {
+		return err
+	}
+	callbackURL := base + "/install-callback/" + token
 	command := func(status string) string {
 		return service.CallbackCommand(callbackURL, fmt.Sprintf(`{"status":%q}`, status))
 	}
@@ -315,7 +361,7 @@ func (a *App) prepareTestInstallation(ctx context.Context, op operation) error {
 	}
 	cfg := config.Load()
 	cfg.PXE.TFTPRoot = snap.Root
-	cfg.PXE.HTTPBase = testInstallHTTPBase
+	cfg.PXE.HTTPBase = base
 	generator := NewIPXEScriptGenerator(cfg)
 	isoName := DefaultISOFileName
 	if snap.Media != nil {
@@ -349,7 +395,7 @@ func (a *App) prepareTestInstallation(ctx context.Context, op operation) error {
 	if _, err := generator.WriteScript(snap.MAC, script); err != nil {
 		return err
 	}
-	if err := a.installationStep(ctx, op, "reboot", "安装介质与应答文件已就绪，正在重启测试 VM 并设置一次性 PXE 启动"); err != nil {
+	if err := a.installationStep(ctx, op, "reboot", "安装介质与应答文件已就绪，正在准备目标机网络引导"); err != nil {
 		return err
 	}
 	updated := a.store.db.WithContext(ctx).Table("installations").Where("id=? AND status='pending' AND callback_revoked_at IS NULL", row.ID).Updates(map[string]any{"status": "booting", "started_at": time.Now()})
@@ -370,6 +416,9 @@ func (a *App) prepareTestInstallation(ctx context.Context, op operation) error {
 		var installation struct{ ID int64 }
 		if err := tx.Table("installations").Select("id").Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND status='booting' AND callback_revoked_at IS NULL", row.ID).Take(&installation).Error; err != nil {
 			return err
+		}
+		if snap.Target == "physical" {
+			return recordInstallStep(tx, op, "pxe_boot", "安装文件已就绪，请在物理机启动菜单手动选择 PXE / IPv4 网络引导（最多等待 3 分钟）；安装结束后从系统磁盘启动")
 		}
 		if err := testVMReboot(ctx, op.TenantID, op.ProjectID); err != nil {
 			return err
@@ -415,4 +464,36 @@ WantedBy=multi-user.target
 		"curtin in-target --target=/target -- update-grub",
 		service.CallbackCommand(callbackURL, `{"status":"post_install","stage":"first_boot","message":"安装配置已完成，等待从磁盘启动并回报"}`),
 	}
+}
+
+// A physical installation never falls back to the isolated VM address.
+func installationHTTPBase(snap installationSnapshot) (string, error) {
+	if snap.HTTPBase != "" {
+		return provisioningBootBase(snap.HTTPBase)
+	}
+	if snap.Target == "physical" {
+		return "", errors.New("物理机安装快照缺少 HTTP 引导地址")
+	}
+	return testInstallHTTPBase, nil
+}
+func installationTarget(manufacturer, model, mac string) (string, error) {
+	if isTestVMIdentity(manufacturer, model, mac) {
+		return "test_vm", nil
+	}
+	hw, err := net.ParseMAC(mac)
+	if err != nil || len(hw) != 6 || hw[0]&1 != 0 || hw.String() == "00:00:00:00:00:00" || strings.EqualFold(mac, pxeservice.TestVMMAC) {
+		return "", errors.New("请填写目标机实际装机网卡的唯一单播 MAC 地址")
+	}
+	return "physical", nil
+}
+func physicalCallbackIP(snap installationSnapshot, clientIP string) string {
+	if snap.Target != "physical" {
+		return snap.IP
+	}
+	ip, err := netip.ParseAddr(clientIP)
+	subnet, subnetErr := netip.ParsePrefix(snap.Subnet)
+	if err != nil || subnetErr != nil || !ip.Is4() || !ip.IsGlobalUnicast() || !subnet.Contains(ip) {
+		return ""
+	}
+	return ip.String()
 }

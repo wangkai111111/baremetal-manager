@@ -176,6 +176,7 @@ func (a *App) routes() *gin.Engine {
 	p.POST("/assets/:id/sol-ticket", a.require("sol:access"), a.solTicket)
 	p.GET("/assets/:id/initial-access", a.require("assets:operate"), a.initialAccess)
 	p.POST("/assets/:id/install", a.require("install:operate"), a.installWithPreflight)
+	p.POST("/assets/:id/install/confirm-stopped", a.require("assets:operate"), a.require("install:operate"), a.confirmPhysicalInstallStopped)
 	p.POST("/assets/:id/firmware-upgrade", a.require("firmware:operate"), unsupported)
 	p.POST("/installations", a.require("install:write"), a.installWithPreflight)
 	p.POST("/firmware-upgrades", a.require("firmware:write"), unsupported)

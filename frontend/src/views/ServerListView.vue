@@ -832,6 +832,7 @@ function handleRowMenu(key: string, row: RecordData) {
 // 表单单独定型，保证双向绑定与控件值类型一致（记录行本身仍是松散的 RecordData）
 type AssetForm = {
   name?: string
+  mac_address?: string
   bmc_address?: string
   bmc_user?: string
   bmc_secret?: string
@@ -872,6 +873,7 @@ function openEdit(row?: RecordData) {
   form.value = row
     ? {
         name: toText(row.name),
+        mac_address: toText(row.mac_address),
         bmc_address: toText(row.bmc_address),
         bmc_user: toText(row.bmc_user),
         // 出于凭据保护不回填现有密码，留空即保留
@@ -904,6 +906,8 @@ async function saveAsset() {
   if (departmentRequired.value && !form.value.department_id) return message.warning('请选择管理范围内的部门')
   if (!name) return message.warning('请填写服务器名称')
   if (!address || (!isIPv4(address) && !isIPv6(address))) return message.warning('BMC 地址需为合法 IPv4 / IPv6 地址')
+  const mac = String(form.value.mac_address || '').trim().toLowerCase().replace(/-/g, ':')
+  if (mac && (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac) || (parseInt(mac.slice(0, 2), 16) & 1) || mac === '00:00:00:00:00:00')) return message.warning('装机网卡 MAC 需为有效单播地址，例如 00:11:22:33:44:55')
   const management = String(form.value.management_ip || '').trim()
   if (management && !isIPv4(management)) return message.warning('管理 IP 格式不正确')
   const port = Number(form.value.bmc_port ?? (form.value.bmc_protocol === 'ipmi' ? 623 : 443))
@@ -918,6 +922,7 @@ async function saveAsset() {
     bmc_protocol: form.value.bmc_protocol === 'ipmi' ? 'ipmi' : 'redfish',
     bmc_port: port,
     management_ip: management || null,
+    mac_address: mac || null,
     serial_number: String(form.value.serial_number || '').trim(),
     model: String(form.value.model || '').trim(),
     datacenter_id: form.value.datacenter_id == null ? null : Number(form.value.datacenter_id)
@@ -1329,7 +1334,7 @@ onBeforeUnmount(() => {
       <n-data-table :columns="resultColumns" :data="batchResults" :row-key="row => row.asset_id" :scroll-x="850" :pagination="{ pageSize: 20 }" />
     </n-modal>
     <n-modal v-model:show="reinstallShowing" preset="card" title="确认重装系统" style="width: min(620px, 94vw)">
-      <n-alert type="warning" :bordered="false">重装将清空服务器磁盘上的现有数据并重新安装系统。当前仅支持 BMM Test VM，物理服务器会明确拒绝。
+      <n-alert type="warning" :bordered="false">重装将清空服务器磁盘上的现有数据并重新安装系统。支持 Ubuntu Server 22.04 / 24.04 amd64 自动安装。物理机请填写实际装机网卡 MAC，提交后在启动菜单手动选择 PXE / IPv4；准备完成后等待引导最多 3 分钟。
         <p><n-button text type="primary" @click="router.push('/pxe-config')">去 PXE 配置页查看启动指引</n-button></p>
       </n-alert>
       <n-form label-placement="top" style="margin-top: 16px">
@@ -1379,6 +1384,9 @@ onBeforeUnmount(() => {
               autocomplete="new-password"
               :placeholder="currentId != null ? '留空保留现有凭据' : '请输入 BMC 密码'"
             />
+          </n-form-item>
+          <n-form-item label="装机网卡 MAC" :feedback="'物理机 PXE 必填，请填写接入装机网络的网卡 MAC'">
+            <n-input v-model:value="form.mac_address" placeholder="例如 00:11:22:33:44:55" />
           </n-form-item>
           <n-form-item label="管理 IP">
             <n-input v-model:value="form.management_ip" placeholder="留空表示未分配" />

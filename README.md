@@ -144,6 +144,8 @@ docker compose ps
 #    HAProxy Stats：http://localhost:8404
 ```
 
+物理机装机测试步骤见 [物理机 PXE 装机测试](./PXE_PHYSICAL_TEST.md)，隔离 VM 验证见 [PXE 测试 VM](./PXE_VM_TEST.md)。
+
 ### PXE 宿主机与内置引导文件
 
 PXE 控制服务通过 Linux 宿主机网络读取真实网卡及其 IPv4 地址，不使用 API 容器的网卡信息。在「PXE 配置」点击「刷新宿主机选项」即可重新获取；网卡切换后 IPv4 联动更新，只有一个匹配地址时自动选择。未启用或没有 IPv4 的网卡不可选，DHCP 地址还须匹配所选子网并位于地址池之外。VLAN 子接口和地址需先在宿主机配置。

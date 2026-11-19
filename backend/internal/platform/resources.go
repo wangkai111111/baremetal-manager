@@ -370,6 +370,16 @@ func inputResource(c *gin.Context, r resource, create bool) (map[string]any, err
 				}
 			}
 		}
+		if k == "mac_address" && v != nil {
+			mac, ok := v.(string)
+			if !ok {
+				return nil, errors.New("装机网卡 MAC 地址无效")
+			}
+			if _, err := installationTarget("", "", mac); err != nil {
+				return nil, err
+			}
+		}
+
 		if k == "name" {
 			s, ok := v.(string)
 			if !ok || len(strings.TrimSpace(s)) == 0 || len(s) > 255 {

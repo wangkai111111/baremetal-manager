@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { NAlert, NTag } from 'naive-ui'
 import dayjs from 'dayjs'
 export type InstallationStep = { key: string; title: string; status: string; timeout_seconds: number; started_at?: string; completed_at?: string; deadline_at?: string; message?: string }
-export type InstallationProgressData = { id: number; operation_id: number; status: string; error?: string; steps: InstallationStep[]; deadline_at?: string; started_at?: string; completed_at?: string; cleanup_pending?: boolean }
+export type InstallationProgressData = { id: number; operation_id: number; status: string; error?: string; steps: InstallationStep[]; deadline_at?: string; started_at?: string; completed_at?: string; cleanup_pending?: boolean; target?: string }
 const props = defineProps<{ installation: InstallationProgressData; serverTime?: string }>()
 const clock = ref(Date.now())
 const timer = setInterval(() => { clock.value = Date.now() }, 1000)
@@ -25,7 +25,7 @@ function remaining(date?: string) { if (!date) return '—'; const seconds = (Da
       <NTag v-if="installation.steps?.length" :bordered="false" size="small">{{ installation.steps?.filter(s => s.status === 'succeeded').length || 0 }} / {{ installation.steps?.length || 0 }} 步已完成</NTag>
     </div>
     <NAlert v-if="installation.error" type="error" :bordered="false">{{ installation.error }}</NAlert>
-    <NAlert v-if="installation.cleanup_pending" type="warning" :bordered="false">正在重试停止 VM。确认停止前，新安装与电源操作已锁定。</NAlert>
+    <NAlert v-if="installation.cleanup_pending" type="warning" :bordered="false">{{ installation.target === 'physical' ? '物理机可能仍在安装，请先手动关机，再点击下方确认停止。确认前新安装与电源操作保持锁定。' : '正在重试停止 VM。确认停止前，新安装与电源操作已锁定。' }}</NAlert>
     <ol v-if="installation.steps?.length" class="progress-list">
       <li v-for="(step, i) in installation.steps" :key="step.key" :class="`step-${step.status}`">
         <span class="progress-index">{{ step.status === 'succeeded' ? '✓' : String(i + 1).padStart(2, '0') }}</span>

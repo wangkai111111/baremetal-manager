@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { NAlert, NButton, NModal, NSpin, NTag } from 'naive-ui'
+import { NAlert, NButton, NModal, NSpin, NTag, useDialog, useMessage } from 'naive-ui'
 import dayjs from 'dayjs'
 import { api, errorText, unwrap } from '../api'
 import { assetLabel } from '../utils/display'
@@ -9,6 +9,9 @@ import InstallationProgress, { type InstallationProgressData } from './Installat
 const props = defineProps<{ taskId: number | null }>()
 const emit = defineEmits<{ close: [] }>()
 const auth = useAuth()
+const dialog = useDialog()
+const message = useMessage()
+const stopping = ref(false)
 type Entry = { message: string; occurred_at: string; stage?: string; level?: string }
 type Task = { id: number; kind: string; status: string; error?: string; operator_name?: string; client_ip?: string; asset?: { id: number; name: string; bmc_address?: string; management_ip?: string; serial_number?: string }; created_at: string; completed_at?: string; installation?: InstallationProgressData; events?: Entry[]; recent_logs?: Entry[]; server_time?: string }
 const task = ref<Task | null>(null)
@@ -41,6 +44,19 @@ async function refresh(initial = false) {
     }
   }
 }
+function confirmStopped() {
+  const current = task.value
+  if (!current?.asset || !current.installation || stopping.value) return
+  dialog.warning({ title: '确认物理机已关机', content: '请先手动关闭这台物理机。本操作撤销本次安装凭据并解除占用，无法停止机器上已经运行的安装器，也不会还原磁盘。', positiveText: '已手动关机，确认停止', negativeText: '返回', onPositiveClick: async () => {
+    stopping.value = true
+    try {
+      await api.post(`/assets/${current.asset!.id}/install/confirm-stopped`, { operation_id: current.id, stopped: true })
+      message.success('已撤销安装凭据并解除任务占用')
+      await refresh()
+    } catch (e) { message.error(errorText(e)) }
+    finally { stopping.value = false }
+  } })
+}
 watch([() => props.taskId, () => auth.projectId], () => { generation++; clearTimeout(timer); task.value = null; logs.value = []; failure.value = ''; if (props.taskId) refresh(true) }, { immediate: true })
 onBeforeUnmount(() => { disposed = true; generation++; clearTimeout(timer) })
 </script>
@@ -54,6 +70,7 @@ onBeforeUnmount(() => { disposed = true; generation++; clearTimeout(timer) })
         <p class="task-times">提交 {{ stamp(task.created_at) }} · 结束 {{ stamp(task.completed_at) }} · 执行中每 3 秒同步</p>
         <InstallationProgress v-if="task.installation" :installation="task.installation" :server-time="task.server_time" />
         <NAlert v-else-if="task.error" type="error" :bordered="false">{{ task.error }}</NAlert>
+        <NButton v-if="task.installation?.target === 'physical' && auth.can('assets:operate') && auth.can('install:operate') && (['pending', 'running', 'unknown', 'retry_wait'].includes(task.status) || task.installation.cleanup_pending)" type="warning" :loading="stopping" @click="confirmStopped">已手动关机，停止本次安装</NButton>
         <h3>执行事件</h3>
         <ol v-if="entries.length" class="task-events"><li v-for="(entry, i) in entries" :key="i"><time>{{ stamp(entry.occurred_at) }}</time><span>{{ entry.message }}</span></li></ol>
         <p v-else class="task-times">暂无执行事件，等待执行器回报。</p>

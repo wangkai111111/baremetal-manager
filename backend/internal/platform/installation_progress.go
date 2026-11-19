@@ -35,13 +35,14 @@ type installProgress struct {
 	StartedAt      *time.Time      `json:"started_at"`
 	CompletedAt    *time.Time      `json:"completed_at"`
 	CleanupPending bool            `json:"cleanup_pending"`
+	Target         string          `json:"target" gorm:"-"`
 }
 
 func newInstallSteps(now time.Time) []installStep {
 	steps := []installStep{
 		{Key: "queued", Title: "任务排队", TimeoutSeconds: 120},
 		{Key: "prepare", Title: "校验所选镜像、提取内核与生成配置", TimeoutSeconds: 600},
-		{Key: "reboot", Title: "重启 VM 并强制网络引导", TimeoutSeconds: 60},
+		{Key: "reboot", Title: "重启目标机并设置网络引导", TimeoutSeconds: 60},
 		{Key: "pxe_boot", Title: "DHCP / TFTP / iPXE 引导", TimeoutSeconds: 180},
 		{Key: "download", Title: "下载内核、initrd 与系统镜像", TimeoutSeconds: 900},
 		{Key: "install", Title: "自动分区与安装操作系统", TimeoutSeconds: 1800},
@@ -190,6 +191,15 @@ func (a *App) installationTaskData(tx *gorm.DB, opID int64) (gin.H, error) {
 	if err := tx.Table("installation_events").Select("stage,message,occurred_at").Where("installation_id=? AND tenant_id=(SELECT tenant_id FROM installations WHERE id=?) AND project_id=(SELECT project_id FROM installations WHERE id=?) AND deleted_at IS NULL", inst.ID, inst.ID, inst.ID).Order("occurred_at,id").Limit(250).Scan(&events).Error; err != nil {
 		return nil, err
 	}
+	var snap struct{ ConfigSnapshot json.RawMessage }
+	if err := tx.Table("installations").Select("config_snapshot").Where("id=?", inst.ID).Take(&snap).Error; err != nil {
+		return nil, err
+	}
+	var snapshot installationSnapshot
+	if err := json.Unmarshal(snap.ConfigSnapshot, &snapshot); err != nil {
+		return nil, err
+	}
+	inst.Target = snapshot.Target
 	return gin.H{"installation": inst, "events": events, "server_time": time.Now()}, nil
 }
 
@@ -255,6 +265,10 @@ func (a *App) expireInstallationWithStop(ctx context.Context, id int64, stop fun
 		if err := tx.Table("assets").Select("manufacturer,model,mac_address").Where("id=? AND tenant_id=? AND project_id=?", op.AssetID, op.TenantID, op.ProjectID).Take(&vmAsset).Error; err != nil {
 			return err
 		}
+		isVM := isTestVMIdentity(vmAsset.Manufacturer, vmAsset.Model, vmAsset.MACAddress)
+		if !isVM {
+			message = strings.TrimSuffix(message, "；物理机可能仍在安装，请手动关机后确认停止") + "；物理机可能仍在安装，请手动关机后确认停止"
+		}
 		stopped := false
 		if isTestVMIdentity(vmAsset.Manufacturer, vmAsset.Model, vmAsset.MACAddress) {
 			stopCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -270,7 +284,7 @@ func (a *App) expireInstallationWithStop(ctx context.Context, id int64, stop fun
 				return err
 			}
 		}
-		if !stopped && !inst.CleanupPending {
+		if isVM && !stopped && !inst.CleanupPending {
 			message += "；尚未确认 VM 停止，已阻止新安装，后台继续重试停止"
 		}
 		if !terminal {
@@ -391,7 +405,7 @@ func (a *App) resumeInstallDiskBoot(ctx context.Context, id int64, control func(
 			return err
 		}
 		if !isTestVMIdentity(asset.Manufacturer, asset.Model, asset.MACAddress) {
-			return errors.New("only the fixed test VM can resume disk boot")
+			return nil // Physical machines reboot themselves; never launch the test VM for them.
 		}
 		bootCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
