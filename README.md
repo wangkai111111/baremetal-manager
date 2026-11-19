@@ -134,7 +134,7 @@ cp .env.example .env
 # 编辑 .env，务必替换所有密码和密钥
 
 # 2. 启动全部服务
-docker compose up -d
+docker compose up -d --build
 
 # 3. 查看服务状态
 docker compose ps
@@ -144,7 +144,17 @@ docker compose ps
 #    HAProxy Stats：http://localhost:8404
 ```
 
-> **注意**：如需启用 PXE 网络引导（dnsmasq），使用 `docker compose --profile provisioning up -d`。
+### PXE 宿主机与内置引导文件
+
+PXE 控制服务通过 Linux 宿主机网络读取真实网卡及其 IPv4 地址，不使用 API 容器的网卡信息。在「PXE 配置」点击「刷新宿主机选项」即可重新获取；网卡切换后 IPv4 联动更新，只有一个匹配地址时自动选择。未启用或没有 IPv4 的网卡不可选，DHCP 地址还须匹配所选子网并位于地址池之外。VLAN 子接口和地址需先在宿主机配置。
+
+后端镜像通过 Debian 的 `ipxe` 软件包提供 BIOS 的 `undionly.kpxe`、`ipxe.pxe`，以及 x86_64 UEFI 的 `ipxe.efi`、`snponly.efi`。控制器首次启动将缺失文件初始化到挂载目录 `/var/lib/tftpboot`；已有文件不会被覆盖。界面按文件实际状态提供 TFTP 根目录、BIOS 和 UEFI 下拉选项，保留已保存的自定义引导文件，并排除越界链接。UEFI 文件不适用于 ARM 或要求签名的 Secure Boot。
+
+部署前将 `.env` 中的 `PXE_HTTP_BASE` 改为装机客户端可达的 `http(s)://宿主机地址:HTTP_PORT/api/v1/provision`，不要使用前端开发端口 5173。控制器会据此生成缺失的 `default.ipxe`。已有该文件时保留原内容，若迁移到其他宿主机或修改 HTTP 基址，需要同步修改 `provisioning/tftp/default.ipxe`。装机内核、initrd 和 ISO 仍按所选镜像/安装方案准备，不由引导文件初始化过程提供。
+
+操作顺序：子网 → 地址池 → 组织/项目绑定 → 选择宿主机网卡和 IPv4 → 选择目录及引导文件 → 保存 → 手动启动 DHCP/TFTP。保存配置不会自动启动服务，运行期间配置锁定，存在活动安装时禁止服务变更。
+
+GitHub 仓库只提交代码、构建配置和环境变量示例；`.env`、`.env.target`、本地凭据目录及 `provisioning/` 下的 ISO、引导运行数据、安装凭据和 VM 磁盘均不提交。新机器通过构建镜像初始化引导文件，无需复制本机测试数据。
 
 ### 本地开发 — 后端
 

@@ -79,7 +79,7 @@ func (c Config) Validate(service string, host bool) error {
 	}
 	if host {
 		iface, e := net.InterfaceByName(c.Interface)
-		if e != nil || iface.Flags&net.FlagUp == 0 {
+		if e != nil || iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			return errors.New("装机网卡不存在或未启用")
 		}
 		addrs, e := iface.Addrs()
@@ -107,7 +107,7 @@ func (c Config) Validate(service string, host bool) error {
 	return nil
 }
 func (c Config) BootFiles() error {
-	for _, file := range []string{c.BIOS, c.EFI} {
+	for _, file := range []string{c.BIOS, c.EFI, "default.ipxe"} {
 		path, e := filepath.EvalSymlinks(filepath.Join(c.Root, file))
 		if e != nil || !strings.HasPrefix(path, c.Root+"/") {
 			return fmt.Errorf("引导文件不存在或越界: %s", file)
@@ -154,6 +154,9 @@ func Run(ctx context.Context, active func(context.Context) (bool, error)) error 
 		if e = json.Unmarshal(data, &s.config); e != nil {
 			return e
 		}
+	}
+	if e := ensureBuiltinBootFiles(defaultTFTPRoot, "/usr/lib/ipxe", os.Getenv("PXE_HTTP_BASE")); e != nil {
+		return e
 	}
 	if data, e := os.ReadFile(testVMState); e == nil {
 		if e = json.Unmarshal(data, &s.vm); e != nil {
@@ -216,6 +219,16 @@ func (s *controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	failure := func(code int, e error) { http.Error(w, e.Error(), code) }
+	if r.Method == "GET" && r.URL.Path == "/options" {
+		options, err := hostOptions(s.config)
+		if err != nil {
+			failure(503, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(options)
+		return
+	}
 	if r.Method == "GET" && r.URL.Path == "/status" {
 		json.NewEncoder(w).Encode(Status{s.config, s.commands["dhcp"] != nil, s.commands["tftp"] != nil, s.last})
 		return
@@ -249,7 +262,11 @@ func (s *controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if c.TenantID == 0 && c.ProjectID == 0 && c.NetworkID == 0 && c.PoolID == 0 {
 			validationService = "tftp"
 		}
-		if e = c.Validate(validationService, false); e != nil {
+		if e = c.Validate(validationService, true); e != nil {
+			failure(400, e)
+			return
+		}
+		if e = c.BootFiles(); e != nil {
 			failure(400, e)
 			return
 		}

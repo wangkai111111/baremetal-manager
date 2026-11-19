@@ -47,6 +47,10 @@ func (a *App) pxeServices(c *gin.Context) {
 	}
 	path := "/status"
 	method := c.Request.Method
+	if method == "GET" && strings.HasSuffix(c.FullPath(), "/options") {
+		path = "/options"
+		c.Header("Cache-Control", "no-store")
+	}
 	var body []byte
 	if method == "PUT" {
 		var cfg pxeservice.Config

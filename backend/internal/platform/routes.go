@@ -82,6 +82,7 @@ func (a *App) routes() *gin.Engine {
 	auth.POST("/projects", a.createProject)
 	auth.POST("/auth/switch-project", a.switchProject)
 	auth.GET("/pxe-services", a.pxeServices)
+	auth.GET("/pxe-services/options", a.pxeServices)
 	auth.PUT("/pxe-services", a.pxeServices)
 	auth.POST("/pxe-services/:service/:action", a.pxeServices)
 	auth.GET("/settings", a.settings)

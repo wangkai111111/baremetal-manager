@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { NAlert, NButton, NCard, NForm, NFormItem, NInput, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCard, NForm, NFormItem, NSelect, NSpace, NSwitch, NTag, useDialog, useMessage } from 'naive-ui'
 import { api, errorText, rows, unwrap, type RecordData } from '../api'
 import { hostIP, networkLabel } from '../utils/networkOptions'
 import { useAuth } from '../stores/auth'
+import { hostAddressOptions, hostInterfaceOptions, includeSavedOption, retainOrChooseAddress, type HostOptions } from '../utils/pxeOptions'
 const auth = useAuth()
 const message = useMessage()
 const dialog = useDialog()
@@ -21,18 +22,50 @@ const projects = ref<RecordData[]>([])
 const networks = ref<RecordData[]>([])
 const pools = ref<RecordData[]>([])
 const optionBusy = ref(false)
+const hostBusy = ref(false)
+const hostError = ref('')
+const hostOptions = ref<HostOptions>({ interfaces: [], roots: [] })
+const hostKnown = ref(false)
 let optionSequence = 0
 const locked = computed(() => busy.value || !known.value || dhcp.value || tftp.value)
 const dirty = computed(() => snapshot.value !== JSON.stringify(config) || binding.value !== !!Number(config.network_id))
 const boundNetwork = computed(() => networks.value.find(row => String(row.id) === config.network_id))
 const boundPool = computed(() => pools.value.find(row => String(row.id) === config.pool_id))
-const fields = [
-  { key: 'interface', label: '宿主机装机网卡', placeholder: '例如 bmm-pxe0 或 eno2', help: '必须是宿主机已启用的网卡；VLAN 子接口需提前配置。' },
-  { key: 'server', label: '装机网卡 IPv4', placeholder: '例如 192.168.77.1', help: '必须属于指定网卡及所选网段，并且位于地址池之外。' },
-  { key: 'root', label: 'TFTP 根目录', placeholder: '/var/lib/tftpboot', help: '仅支持此目录及其子目录；引导文件必须已存在。' },
-  { key: 'bios', label: 'BIOS 引导文件', placeholder: 'undionly.kpxe', help: '相对于 TFTP 根目录，传统 BIOS 使用。' },
-  { key: 'efi', label: 'UEFI 引导文件', placeholder: 'ipxe.efi', help: '相对于 TFTP 根目录，x86 UEFI 使用。' }
-]
+const selectedInterface = computed(() => hostOptions.value.interfaces.find(row => row.name === config.interface))
+const interfaceChoices = computed(() => includeSavedOption(hostInterfaceOptions(hostOptions.value.interfaces), config.interface!))
+const addressChoices = computed(() => hostAddressOptions(selectedInterface.value,
+  binding.value ? String(boundNetwork.value?.subnet || '') : '',
+  binding.value ? hostIP(boundPool.value?.start_address) : '', binding.value ? hostIP(boundPool.value?.end_address) : ''))
+const selectedRoot = computed(() => hostOptions.value.roots.find(row => row.path === config.root))
+const rootChoices = computed(() => includeSavedOption(hostOptions.value.roots.map(row => ({value: row.path, label: `${row.path}${row.path === '/var/lib/tftpboot' ? ' · 平台默认目录' : ''}`, disabled: !row.bios_files.length || !row.efi_files.length || !row.chain_ready})), config.root!))
+const biosChoices = computed(() => includeSavedOption((selectedRoot.value?.bios_files || []).map(row => ({value: row.name, label: row.label})), config.bios!))
+const efiChoices = computed(() => includeSavedOption((selectedRoot.value?.efi_files || []).map(row => ({value: row.name, label: row.label})), config.efi!))
+const selectionError = computed(() => {
+  if (!hostKnown.value) return '请先成功读取宿主机选项。'
+  if (!selectedInterface.value?.up || !selectedInterface.value.addresses.length) return '请选择已启用且配置了 IPv4 的宿主机网卡。'
+  if (!addressChoices.value.some(row => row.value === config.server && !row.disabled)) return '请选择该网卡上与子网、地址池匹配的 IPv4 地址。'
+  if (!selectedRoot.value) return '请选择系统已检测到的 TFTP 目录。'
+  if (!selectedRoot.value.chain_ready) return '所选目录缺少 default.ipxe；新部署请配置 PXE_HTTP_BASE 后重启 PXE 控制服务。'
+  if (!selectedRoot.value.bios_files.some(row => row.name === config.bios) || !selectedRoot.value.efi_files.some(row => row.name === config.efi)) return '所选目录中没有对应的 BIOS / UEFI 引导文件。'
+  return ''
+})
+function chooseAddress() { config.server = retainOrChooseAddress(addressChoices.value, config.server!) }
+function selectInterface(value: string) { config.interface = value; chooseAddress() }
+function selectRoot(value: string) {
+  config.root = value
+  const root = selectedRoot.value
+  if (!root?.bios_files.some(row => row.name === config.bios)) config.bios = root?.bios_files[0]?.name || ''
+  if (!root?.efi_files.some(row => row.name === config.efi)) config.efi = root?.efi_files[0]?.name || ''
+}
+async function loadHostOptions() {
+  if (hostBusy.value || !auth.user?.is_platform_admin) return
+  hostBusy.value = true; hostError.value = ''
+  try {
+    hostOptions.value = unwrap<HostOptions>(await api.get('/pxe-services/options'))
+    hostKnown.value = true
+  } catch (e) { hostKnown.value = false; hostError.value = errorText(e) }
+  finally { hostBusy.value = false }
+}
 const selectOptions = (values: RecordData[]) => values.map(row => ({label: String(row.name || '名称未填写'), value: String(row.id)}))
 function withCurrent(values: {label: string; value: string; disabled?: boolean}[], value: string, label: string) {
   return value && !values.some(row => row.value === value) ? [...values, {label: `${label}（待加载或已不可用）`, value}] : values
@@ -68,7 +101,8 @@ function selectTenant(value: string | null) {
 function selectProject(value: string | null) {
   config.project_id = value || ''; config.network_id = ''; config.pool_id = ''; loadOptions()
 }
-function selectNetwork(value: string | null) { config.network_id = value || ''; config.pool_id = '' }
+function selectNetwork(value: string | null) { config.network_id = value || ''; config.pool_id = ''; chooseAddress() }
+function selectPool(value: string) { config.pool_id = value; chooseAddress() }
 async function load() {
   if (!auth.user?.is_platform_admin) return
   busy.value = true
@@ -85,6 +119,7 @@ async function load() {
 }
 async function save() {
   if (locked.value) return
+  if (hostBusy.value || selectionError.value) { message.warning(selectionError.value || '正在读取宿主机选项'); return }
   if (binding.value && (!boundNetwork.value || !boundPool.value || !boundNetwork.value.dhcp_enabled || Number(boundPool.value.network_id) !== Number(config.network_id))) {
     message.warning('请选择完整的组织、项目、允许 DHCP 的子网和对应地址池'); return
   }
@@ -107,7 +142,7 @@ function control(service: string, action: string) {
     finally { busy.value = false }
   } })
 }
-onMounted(load)
+onMounted(() => { void load(); void loadHostOptions() })
 </script>
 <template>
   <NCard title="平台 DHCP / TFTP 服务" class="pxe-service-card">
@@ -120,9 +155,12 @@ onMounted(load)
         <NTag :type="known && tftp ? 'success' : 'default'">TFTP：{{ !known ? '未知' : tftp ? '运行中' : '已停止' }}</NTag>
         <NButton :disabled="busy || !known || dirty" @click="control('tftp', tftp ? 'stop' : 'start')">{{ tftp ? '停止 TFTP' : '启动 TFTP' }}</NButton>
         <NButton :loading="busy" @click="load">{{ dirty ? '放弃修改并刷新' : '刷新实际状态' }}</NButton>
+        <NButton :loading="hostBusy" @click="loadHostOptions">刷新宿主机选项</NButton>
       </NSpace>
       <NAlert v-if="known && (dhcp || tftp)" type="warning" :bordered="false" class="pxe-notice">服务运行中，配置已锁定。调整配置前需停止 DHCP 和 TFTP；活动装机期间不允许停止。</NAlert>
       <NAlert v-if="optionsError" type="error" class="pxe-notice">选项加载失败：{{ optionsError }} <NButton text @click="loadOptions">重试加载</NButton></NAlert>
+      <NAlert v-if="hostError" type="error" class="pxe-notice">宿主机信息读取失败：{{ hostError }}。请检查 PXE 控制服务，然后刷新宿主机选项。</NAlert>
+      <NAlert v-else-if="hostKnown && selectionError" type="warning" class="pxe-notice">{{ selectionError }}</NAlert>
       <NForm label-placement="top" :disabled="locked">
         <NFormItem label="绑定 DHCP 装机网络">
           <div class="pxe-control"><NSwitch v-model:value="binding" /><p class="field-help">关闭后只保存 TFTP 配置；开启后按组织、项目、子网选择地址池。</p></div>
@@ -131,16 +169,33 @@ onMounted(load)
           <NFormItem label="绑定组织" required><NSelect :value="config.tenant_id || null" :options="withCurrent(selectOptions(tenants), config.tenant_id!, '组织')" :loading="optionBusy" filterable placeholder="请选择组织" @update:value="selectTenant" /></NFormItem>
           <NFormItem label="绑定项目" required><NSelect :value="config.project_id || null" :options="withCurrent(selectOptions(projects), config.project_id!, '项目')" :loading="optionBusy" :disabled="!config.tenant_id || locked" filterable placeholder="请选择项目" @update:value="selectProject" /></NFormItem>
           <NFormItem label="装机子网" required><NSelect :value="config.network_id || null" :options="withCurrent(networks.map(row => ({label: networkLabel(row) + (row.dhcp_enabled ? '' : '（未允许 DHCP）'),value:String(row.id),disabled:!row.dhcp_enabled})), config.network_id!, '子网')" :disabled="!config.project_id || locked" :loading="optionBusy" filterable placeholder="请选择允许 DHCP 的子网" @update:value="selectNetwork" /></NFormItem>
-          <NFormItem label="地址池" required><NSelect v-model:value="config.pool_id" :options="withCurrent(pools.filter(row => String(row.network_id) === config.network_id).map(row => ({label:`${row.name} · ${hostIP(row.start_address)} — ${hostIP(row.end_address)}`,value:String(row.id)})), config.pool_id!, '地址池')" :disabled="!config.network_id || locked" :loading="optionBusy" filterable placeholder="请选择对应地址池" /></NFormItem>
+          <NFormItem label="地址池" required><NSelect :value="config.pool_id" :options="withCurrent(pools.filter(row => String(row.network_id) === config.network_id).map(row => ({label:`${row.name} · ${hostIP(row.start_address)} — ${hostIP(row.end_address)}`,value:String(row.id)})), config.pool_id!, '地址池')" :disabled="!config.network_id || locked" :loading="optionBusy" filterable placeholder="请选择对应地址池" @update:value="selectPool" /></NFormItem>
         </div>
         <div v-if="binding" class="pxe-summary">关联网段：{{ boundNetwork?.subnet || config.subnet || '未选择' }} · 地址范围：{{ hostIP(boundPool?.start_address) || config.start || '—' }} — {{ hostIP(boundPool?.end_address) || config.end || '—' }}</div>
         <div class="pxe-form">
-          <NFormItem v-for="field in fields" :key="field.key" :label="field.label" required>
-            <div class="pxe-control"><NInput v-model:value="config[field.key]" :placeholder="field.placeholder" /><p class="field-help">{{ field.help }}</p></div>
-          </NFormItem>
+          <NFormItem label="宿主机装机网卡" required><div class="pxe-control">
+            <NSelect :value="config.interface || null" :options="interfaceChoices" :loading="hostBusy" :disabled="locked || !hostKnown" filterable placeholder="选择宿主机网卡" @update:value="selectInterface" />
+            <p class="field-help">从运行 PXE 服务的宿主机读取；未启用或没有 IPv4 的网卡不可选。{{ selectedInterface?.mac ? `MAC：${selectedInterface.mac}` : '' }}</p>
+          </div></NFormItem>
+          <NFormItem label="装机网卡 IPv4" required><div class="pxe-control">
+            <NSelect v-model:value="config.server" :options="includeSavedOption(addressChoices, config.server!)" :loading="hostBusy" :disabled="locked || !hostKnown || !selectedInterface" filterable placeholder="选择该网卡的 IPv4 地址" />
+            <p class="field-help">与网卡联动；仅一个可用地址时自动选择。开启 DHCP 时须匹配所选子网且位于地址池之外。</p>
+          </div></NFormItem>
+          <NFormItem label="TFTP 根目录" required><div class="pxe-control">
+            <NSelect :value="config.root" :options="rootChoices" :loading="hostBusy" :disabled="locked || !hostKnown" filterable placeholder="选择已检测到的 TFTP 目录" @update:value="selectRoot" />
+            <p class="field-help">平台默认目录已内置引导文件；也会列出含引导文件的已有子目录。文件不完整的目录不可选。</p>
+          </div></NFormItem>
+          <NFormItem label="BIOS 引导文件" required><div class="pxe-control">
+            <NSelect v-model:value="config.bios" :options="biosChoices" :loading="hostBusy" :disabled="locked || !hostKnown || !selectedRoot" filterable placeholder="选择 BIOS 引导文件" />
+            <p class="field-help">相对于所选根目录；默认使用 undionly.kpxe，仅显示实际存在的文件。</p>
+          </div></NFormItem>
+          <NFormItem label="UEFI 引导文件" required><div class="pxe-control">
+            <NSelect v-model:value="config.efi" :options="efiChoices" :loading="hostBusy" :disabled="locked || !hostKnown || !selectedRoot" filterable placeholder="选择 UEFI 引导文件" />
+            <p class="field-help">适用于 x86_64 UEFI，默认使用 ipxe.efi；不适用于 ARM 或要求签名的 Secure Boot。</p>
+          </div></NFormItem>
         </div>
       </NForm>
-      <NSpace align="center"><NButton type="primary" :disabled="locked || !dirty || optionBusy" :loading="busy" @click="save">保存全局配置</NButton><span class="field-help">{{ dirty ? '修改尚未保存；保存后再启动服务。' : '保存配置不会自动启动服务。' }}</span></NSpace>
+      <NSpace align="center"><NButton type="primary" :disabled="locked || !dirty || optionBusy || hostBusy || !!selectionError" :loading="busy" @click="save">保存全局配置</NButton><span class="field-help">{{ dirty ? '修改尚未保存；保存后再启动服务。' : '保存配置不会自动启动服务。' }}</span></NSpace>
     </template>
     <NAlert v-else type="info">全局服务仅平台管理员可查看和控制。</NAlert>
   </NCard>

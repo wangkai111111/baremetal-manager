@@ -73,3 +73,6 @@ coverage/
 # Qoder/工具缓存
 # ------------------------------------------
 .qoder-cn/
+.aws/
+.codex/
+.agents/

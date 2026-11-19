@@ -319,6 +319,7 @@ services:
       DATABASE_URL: ${PXE_DATABASE_URL:-${DATABASE_URL}}
       PXE_DB_HOST: ${PXE_DB_HOST:-127.0.0.1}
       PXE_DB_PORT: ${DB_PORT:-25432}
+      PXE_HTTP_BASE: ${PXE_HTTP_BASE:-}
     volumes:
       - pxe-control:/run/bmm-pxe
       - pxe-state:/var/lib/bmm-pxe
