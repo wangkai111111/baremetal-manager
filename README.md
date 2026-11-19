@@ -1,373 +1,209 @@
-# MetalOps — 裸金属资产管理与 BMC 运维平台
+# 裸机运维平台 · Baremetal Manager
 
-一站式裸金属服务器全生命周期管理平台，涵盖资产发现、BMC 远程控制、硬件监控、系统重装、网络管理、告警推送与固件升级，助力数据中心运维团队高效管理大规模裸金属基础设施。
+面向内部运维的服务器资产管理与 PXE 装机平台。通过组织、项目和部门分配机器，集中处理硬件信息、电源操作、系统安装、监控告警和审计追踪。
 
----
+当前产品为内部管理平台，不提供自助购买、订单、计费或支付功能。界面名称、Logo、主题及 SMTP 可在系统设置中直接配置。
 
-## 功能特性
+## 功能与边界
 
-| 模块 | 说明 |
-|------|------|
-| **项目与租户管理** | 多项目隔离，成员邀请与角色分配 |
-| **裸机资产管理** | 资产 CRUD、Excel 批量导入导出、二维码标识、网段自动扫描发现、标签管理 |
-| **机房与机柜管理** | 机房/机柜层级管理，U位可视化布局 |
-| **BMC 远程控制** | 电源开关机、启动顺序设置、传感器数据采集（温度/风扇/电源/电压）、RAID 信息读取、BMC 用户管理、BMC 网络配置，Redfish 优先 + ipmitool 兜底，令牌桶并发限流 |
-| **硬件监控** | 结构化 Monitor 数据面板（CPU / 内存 / 存储 / 网络 / 电源 / 固件 / 传感器） |
-| **镜像与系统重装** | 镜像上传下载、Kickstart 模板管理、PXE 批量装机任务编排 |
-| **PXE 测试实验室** | 创建隔离测试 VM，验证 Ubuntu 网络下载安装及首次磁盘启动，支持实时串口日志和取消安装；见 [操作说明](PXE_VM_TEST.md) |
-| **网络管理** | 子网规划、IP 地址池、全局 DHCP/TFTP 服务配置与控制 |
-| **告警管理** | 自定义告警规则，支持企业微信、钉钉、Webhook、SMTP 邮件 4 种推送渠道 |
-| **固件管理** | 固件版本跟踪、批量升级任务、实时进度监控 |
-| **用户与 RBAC** | 23 个细粒度权限（`resource:action` 格式），4 级角色体系（admin / manager / operator / viewer） |
-| **开放 API** | API Key 认证，67 个 RESTful 端点，Swagger 文档 |
-| **系统设置** | 可配置运行参数，种子数据自动初始化 |
+| 模块 | 当前能力 |
+| --- | --- |
+| 服务器管理 | 新增、编辑、分配部门、标签与机房；查看序列号、IP、规格、电源和健康状态；复制 IP 和初始登录信息 |
+| 硬件与运维 | Redfish / IPMI 接入、硬件采集、受支持的电源操作、SOL 串口控制台；具体能力取决于设备及 BMC 协议 |
+| 资产管理 | 部门树、机房、采购信息、资产折旧和维保信息编辑、维保到期提醒 |
+| 系统镜像 | 镜像上传、目录下载、校验与装机方案；镜像文件存放在 MinIO 或受管本地 ISO 目录 |
+| PXE 装机 | Ubuntu Server 22.04 / 24.04 Live ISO，amd64 / x86_64，autoinstall；测试 VM 自动网络引导，物理机手动选择 PXE |
+| 装机网络 | 子网、地址池、宿主机网卡 / IPv4 选择；同网段直连、三层 DHCP Relay、Option 82 / MAC 固定 IP 规则及 Excel / 粘贴导入 |
+| 任务中心 | 执行事件、装机步骤、起止时间、阶段截止时间、超时和取消；安装成功须有首次磁盘启动回报 |
+| 告警与工单 | 告警规则、推送渠道、维护相关配置、工单处理；支持企业微信、钉钉、Webhook、SMTP |
+| 用户与授权 | 平台管理员、组织 / 部门授权及管理员；随机初始密码、可选欢迎邮件、首次登录强制改密 |
+| 审计 | 按管理范围查看登录、退出、授权、服务器及配置操作；记录来源 IP，支持筛选、详情和 CSV 导出 |
 
----
+固件包、基线和清单可管理，实际固件升级执行接口仍返回 `501`。不要将页面入口视为已支持所有厂商的升级、RAID 或 BMC 配置能力。物理机 PXE 已有执行流程，但仍需在目标硬件上完成端到端验收；现有成功实测以 UEFI 测试 VM 为主。
 
-## 技术栈
-
-### 后端
-
-- **语言**：Go 1.26
-- **HTTP 框架**：Gin
-- **ORM**：GORM + PostgreSQL 16
-- **缓存 / 消息队列**：Redis 7 + asynq（异步任务调度）
-- **认证**：JWT (HS256) + RBAC
-- **安全**：AES-256-GCM 加密 BMC 凭据
-- **协议适配**：Redfish / IPMI（ipmitool 兜底）
-- **对象存储**：MinIO
-- **配置管理**：YAML + 环境变量覆盖
-
-### 前端
-
-- **框架**：Vue 3.5 (Composition API) + TypeScript
-- **UI 组件库**：Naive UI
-- **状态管理**：Pinia
-- **数据可视化**：ECharts
-- **终端模拟**：xterm.js
-- **Excel 处理**：xlsx
-- **构建工具**：Vite
-
-### 部署
-
-- **容器编排**：Docker Compose（11 个服务）
-- **负载均衡**：HAProxy 3.0
-- **Web 服务**：Nginx（前端静态资源）
-- **数据库**：PostgreSQL 16 + Redis 7
-- **对象存储**：MinIO
-- **网络引导**：dnsmasq（PXE / DHCP / TFTP，可选 profile）
-
----
-
-## 项目结构
-
-```
-baremetal-manager/
-├── backend/
-│   ├── cmd/server/          # 应用入口（server / worker / scheduler）
-│   ├── config/
-│   │   ├── config.yaml      # 默认配置
-│   │   ├── config.go        # 配置加载逻辑
-│   │   ├── openapi.yaml     # OpenAPI 3.0 规范文档
-│   │   └── example.env      # 环境变量示例
-│   ├── internal/
-│   │   ├── adapter/         # 外部适配器（BMC、通知渠道、限流）
-│   │   ├── handler/         # HTTP 请求处理器
-│   │   ├── middleware/      # 中间件（JWT 认证、API Key）
-│   │   ├── model/           # 数据模型定义
-│   │   ├── repository/      # 数据访问层
-│   │   ├── service/         # 业务逻辑层（含 AES-256-GCM 加密）
-│   │   └── task/            # asynq 异步任务（扫描、重装、固件升级）
-│   ├── migrations/          # 数据库迁移 SQL（go:embed）
-│   ├── seeds/               # 种子数据
-│   ├── Dockerfile
-│   └── go.mod
-├── frontend/
-│   ├── src/
-│   │   ├── views/           # 页面视图（19 个页面，含 1 个通用 ResourceView）
-│   │   ├── components/      # 通用组件
-│   │   ├── stores/          # Pinia 状态仓库
-│   │   ├── api.ts           # Axios API 封装
-│   │   ├── router.ts        # Vue Router 路由配置
-│   │   ├── catalog.ts       # 导航目录
-│   │   └── style.css        # 全局样式
-│   ├── index.html
-│   ├── vite.config.ts
-│   ├── nginx.conf           # 生产 Nginx 配置
-│   └── package.json
-├── deploy/
-│   ├── haproxy/             # HAProxy 负载均衡配置
-│   ├── postgres/            # PostgreSQL 初始化脚本
-│   ├── minio/               # MinIO 桶初始化脚本
-│   ├── dnsmasq/             # PXE/DHCP/TFTP 配置
-│   └── external-lb/         # 外部 LB 配置示例
-├── docker-compose.yaml      # 容器编排（11 个服务）
-└── .env.example             # 环境变量模板
-```
-
----
-
-## 快速开始
+## 部署
 
 ### 环境要求
 
-| 依赖 | 最低版本 |
-|------|---------|
-| **Go** | 1.26+ |
-| **Node.js** | 18+ |
-| Docker & Docker Compose | v20.10+ / v2+ |
-| PostgreSQL | 16 |
-| Redis | 7 |
+- Linux 宿主机、Docker Engine 和 Docker Compose v2。
+- PXE 使用宿主网络；测试 VM 需要 `/dev/net/tun`。当前 Compose 还挂载 `/dev/kvm`，宿主必须提供该设备，否则需先调整部署配置。
+- 宿主机有足够空间保存镜像、解包缓存及 VM 磁盘；测试 VM 固定使用 2 vCPU、8 GB 内存和 40 GB 虚拟磁盘。
+- 仅构建与运行容器时不需要宿主安装 Go / Node.js；本地开发使用 Go 1.26、Node.js 22.18+ 和 npm。
 
-### 克隆仓库
+### 首次启动
 
 ```bash
-git clone https://github.com/your-org/baremetal-manager.git
+git clone https://github.com/wangkai111111/baremetal-manager.git
 cd baremetal-manager
-```
-
-### Docker 一键部署（推荐）
-
-```bash
-# 1. 复制环境变量模板并修改关键配置
 cp .env.example .env
-# 编辑 .env，务必替换所有密码和密钥
-
-# 2. 启动全部服务
-docker compose up -d --build
-
-# 3. 查看服务状态
-docker compose ps
-
-# 4. 访问平台
-#    前端：http://localhost:8080
-#    HAProxy Stats：http://localhost:8404
+mkdir -p provisioning/tftp provisioning/iso provisioning/netboot
 ```
 
-物理机装机测试步骤见 [物理机 PXE 装机测试](./PXE_PHYSICAL_TEST.md)，隔离 VM 验证见 [PXE 测试 VM](./PXE_VM_TEST.md)。
+编辑根目录 `.env`，启动前至少确认以下配置：
 
-### PXE 宿主机与内置引导文件
+| 配置 | 要求 |
+| --- | --- |
+| `POSTGRES_PASSWORD`、`DATABASE_MIGRATION_URL` | 数据库 owner 口令及对应连接串，保持一致 |
+| `DATABASE_APP_USER`、`DATABASE_APP_PASSWORD`、`DATABASE_URL` | 独立运行账户及对应连接串；应用口令至少 16 字符 |
+| `POSTGRES_VOLUME` | 全新部署使用未占用的卷名；升级时保留原卷名，不能随意更换 |
+| `JWT_SECRET` | 至少 32 字节的随机密钥 |
+| `BMC_ENCRYPTION_KEY` | 恰好 32 字节的原始字符串，不是将 64 位 hex 解码后使用 |
+| `MINIO_ROOT_PASSWORD` | 替换示例值；本地开发使用的 `MINIO_SECRET_KEY` 也应一致 |
+| `SOL_ALLOWED_ORIGIN` | 浏览器实际访问的 `scheme://host[:port]` |
+| `PXE_HTTP_BASE` | 装机客户端可达的后端入口，以 `/api/v1/provision` 结尾；不能使用前端开发端口 5173 |
+| `POSTGRES_PORT`、`DB_PORT` | 当前 Compose 控制器使用 `DB_PORT` 访问宿主映射的 PostgreSQL 端口；两者须显式设为相同值，例如均为 `15432` |
 
-PXE 控制服务通过 Linux 宿主机网络读取真实网卡及其 IPv4 地址，不使用 API 容器的网卡信息。在「PXE 配置」点击「刷新宿主机选项」即可重新获取；网卡切换后 IPv4 联动更新，只有一个匹配地址时自动选择。未启用或没有 IPv4 的网卡不可选，服务器地址不能位于 DHCP 地址池内。「同网段直连」要求网卡与客户端子网相同；「三层 DHCP Relay」允许不同网段，在客户端三层网关配置 Relay 指向 PXE 服务器。子网网关和 IPv4 DNS 随 DHCP 下发，Relay 模式必须填写客户端网关。VLAN、路由和交换机 Relay 需在网络设备上配置，具体示例见 [物理机 PXE 装机测试](./PXE_PHYSICAL_TEST.md)。
+数据库密码包含 `@`、`:`、`/` 等字符时，连接串中的密码需要 URL 编码。`.env` 中保留原始口令；`dev.sh` 通过 shell 加载该文件，含 shell 特殊字符的值需正确引用。运行密钥应独立生成；升级时保留原凭据加密密钥，否则无法解密已有 BMC 与装机凭据。
 
-后端镜像通过 Debian 的 `ipxe` 软件包提供 BIOS 的 `undionly.kpxe`、`ipxe.pxe`，以及 x86_64 UEFI 的 `ipxe.efi`、`snponly.efi`。控制器首次启动将缺失文件初始化到挂载目录 `/var/lib/tftpboot`；已有文件不会被覆盖。界面按文件实际状态提供 TFTP 根目录、BIOS 和 UEFI 下拉选项，保留已保存的自定义引导文件，并排除越界链接。UEFI 文件不适用于 ARM 或要求签名的 Secure Boot。
+例如在 `.env` 补充端口配置：
 
-部署前将 `.env` 中的 `PXE_HTTP_BASE` 改为装机客户端可达的 `http(s)://宿主机地址:HTTP_PORT/api/v1/provision`，不要使用前端开发端口 5173。控制器会据此生成缺失的 `default.ipxe`。已有该文件时保留原内容，若迁移到其他宿主机或修改 HTTP 基址，需要同步修改 `provisioning/tftp/default.ipxe`。装机内核、initrd 和 ISO 仍按所选镜像/安装方案准备，不由引导文件初始化过程提供。
+```dotenv
+POSTGRES_PORT=15432
+DB_PORT=15432
+```
 
-操作顺序：子网 → 地址池 → 组织/项目绑定 → 选择宿主机网卡和 IPv4 → 选择目录及引导文件 → 保存 → 手动启动 DHCP/TFTP。保存配置不会自动启动服务，运行期间配置锁定，存在活动安装时禁止服务变更。
-
-「PXE 配置 → 标签与固定 IP 规则」支持把交换机 Option 82 的 Circuit-ID / Remote-ID 精确匹配到固定 IPv4，也可限定服务器 MAC 或使用独立 MAC 规则。同一规则的多项条件按 AND 匹配；支持文本与十六进制标识、启停和删除、未匹配设备的动态分配或拒绝分配，以及可选的 `dhcp-proxy` 续租代理。规则保存在全局 PXE 状态中，随全局配置一起保存；平台生成 dnsmasq 标签，无需手写配置。详细操作与续租说明见 [物理机 PXE 装机测试](./PXE_PHYSICAL_TEST.md)。
-
-规则支持 Excel（`.xlsx` / `.xls`）及粘贴批量导入，内置 Option 82 和 MAC 两种模板；提供按行校验预览、追加及替换全部，最多 128 条，校验通过后统一加入待保存配置。
-
-GitHub 仓库只提交代码、构建配置和环境变量示例；`.env`、`.env.target`、本地凭据目录及 `provisioning/` 下的 ISO、引导运行数据、安装凭据和 VM 磁盘均不提交。新机器通过构建镜像初始化引导文件，无需复制本机测试数据。
-
-### 本地开发 — 后端
+构建并启动：
 
 ```bash
-cd backend
-
-# 安装依赖
-go mod download
-
-# 复制并编辑配置
-cp config/example.env ../.env
-# 确保 PostgreSQL、Redis、MinIO 已启动
-
-# 启动 API 服务
-go run cmd/server/main.go
-
-# 启动异步 Worker（新终端）
-go run cmd/server/main.go worker
-
-# 启动任务调度器（新终端）
-go run cmd/server/main.go scheduler
+docker compose build
+docker compose up -d
+docker compose ps -a
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8080/ready
 ```
 
-后端默认监听 `:8000`，健康检查端点：`GET /health`。
+默认平台入口为 `http://宿主机地址:8080`，可用 `HTTP_PORT` 修改。首次访问按向导创建平台管理员；没有预置管理员口令。初始化用户名留空默认为 `admin`，密码留空会随机生成，并只在完成页面展示一次。
 
-### 本地开发 — 前端
+`migrate`、`minio-init` 是一次性任务，正常完成后显示退出码 0。DHCP / TFTP 在控制器每次启动后均保持关闭，需要管理员在界面明确启用。
+
+当前 Compose 会向宿主发布 PostgreSQL（默认 15432）、MinIO API（19000）和控制台（19001）；对外开放范围应按实际运维网络配置。HAProxy 统计端口默认仅绑定回环地址 8404。默认入口为 HTTP，生产 HTTPS 入口由外部代理提供。
+
+### 配置生效位置
+
+- **部署连接和密钥**：根目录 `.env`，完整变量说明见 [.env.example](.env.example)。默认 `docker compose` 和 [dev.sh](dev.sh) 使用它；`--env-file` 指定的其他文件不会自动继承 `.env`。
+- **名称、Logo、主题、应用展示、SMTP**：系统设置，使用内置可编辑项，无需自行猜测配置键。
+- **告警规则和接收目标**：告警规则、推送渠道。用户欢迎邮件使用系统设置中保存的 SMTP。
+- **地址规划**：子网管理和地址池。网关、IPv4 DNS 从选定子网读取并用于 DHCP 下发。
+- **DHCP / TFTP 与固定 IP**：PXE 配置。选择宿主机实际网卡和 IPv4；保存配置后再启用服务，活动安装期间有配置保护。
+
+当前服务入口直接读取环境变量与数据库配置；不要把 [config.yaml](backend/config/config.yaml) 当成运行入口自动加载的主配置文件。
+
+### 操作人 IP
+
+任务和审计使用同一可信代理来源链。直接访问后端时可保持 `TRUSTED_PROXY_CIDRS` 为空；经过 Compose HAProxy 时，将其设为实际 `app-net` 的代理网段，可用 `docker network inspect` 核对。
+
+如入口是宿主机 Vite，还需把 `TRUSTED_UPSTREAM_PROXY` 设置为 HAProxy 看到的宿主机网关地址。不要信任任意来源的转发头。经 NAT 只能记录入口可见的来源地址，历史错误 IP 无法还原。修改环境变量后需要重新创建相应服务，仅刷新页面不会生效。
+
+## 使用顺序
+
+1. 完成管理员初始化，配置组织、项目、部门和机房。
+2. 新增服务器并设置实际所属部门；配置 BMC 接入或创建测试 VM。
+3. 创建普通用户，在用户管理中分配组织 / 部门访问范围；需要管理权限时设置对应范围管理员。
+4. 上传镜像，配置子网、地址池、PXE 服务与装机方案。
+5. 从服务器“更多 → 重装系统”提交安装，任务中心查看步骤、日志和截止时间。
+6. 从“更多 → 初始登录信息”复制目标系统账号、密码和 SSH 连接命令；在审计日志查看操作记录。
+
+### 授权规则
+
+组织授权覆盖该组织内的机器；部门授权覆盖该部门及下级部门。项目仍是资源上下文，授权、列表、详情和实际操作均由后端校验。
+
+普通用户可操作其授权范围内的机器，包括支持的电源、手动采集、重装、初始登录信息及 SOL；不能新增、编辑、删除服务器或自行分配权限。全局 PXE 配置、测试 VM 创建 / 删除及测试网络准备由平台管理员执行。
+
+平台管理员可查看全平台审计；组织管理员查看本组织；部门管理员查看管理部门及下级部门。普通用户无管理审计权限。授权变更立即影响访问范围，历史日志保留当时对象名称与部门归属，详见 [审计说明](AUDIT_LOGS.md)。
+
+### 用户初始密码与邮件
+
+新增用户时可留空密码，由服务端随机生成并展示一次；可选择发送欢迎邮件，以及首次登录是否强制改密。启用强制改密的用户，完成改密前只能查看身份、改密或退出。系统登录密码与 PXE 目标系统 root 密码是两套独立凭据。
+
+### PXE 测试与物理机
+
+- [测试 VM 指南](PXE_VM_TEST.md)：隔离网桥、介质准备、可选镜像、安装验证和删除。
+- [物理机指南](PXE_PHYSICAL_TEST.md)：真实网卡、三层 Relay、Option 82 标签及批量固定 IP 规则。
+
+装机只支持 Ubuntu Server 22.04 / 24.04 Live ISO 的 x86_64 / amd64 自动安装；UEFI 引导文件不适用于 ARM，测试需关闭 Secure Boot。当前全局 DHCP 一次绑定一个客户端子网 / 地址池，不支持多作用域或 ProxyDHCP。
+
+root 密码留空会随机生成，可选上传或粘贴 SSH 公钥；Ubuntu 默认允许 root SSH 密码登录，也可选择仅公钥或禁止 root SSH。重装会清空目标磁盘，需在界面确认。物理机流程不自动调用 BMC 重启，必须在安装文件就绪后手动选择 PXE 启动。
+
+## 架构与代码
+
+```text
+浏览器 → HAProxy → Vue 静态页面 / Go API
+                            │
+                         PostgreSQL
+                            │
+                 worker（操作与装机执行）
+                 scheduler（周期采集调度）
+                            │
+              PXE 控制器（宿主网络，DHCP/TFTP/QEMU）
+
+镜像存储：MinIO / 受管本地 ISO 目录
+```
+
+| 目录 / 文件 | 用途 |
+| --- | --- |
+| [backend/](backend/README.md) | Go 服务、迁移、运行模式与测试说明 |
+| [frontend/](frontend/README.md) | Vue 页面、开发代理、构建与测试说明 |
+| [backend/internal/platform/](backend/internal/platform/) | 当前 API、权限、任务、审计、监控及装机业务实现 |
+| [backend/internal/pxeservice/](backend/internal/pxeservice/) | dnsmasq 服务监管、宿主机选项与固定测试 VM |
+| [backend/migrations/](backend/migrations/) | 目标结构、增量迁移、校验和及应用账户授权 |
+| [deploy/](deploy/) | HAProxy、PostgreSQL、MinIO 等部署文件 |
+| [docker-compose.yaml](docker-compose.yaml) | 单宿主机部署定义 |
+| [PLATFORM_AUDIT.md](PLATFORM_AUDIT.md) | 历史验收记录；记录中的旧功能与旧环境不代表当前能力 |
+
+当前任务执行使用 PostgreSQL `operations` / `task_outbox` 持久化及锁控制。Compose 保留 Redis 服务，但不能仅因依赖中存在 Asynq 就将当前任务流程描述为 Redis 队列。仓库中的旧 handler / repository / task 代码也不能替代实际入口判断。
+
+## 开发与检查
+
+前后端的安装、运行、测试和代理参数分别见 [后端开发说明](backend/README.md) 与 [前端开发说明](frontend/README.md)。本地常用启动方式：
 
 ```bash
-cd frontend
-
-# 安装依赖
-npm install
-
-# 启动开发服务器（热重载）
-npm run dev
-
-# 构建生产版本
-npm run build
+bash dev.sh deps
+bash dev.sh migrate
+bash dev.sh backend
 ```
 
-前端开发服务器默认监听 `http://localhost:5173`，通过 Vite 代理将 `/api` 请求转发至 `http://localhost:18080`（含 WebSocket 支持）。直接运行本地后端时，可用 `BMM_API_TARGET=http://localhost:8000 npm run dev` 指定目标。
+另开终端运行 worker、scheduler 和前端。直接连本地 Go API 时，前端命令为：
 
----
-
-## 配置说明
-
-所有配置项均可通过 `backend/config/config.yaml` 或同名**环境变量**设置，环境变量优先级更高。
-
-### 核心配置
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `DATABASE_URL` | PostgreSQL 连接串 | `postgresql://bmm:change-me@postgres:5432/bmm` |
-| `REDIS_URL` | Redis 连接串 | `redis://redis:6379/0` |
-| `JWT_SECRET` | JWT 签名密钥（≥32 字符） | **必须设置** |
-| `BMC_ENCRYPTION_KEY` | BMC 凭据 AES-256-GCM 加密密钥（32 字节 hex） | **必须设置** |
-| `MINIO_ENDPOINT` | MinIO 服务端地址 | `minio:9000` |
-| `MINIO_ACCESS_KEY` | MinIO 访问密钥 | `bmm-minio` |
-| `MINIO_SECRET_KEY` | MinIO 秘密密钥 | **必须设置** |
-| `MINIO_BUCKET` | MinIO 存储桶名称 | `baremetal-images` |
-| `HTTP_PORT` | 对外 HTTP 端口 | `8080` |
-| `TRUSTED_PROXY_CIDRS` | 后端可信代理 IP/CIDR，逗号分隔 | 空（忽略转发头） |
-| `TRUSTED_UPSTREAM_PROXY` | HAProxy 信任的上游入口 IP/CIDR | `127.0.0.1` |
-
-操作 IP 来自访问者的网络连接。使用 Compose 入口时，后端的 `TRUSTED_PROXY_CIDRS` 填实际 app-net 子网；使用宿主机 Vite 入口时，还需将 `TRUSTED_UPSTREAM_PROXY` 设置为 HAProxy 看到的宿主机网关地址。请通过 `docker network inspect` 核对地址，避免信任所有来源。Vite 会覆盖客户端提交的转发头，HAProxy 仅接受可信上游的来源链；直接访问后端时，保持可信代理为空即可。经 NAT 或额外代理访问时，能够记录的地址取决于入口实际接收到的连接和可信代理链。历史错误 IP 无法自动还原。
-
-默认 `docker compose` 和 `dev.sh` 读取根目录 `.env`；`--env-file .env.target` 则读取指定配置，两者不会互相继承。若交替使用这两种启动方式，需同时配置上述两项，再更新 API 与 HAProxy 容器；仅修改其中一个文件会在另一种方式重建服务时丢失来源 IP 设置。
-
-### 管理员初始化
-
-首次访问平台时，通过初始化向导创建管理员并配置内部管理平台，无需预先配置管理员环境变量。用户名留空默认为 `admin`；密码留空时由后端安全随机生成，仅在初始化成功页面展示一次，请保存后再进入系统。刷新或离开页面后无法再次查看生成密码。自行填写密码时须为 6–72 字节。
-
-数据库迁移保留默认组织、项目、角色、权限和系统设置种子，不预建管理员，也不会重置已有管理员凭据。生产部署应先限制初始化入口的网络访问，并通过 HTTPS 完成向导。
-
-### 告警推送渠道
-
-| 变量 | 说明 |
-|------|------|
-| `ALERT_WECHAT_WEBHOOK` | 企业微信机器人 Webhook 地址 |
-| `ALERT_DINGTALK_WEBHOOK` | 钉钉机器人 Webhook 地址 |
-| `ALERT_WEBHOOK_URL` | 通用 Webhook 地址 |
-| `ALERT_SMTP_HOST` | SMTP 邮件服务器地址 |
-| `ALERT_SMTP_PORT` | SMTP 端口（默认 `587`） |
-| `ALERT_SMTP_USER` | SMTP 用户名 |
-| `ALERT_SMTP_PASS` | SMTP 密码 |
-
-### BMC 与 SOL
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `BMC_MAX_CONCURRENT` | BMC 最大并发连接数 | `10` |
-| `SENSOR_INTERVAL` | 传感器采集间隔（秒） | `300` |
-| `SOL_ALLOWED_ORIGIN` | SOL WebSocket 允许的 Origin | `http://localhost:8080` |
-| `SOL_SESSION_TIMEOUT` | SOL 会话超时（分钟） | `15` |
-| `SOL_LOG_ENABLED` | 是否启用 SOL 日志记录 | `true` |
-
----
-
-## API 文档
-
-平台提供 **67 个 RESTful API 端点**，基础路径为 `/api/v1`。
-
-### 认证方式
-
-- **JWT 令牌**：`Authorization: Bearer <token>`（用户登录获取）
-- **API Key**：`X-API-Key: <key>`（开放接口调用）
-
-### 完整规范
-
-完整的 OpenAPI 3.0 规范文档见 [`backend/config/openapi.yaml`](backend/config/openapi.yaml)，可导入 Swagger UI 或 Redoc 在线预览。
-
----
-
-## 数据库迁移
-
-数据库迁移采用 **go:embed 内嵌 SQL** 方式，服务启动时自动执行：
-
-| 文件 | 说明 |
-|------|------|
-| `migrations/001_initial.sql` | 初始表结构（资产、用户、角色、权限等核心表） |
-| `migrations/002_expansion.sql` | 扩展表（机房、机柜、标签、传感器、告警规则、API 密钥、系统设置、装机模板等） |
-
-迁移脚本设计为**幂等可重复执行**，支持 `IF NOT EXISTS` 和兼容补列，首次启动和后续升级均可安全运行。
-
-PostgreSQL 初始化脚本位于 `deploy/postgres/init/001-extensions.sql`，通过 Docker 入口点自动加载。
-
----
-
-## 开发指南
-
-### 后端架构
-
-采用分层架构，各层职责清晰：
-
-```
-HTTP Request
-  → middleware/   (JWT 认证 / API Key 校验)
-  → handler/      (参数绑定、路由分发、响应序列化)
-  → service/      (异步任务提交、BMC 适配器编排、加密解密)
-  → repository/   (GORM 数据库操作、分页查询、CRUD)
-  → model/        (数据模型定义)
-  → adapter/      (BMC Redfish/IPMI 通信、告警推送渠道)
+```bash
+BMM_API_TARGET=http://localhost:8000 bash dev.sh frontend
 ```
 
-**关键设计**：
-- `handler` 直接调用 `repository.Store` 完成大部分 CRUD 操作，复杂业务逻辑（异步任务、BMC 操作）通过 `service` 层编排
-- `service` 层封装 asynq 队列客户端和 BMC 适配器，负责任务提交与调度
-- `adapter` 层实现 Redfish/IPMI 协议通信和 4 种告警推送渠道
+`dev.sh deps` 只启动依赖，不启动 PXE 控制器；宿主机直接运行 API / worker 也不会自动获得容器中的控制 socket 和介质挂载。需要真实 PXE / SOL 时，优先保留 Compose 对应服务，使用前端连接它们。
 
-**异步任务**（`internal/task/`）使用 asynq 框架，支持 6 类后台任务：
-- `power.on/off/restart` — 电源操作
-- `inspect` — 硬件检查
-- `reinstall` — 系统重装
-- `firmware.upgrade` — 固件升级
-- `scan.network` — 网段扫描与资产发现
-- `batch.action` — 批量操作
+## 升级与备份
 
-**调度器**（`scheduler` 模式）每 2 分钟轮询所有设备 BMC 连通性，不可达时自动生成告警。
+先备份 PostgreSQL、MinIO、`provisioning/`、PXE 状态卷以及部署密钥，并保存当前应用版本。升级前确认没有活动安装，安排 DHCP / TFTP 维护窗口。
 
-**外部适配器**（`internal/adapter/`）：
-- `bmc.go` / `bmc_extended.go` — Redfish/IPMI 协议适配（电源、传感器、RAID、启动顺序、用户/网络管理）
-- `notify.go` + `notify_{wechat,dingtalk,webhook,email}.go` — 4 种告警推送渠道
-- `ratelimit.go` — 令牌桶并发限流
-
-### 前端架构
-
-```
-src/
-├── views/           # 19 个页面视图（含 1 个通用 ResourceView）
-├── components/      # 通用组件（ShellLayout 等）
-├── stores/          # Pinia 状态仓库（auth 等）
-├── api.ts           # Axios 实例与 API 请求封装
-├── router.ts        # Vue Router 路由定义
-├── catalog.ts       # 导航目录配置
-├── style.css        # 全局样式
-├── App.vue          # 根组件
-└── main.ts          # 应用入口
+```bash
+docker compose build
+docker compose stop backend worker scheduler
+docker compose run --rm migrate
+docker compose up -d backend worker scheduler frontend lb
 ```
 
-前端页面与功能模块对应关系：
+上述命令更新业务服务；更新 PXE 控制器需在维护窗口单独执行，重启后重新确认配置并手动启用 DHCP / TFTP。迁移失败时先排查日志，不继续启动新应用。
 
-| 页面文件 | 功能模块 |
-|---------|---------|
-| `DashboardView.vue` | 总览仪表盘 |
-| `ResourceView.vue` | 裸机资产管理 |
-| `AssetDetailView.vue` | 资产详情 |
-| `DatacenterView.vue` | 机房管理 |
-| `RackView.vue` | 机柜管理 |
-| `SolView.vue` | SOL 串口控制台 |
-| `InstallPlanView.vue` | 装机计划 |
-| `KickstartTemplateView.vue` | Kickstart 模板 |
-| `PXEConfigView.vue` | PXE 配置 |
-| `FirmwareUpgradeView.vue` | 固件升级 |
-| `AlertRuleView.vue` | 告警规则 |
-| `AlertChannelView.vue` | 告警渠道 |
-| `ProjectMembersView.vue` | 项目成员 |
-| `TagManage.vue` | 标签管理 |
-| `UserManageView.vue` | 用户管理 |
-| `RoleManageView.vue` | 角色管理 |
-| `ApiKeysView.vue` | API 密钥管理 |
-| `SystemSettingsView.vue` | 系统设置 |
-| `LoginView.vue` | 登录页 |
+迁移从 `003_target_schema` 建立目标结构，再执行增量版本；已应用 SQL 有校验和，不可修改后重放。API / worker / scheduler 启动只校验迁移，不自动改表。缺少目标迁移记录的非空旧库不会被自动接管，应使用独立新库规划迁移。数据库 owner 仅用于迁移，业务运行使用应用账户。
 
----
+数据库备份示例（使用当前容器内配置，不在命令中填写口令）：
 
-## 许可证
+```bash
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > baremetal-manager.dump
+```
 
-本项目基于 [MIT License](LICENSE) 开源。
+备份含敏感资产和凭据数据，应与密钥分别妥善保管，并在隔离环境验证恢复。不要使用 `docker compose down -v` 升级，也不要将 [start.sh](start.sh) 用作日常启动脚本：该旧脚本包含删除匹配数据卷的操作。
 
-平台仅提供内部基础设施管理，不提供自助注册、租售产品、订单、计费、支付、发票或营销功能。历史迁移保留以校验已有数据库；016 迁移统一初始化标记并停用运营配置及权限，不删除历史业务记录。
+## 常见问题
+
+| 现象 | 优先检查 |
+| --- | --- |
+| 首次启动失败 | `.env` 必填值、owner / 应用口令是否对应、卷是否已被其他部署占用、`migrate` 退出信息 |
+| PXE 页面控制器不可用 | `pxe-services` 日志、`/dev/kvm` / TUN 设备、数据库端口 `DB_PORT` 与 `POSTGRES_PORT` 是否一致 |
+| 获取地址后无法下载系统 | 客户端能否访问 `PXE_HTTP_BASE`、HTTP 端口和 TFTP 数据端口；`default.ipxe` 是否仍引用旧入口 |
+| VM 重启后没进入安装器 | 应从实验室提交 PXE 安装；“从磁盘重启”只启动现有系统；当前 VM 安装回调固定使用宿主 18080 端口，见 VM 指南 |
+| 一直安装中或失败后无法再装 | 查看任务步骤与截止时间、worker 是否运行、是否有清理待确认；物理机须先关机再确认停止 |
+| 任务 / 审计显示容器 IP | 检查实际入口与可信代理配置；更新时使用的环境文件必须一致 |
+| SOL 连接失败 | BMC 协议与权限、`ipmitool`、WebSocket 代理以及 `SOL_ALLOWED_ORIGIN` 是否与浏览器地址一致 |
+| 普通用户看不到机器 | 当前组织 / 项目、组织 / 部门授权及服务器部门归属是否匹配 |
+
+MinIO 用于对象文件，不是 OCI 容器镜像仓库。Compose 管理单宿主机，不提供开箱即用的多机高可用；多节点需要另行设计共享数据库、对象存储、调度和入口。
