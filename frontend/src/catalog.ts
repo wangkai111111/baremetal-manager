@@ -90,9 +90,9 @@ export const sections: Section[] = [
     fields: [
       { ...field('name', '子网名称', true), placeholder: '例如：机房装机网络' },
       { ...field('subnet', '子网 CIDR', true), placeholder: '192.168.10.0/24', help: '填写网络地址；IPv6 可用于 IPAM，当前 PXE 使用 IPv4。' },
-      { ...field('gateway', '默认网关'), placeholder: '192.168.10.1（可留空）', help: '必须是网段内的可用地址，不能落入地址池。' },
+      { ...field('gateway', '默认网关'), placeholder: '192.168.10.1（Relay 模式必填）', help: '随 DHCP 下发的客户端网关，必须属于该子网且在地址池之外；跨网段 PXE 必填。' },
       { ...field('vlan_id', 'VLAN 标签'), type: 'number', min: 1, max: 4094, help: '1–4094；留空表示不打标，登记不会创建网卡或交换机 VLAN。' },
-      { ...field('dns_servers', 'DNS 服务器'), type: 'textarea', placeholder: '192.168.10.1, 223.5.5.5', help: '选填，逗号或换行分隔，最多 8 个 IP；仅记录网络规划。' },
+      { ...field('dns_servers', 'DNS 服务器'), type: 'textarea', placeholder: '192.168.10.1, 223.5.5.5', help: '选填，逗号或换行分隔，最多 8 个 IP；IPv4 地址随 DHCPv4 下发，IPv6 地址仅保留规划记录。' },
       { ...field('dhcp_enabled', '允许 DHCP 装机'), type: 'switch', default: false, help: '允许全局 PXE 服务绑定此子网；实际启停在 PXE 配置中操作。' }
     ],
     columns: ['name', 'subnet', 'gateway', 'vlan_id', 'dns_servers', 'dhcp_enabled', 'created_at']

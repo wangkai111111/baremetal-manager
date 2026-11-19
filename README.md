@@ -148,7 +148,7 @@ docker compose ps
 
 ### PXE 宿主机与内置引导文件
 
-PXE 控制服务通过 Linux 宿主机网络读取真实网卡及其 IPv4 地址，不使用 API 容器的网卡信息。在「PXE 配置」点击「刷新宿主机选项」即可重新获取；网卡切换后 IPv4 联动更新，只有一个匹配地址时自动选择。未启用或没有 IPv4 的网卡不可选，DHCP 地址还须匹配所选子网并位于地址池之外。VLAN 子接口和地址需先在宿主机配置。
+PXE 控制服务通过 Linux 宿主机网络读取真实网卡及其 IPv4 地址，不使用 API 容器的网卡信息。在「PXE 配置」点击「刷新宿主机选项」即可重新获取；网卡切换后 IPv4 联动更新，只有一个匹配地址时自动选择。未启用或没有 IPv4 的网卡不可选，服务器地址不能位于 DHCP 地址池内。「同网段直连」要求网卡与客户端子网相同；「三层 DHCP Relay」允许不同网段，在客户端三层网关配置 Relay 指向 PXE 服务器。子网网关和 IPv4 DNS 随 DHCP 下发，Relay 模式必须填写客户端网关。VLAN、路由和交换机 Relay 需在网络设备上配置，具体示例见 [物理机 PXE 装机测试](./PXE_PHYSICAL_TEST.md)。
 
 后端镜像通过 Debian 的 `ipxe` 软件包提供 BIOS 的 `undionly.kpxe`、`ipxe.pxe`，以及 x86_64 UEFI 的 `ipxe.efi`、`snponly.efi`。控制器首次启动将缺失文件初始化到挂载目录 `/var/lib/tftpboot`；已有文件不会被覆盖。界面按文件实际状态提供 TFTP 根目录、BIOS 和 UEFI 下拉选项，保留已保存的自定义引导文件，并排除越界链接。UEFI 文件不适用于 ARM 或要求签名的 Secure Boot。
 

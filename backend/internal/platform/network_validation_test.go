@@ -125,6 +125,19 @@ func TestNetworkOptionsIntegration(t *testing.T) {
 	request("POST", base+"/ip-pools", pool("198.19.232.1", "198.19.232.20"), 409)
 	request("POST", base+"/ip-pools", pool("198.19.232.200", "198.19.232.255"), 409)
 	poolid := asInt(request("POST", base+"/ip-pools", pool("198.19.232.100", "198.19.232.200"), 200)["id"])
+	// Authoritative subnet parameters replace client-supplied values; DHCPv4 omits IPv6 DNS.
+	cfg := pxeservice.Config{TenantID: project.TenantID, ProjectID: project.ID, NetworkID: netid, PoolID: poolid, DHCPMode: "relay", Interface: "ens33", Server: "192.0.2.23", Root: "/var/lib/tftpboot", BIOS: "undionly.kpxe", EFI: "ipxe.efi", Gateway: "203.0.113.1", DNS: "invalid"}
+	if err := app.validatePXEBinding(context.Background(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Subnet != "198.19.232.0/24" || cfg.Gateway != "198.19.232.1" || cfg.DNS != "223.5.5.5" {
+		t.Fatalf("wrong authoritative DHCP parameters: %+v", cfg)
+	}
+	cfg.DHCPMode = "direct"
+	if err := app.validatePXEBinding(context.Background(), &cfg); err == nil {
+		t.Fatal("direct mode accepted remote server")
+	}
+	cfg.DHCPMode = "relay"
 	pp := fmt.Sprintf("%s/ip-pools/%d", base, poolid)
 	request("POST", base+"/ip-pools", pool("198.19.232.150", "198.19.232.220"), 409)
 	request("PUT", np, map[string]any{"gateway": "198.19.232.100"}, 409)
@@ -132,6 +145,9 @@ func TestNetworkOptionsIntegration(t *testing.T) {
 	request("PUT", pp, map[string]any{"network_id": other}, 409)
 	request("PUT", pp, map[string]any{"name": "renamed-pool", "end_address": "198.19.232.180"}, 200)
 	request("PUT", np, map[string]any{"gateway": nil, "vlan_id": nil, "dns_servers": []any{}}, 200)
+	if err := app.validatePXEBinding(context.Background(), &cfg); err == nil {
+		t.Fatal("relay accepted a subnet without a gateway")
+	}
 	data = request("GET", np, nil, 200)
 	if data["gateway"] != nil || data["vlan_id"] != nil || len(data["dns_servers"].([]any)) != 0 || data["dhcp_enabled"] != true {
 		t.Fatal("optional clear or partial edit failed")
@@ -141,6 +157,9 @@ func TestNetworkOptionsIntegration(t *testing.T) {
 		return pxeservice.Status{DHCP: true, Config: pxeservice.Config{TenantID: project.TenantID, ProjectID: project.ID, NetworkID: netid, PoolID: poolid}}, nil
 	}
 	request("PUT", np, map[string]any{"name": "active-network-name"}, 200)
+	request("PUT", np, map[string]any{"dns_servers": []any{}}, 200)
+	request("PUT", np, map[string]any{"dns_servers": []string{"1.1.1.1"}}, 409)
+	request("PUT", np, map[string]any{"gateway": "198.19.232.1"}, 409)
 	request("PUT", np, map[string]any{"dhcp_enabled": false}, 409)
 	request("PUT", pp, map[string]any{"end_address": "198.19.232.179"}, 409)
 	request("DELETE", pp, nil, 409)

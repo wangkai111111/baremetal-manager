@@ -15,10 +15,10 @@ export function hostInterfaceOptions(interfaces: HostInterface[]): SelectOption[
     label: `${row.name} · ${row.addresses.map(ip => ip.prefix).join(' / ') || '无 IPv4'}${row.up ? '' : ' · 未启用'}`,
     disabled: !row.up || !row.addresses.length }))
 }
-export function hostAddressOptions(iface: HostInterface | undefined, subnet = '', start = '', end = ''): SelectOption[] {
+export function hostAddressOptions(iface: HostInterface | undefined, subnet = '', start = '', end = '', mode = 'direct'): SelectOption[] {
   return (iface?.addresses || []).map(row => {
     let reason = !iface?.up ? '网卡未启用' : ''
-    if (!reason && subnet && row.subnet !== subnet) reason = '与装机子网不匹配'
+    if (!reason && mode !== 'relay' && subnet && row.subnet !== subnet) reason = '与装机子网不匹配'
     const ip = ipv4(row.address), first = ipv4(start), last = ipv4(end)
     if (!reason && ip !== undefined && first !== undefined && last !== undefined && ip >= first && ip <= last) reason = '位于 DHCP 地址池内'
     return {value: row.address, label: `${row.prefix}${reason ? `（${reason}）` : ''}`, disabled: !!reason}

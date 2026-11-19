@@ -31,6 +31,9 @@ type Config struct {
 	Start     string `json:"start"`
 	End       string `json:"end"`
 	Server    string `json:"server"`
+	DHCPMode  string `json:"dhcp_mode"`
+	Gateway   string `json:"gateway"`
+	DNS       string `json:"dns_servers"` // Canonical comma-separated IPv4 addresses; Config stays comparable.
 	Root      string `json:"root"`
 	BIOS      string `json:"bios"`
 	EFI       string `json:"efi"`
@@ -49,7 +52,7 @@ func (c Config) Validate(service string, host bool) error {
 		return errors.New("必须指定有效装机网卡")
 	}
 	ip, err := netip.ParseAddr(c.Server)
-	if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() {
+	if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() {
 		return errors.New("必须指定装机网卡 IPv4 地址")
 	}
 	root := filepath.Clean(c.Root)
@@ -62,11 +65,17 @@ func (c Config) Validate(service string, host bool) error {
 		}
 	}
 	if service == "dhcp" {
+		if c.DHCPMode != "" && c.DHCPMode != "direct" && c.DHCPMode != "relay" {
+			return errors.New("DHCP 模式必须为同网段直连或三层 DHCP Relay")
+		}
 		p, e := netip.ParsePrefix(c.Subnet)
 		start, e1 := netip.ParseAddr(c.Start)
 		end, e2 := netip.ParseAddr(c.End)
-		if e != nil || !p.Addr().Is4() || p.Bits() > 30 || e1 != nil || e2 != nil || !p.Contains(ip) || !p.Contains(start) || !p.Contains(end) || start.Compare(end) > 0 || (ip.Compare(start) >= 0 && ip.Compare(end) <= 0) {
-			return errors.New("网段、服务器与地址池不匹配，或地址池包含服务器地址")
+		if e != nil || !p.Addr().Is4() || p.Bits() == 0 || p.Bits() > 30 || p != p.Masked() || e1 != nil || e2 != nil || !p.Contains(start) || !p.Contains(end) || start.Compare(end) > 0 || (ip.Compare(start) >= 0 && ip.Compare(end) <= 0) {
+			return errors.New("地址池必须位于装机子网内，且不能包含 PXE 服务器地址")
+		}
+		if c.DHCPMode != "relay" && !p.Contains(ip) {
+			return errors.New("同网段直连模式要求服务器属于装机子网；跨网段请使用三层 DHCP Relay 模式")
 		}
 		broadcast := p.Masked().Addr().As4()
 		bits := p.Bits()
@@ -75,6 +84,27 @@ func (c Config) Validate(service string, host bool) error {
 		last := netip.AddrFrom4([4]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)})
 		if start == p.Masked().Addr() || end == last {
 			return errors.New("地址池不能包含网络地址或广播地址")
+		}
+		if c.DHCPMode == "relay" && c.Gateway == "" {
+			return errors.New("三层 DHCP Relay 模式必须在装机子网中配置客户端网关")
+		}
+		if c.Gateway != "" {
+			gateway, err := netip.ParseAddr(c.Gateway)
+			if err != nil || !gateway.Is4() || !gateway.IsGlobalUnicast() || !p.Contains(gateway) || gateway == p.Masked().Addr() || gateway == last || (gateway.Compare(start) >= 0 && gateway.Compare(end) <= 0) {
+				return errors.New("客户端网关必须为装机子网内的可用 IPv4，且位于地址池之外")
+			}
+		}
+		if c.DNS != "" {
+			servers := strings.Split(c.DNS, ",")
+			if len(servers) > 8 {
+				return errors.New("DNS 最多支持 8 个 IPv4 地址")
+			}
+			for _, server := range servers {
+				addr, err := netip.ParseAddr(server)
+				if err != nil || !addr.Is4() || !addr.IsGlobalUnicast() {
+					return errors.New("DHCPv4 DNS 必须为有效 IPv4 地址")
+				}
+			}
 		}
 	}
 	if host {
@@ -91,7 +121,7 @@ func (c Config) Validate(service string, host bool) error {
 			p, e := netip.ParsePrefix(addr.String())
 			if e == nil && p.Addr() == ip {
 				found = true
-				if service == "dhcp" && p.Masked().String() != c.Subnet {
+				if service == "dhcp" && c.DHCPMode != "relay" && p.Masked().String() != c.Subnet {
 					return errors.New("装机网卡实际网段与配置不一致")
 				}
 			}
@@ -134,7 +164,15 @@ func (c Config) Render(service string) string {
 	if c.Interface == TestVMBridge && c.Subnet == "192.168.77.0/24" {
 		base += "dhcp-host=" + TestVMMAC + ",192.168.77.100\n"
 	}
-	return base + fmt.Sprintf("dhcp-range=%s,%s,%s,12h\ndhcp-leasefile=/var/lib/bmm-pxe/dnsmasq.leases\ndhcp-option=3\ndhcp-option=6\ndhcp-match=set:efi,option:client-arch,7\ndhcp-match=set:efi,option:client-arch,9\ndhcp-match=set:ipxe,175\ndhcp-userclass=set:ipxe,iPXE\ndhcp-boot=tag:!ipxe,tag:!efi,%s,,%s\ndhcp-boot=tag:!ipxe,tag:efi,%s,,%s\ndhcp-boot=tag:ipxe,default.ipxe,,%s\n", c.Start, c.End, net.IP(mask).String(), c.BIOS, c.Server, c.EFI, c.Server, c.Server)
+	options := ""
+	for _, option := range []struct{ code, value string }{{"3", c.Gateway}, {"6", c.DNS}} {
+		options += "dhcp-option=" + option.code
+		if option.value != "" {
+			options += "," + option.value
+		}
+		options += "\n"
+	}
+	return base + fmt.Sprintf("dhcp-range=%s,%s,%s,12h\ndhcp-leasefile=/var/lib/bmm-pxe/dnsmasq.leases\n%sdhcp-match=set:efi,option:client-arch,7\ndhcp-match=set:efi,option:client-arch,9\ndhcp-match=set:ipxe,175\ndhcp-userclass=set:ipxe,iPXE\ndhcp-boot=tag:!ipxe,tag:!efi,%s,,%s\ndhcp-boot=tag:!ipxe,tag:efi,%s,,%s\ndhcp-boot=tag:ipxe,default.ipxe,,%s\n", c.Start, c.End, net.IP(mask).String(), options, c.BIOS, c.Server, c.EFI, c.Server, c.Server)
 }
 
 type controller struct {

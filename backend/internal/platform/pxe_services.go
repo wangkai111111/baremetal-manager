@@ -27,10 +27,10 @@ func RunPXEServices(ctx context.Context, db *gorm.DB) error {
 }
 func (a *App) validatePXEBinding(ctx context.Context, cfg *pxeservice.Config) error {
 	var row struct {
-		Subnet, Start, End string
-		DHCPEnabled        bool
+		Subnet, Start, End, Gateway, DNS string
+		DHCPEnabled                      bool
 	}
-	result := a.store.db.WithContext(ctx).Table("networks n").Select("n.subnet::text AS subnet,n.dhcp_enabled,host(p.start_address) AS start,host(p.end_address) AS end").Joins("JOIN ip_pools p ON p.network_id=n.id AND p.tenant_id=n.tenant_id AND p.project_id=n.project_id AND p.deleted_at IS NULL").Where("n.id=? AND n.tenant_id=? AND n.project_id=? AND p.id=? AND n.deleted_at IS NULL", cfg.NetworkID, cfg.TenantID, cfg.ProjectID, cfg.PoolID).Take(&row)
+	result := a.store.db.WithContext(ctx).Table("networks n").Select("n.subnet::text AS subnet,n.dhcp_enabled,host(p.start_address) AS start,host(p.end_address) AS end,COALESCE(host(n.gateway),'') AS gateway,COALESCE(array_to_string(ARRAY(SELECT host(d) FROM unnest(n.dns_servers) AS d WHERE family(d)=4),','),'') AS dns").Joins("JOIN ip_pools p ON p.network_id=n.id AND p.tenant_id=n.tenant_id AND p.project_id=n.project_id AND p.deleted_at IS NULL").Where("n.id=? AND n.tenant_id=? AND n.project_id=? AND p.id=? AND n.deleted_at IS NULL", cfg.NetworkID, cfg.TenantID, cfg.ProjectID, cfg.PoolID).Take(&row)
 	if result.Error != nil {
 		return errors.New("网络与地址池必须属于明确的同一租户/项目")
 	}
@@ -40,6 +40,8 @@ func (a *App) validatePXEBinding(ctx context.Context, cfg *pxeservice.Config) er
 	cfg.Subnet = row.Subnet
 	cfg.Start = row.Start
 	cfg.End = row.End
+	cfg.Gateway = row.Gateway
+	cfg.DNS = row.DNS
 	return cfg.Validate("dhcp", false)
 }
 func (a *App) pxeServices(c *gin.Context) {
@@ -62,6 +64,7 @@ func (a *App) pxeServices(c *gin.Context) {
 		}
 		var validation error
 		if cfg.NetworkID == 0 && cfg.PoolID == 0 && cfg.TenantID == 0 && cfg.ProjectID == 0 {
+			cfg.Subnet, cfg.Start, cfg.End, cfg.Gateway, cfg.DNS, cfg.DHCPMode = "", "", "", "", "", ""
 			validation = cfg.Validate("tftp", false)
 		} else {
 			validation = a.validatePXEBinding(c.Request.Context(), &cfg)

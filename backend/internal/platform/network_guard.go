@@ -33,13 +33,21 @@ func (a *App) guardPXENetworkChange(ctx context.Context, sc scope, r resource, i
 		if err := queryScope(a.store.db.WithContext(ctx), r, sc).Where("id=?", id).Take(&old).Error; err != nil {
 			return err
 		}
-		keys := []string{"subnet", "gateway", "vlan_id", "dhcp_enabled"}
+		keys := []string{"subnet", "gateway", "vlan_id", "dhcp_enabled", "dns_servers"}
 		if r.table == "ip_pools" {
 			keys = []string{"network_id", "start_address", "end_address"}
 		}
 		for _, key := range keys {
 			value, exists := in[key]
 			if !exists {
+				continue
+			}
+			if key == "dns_servers" {
+				var dnsChanged bool
+				if err := queryScope(a.store.db.WithContext(ctx), r, sc).Where("id=?", id).Select("dns_servers IS DISTINCT FROM ?", value).Scan(&dnsChanged).Error; err != nil {
+					return err
+				}
+				changed = changed || dnsChanged
 				continue
 			}
 			before, after := fmt.Sprint(old[key]), fmt.Sprint(value)

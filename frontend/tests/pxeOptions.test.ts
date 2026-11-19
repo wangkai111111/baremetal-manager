@@ -19,6 +19,12 @@ test('switching NIC clears stale IPv4 unless there is exactly one valid choice',
   assert.equal(retainOrChooseAddress([], '192.0.2.2'), '')
   assert.equal(retainOrChooseAddress(hostAddressOptions({...iface, addresses: iface.addresses.slice(2)}), '192.0.2.2'), '198.51.100.2')
 })
+test('DHCP relay accepts a host address outside the client subnet while still excluding pool collisions and down NICs', () => {
+  const options = hostAddressOptions(iface, '192.0.2.0/24', '192.0.2.100', '192.0.2.200', 'relay')
+  assert.deepEqual(options.map(row => row.disabled), [false, true, false])
+  assert.equal(retainOrChooseAddress(options, '198.51.100.2'), '198.51.100.2')
+  assert.equal(hostAddressOptions({...iface, up: false}, '203.0.113.0/24', '', '', 'relay')[0]?.disabled, true)
+})
 test('unusable NICs and missing saved resources are displayed but cannot be selected', () => {
   const options = hostInterfaceOptions([iface, {...iface, name: 'down0', up: false}, {...iface, name: 'empty0', addresses: []}])
   assert.deepEqual(options.map(row => row.disabled), [false, true, true])
