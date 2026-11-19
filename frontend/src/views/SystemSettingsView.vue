@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import {
   NButton,
   NAlert,
+  NCheckbox,
   NInput,
   NInputNumber,
   NForm,
@@ -17,8 +18,6 @@ import {
 } from 'naive-ui'
 import { api, errorText, unwrap, type RecordData } from '../api'
 import { useAuth } from '../stores/auth'
-import { useRouter } from 'vue-router'
-import SettingsCatalog, { type SettingOption } from '../components/SettingsCatalog.vue'
 import {
   applySavedSettings,
   footerText,
@@ -33,17 +32,14 @@ import {
 
 const message = useMessage()
 const auth = useAuth()
-const router = useRouter()
-const catalog = ref<SettingOption[]>([])
 
 // === 设置项分类 ===
-type SettingCategory = 'all' | 'theme' | 'app' | 'operation' | 'features'
+type SettingCategory = 'theme' | 'app' | 'operation'
 
 // === 列表数据状态 ===
 const items = ref<RecordData[]>([])
 const loading = ref(false)
-const saving = ref(false)
-const activeTab = ref<SettingCategory>('all')
+const activeTab = ref<SettingCategory>('theme')
 
 const isAdmin = computed(() => auth.user?.is_platform_admin === true)
 
@@ -81,6 +77,8 @@ const smtpHost = ref('')
 const smtpPort = ref(587)
 const smtpUsername = ref('')
 const smtpPassword = ref('')
+const smtpClearPassword = ref(false)
+const smtpPasswordSaved = computed(() => !!items.value.find(item => item.key === 'smtp.password')?.value)
 const smtpFrom = ref('')
 const smtpTls = ref(true)
 const smtpTestTo = ref('')
@@ -89,7 +87,7 @@ const smtpTestResult = ref('')
 const smtpTestSucceeded = ref(false)
 
 async function testSMTP() {
-  if (!isAdmin.value || smtpTesting.value) return
+  if (!isAdmin.value || smtpTesting.value || loading.value || operationSaving.value || smtpClearPassword.value) return
   smtpTestResult.value = ''
   if (!smtpHost.value.trim() || !smtpPort.value || !smtpFrom.value.trim() || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(smtpTestTo.value.trim())) {
     message.warning('请填写 SMTP 主机、端口、发件人和有效的测试收件邮箱')
@@ -142,6 +140,8 @@ function resetTheme() {
 
 // === 从设置项同步应用配置 ===
 function syncOperation() {
+  smtpPassword.value = ''
+  smtpClearPassword.value = false
   smtpHost.value = String(items.value.find(item => String(item.key) === 'smtp.host')?.value || '')
   smtpPort.value = Number(items.value.find(item => String(item.key) === 'smtp.port')?.value || 587)
   smtpUsername.value = String(items.value.find(item => String(item.key) === 'smtp.username')?.value || '')
@@ -150,13 +150,14 @@ function syncOperation() {
 }
 
 async function saveOperationSettings() {
+  if (!isAdmin.value || operationSaving.value || loading.value) return
   operationSaving.value = true
   try {
     const smtpEntries: Record<string, unknown> = {
       'smtp.host': smtpHost.value,
       'smtp.port': Number(smtpPort.value),
       'smtp.username': smtpUsername.value,
-      ...(smtpPassword.value ? { 'smtp.password': smtpPassword.value } : {}),
+      ...(smtpClearPassword.value ? { 'smtp.password': '' } : smtpPassword.value ? { 'smtp.password': smtpPassword.value } : {}),
       'smtp.from': smtpFrom.value,
       'smtp.tls': smtpTls.value
     }
@@ -184,9 +185,8 @@ function syncApp() {
 async function load() {
   loading.value = true
   try {
-    const data = unwrap<{items: RecordData[]; catalog: SettingOption[]}>(await api.get('/settings'))
+    const data = unwrap<{items: RecordData[]}>(await api.get('/settings'))
     items.value = data.items
-    catalog.value = data.catalog || []
     syncBrand()
     syncTheme()
     syncApp()
@@ -203,17 +203,6 @@ watch(
   () => load(),
   { immediate: true }
 )
-
-async function saveSelectedSettings(values: Record<string, unknown>) {
-  if (!isAdmin.value || saving.value || loading.value) return
-  saving.value = true
-  try {
-    applySavedSettings(unwrap<RecordData>(await api.put('/settings', values)))
-    message.success('所选配置已保存')
-    await load()
-  } catch (e) { message.error(errorText(e)) }
-  finally { saving.value = false }
-}
 
 // === 将图片压缩为 data URL，限制 Logo 体积 ===
 function compressImage(file: File): Promise<string> {
@@ -333,16 +322,8 @@ async function saveAppSettings() {
 
 // === 分类标签 ===
 const tabLabels: Record<SettingCategory, string> = {
-  all: '全部可用配置', theme: '主题设置', app: '应用设置', operation: '邮件通知', features: '功能配置入口'
+  theme: '主题设置', app: '应用设置', operation: '邮件通知'
 }
-const features = [
-  {name:'告警规则', description:'选择监控指标、健康等级或失败次数、设备标签范围及通知渠道。', path:'/alert-rules'},
-  {name:'推送渠道', description:'按邮件、企业微信、钉钉、飞书或 Webhook 类型配置接收目标。', path:'/alert-channels'},
-  {name:'PXE 装机服务', description:'选择宿主机网卡、子网、地址池、引导文件及标签固定 IP 规则。', path:'/pxe-config'},
-  {name:'BMC、硬件监控与 SOL', description:'在服务器中编辑 BMC 地址与凭据，打开服务器详情调整自动监控开关或使用 SOL。', path:'/assets'},
-  {name:'子网与地址池', description:'设置实际装机子网、网关、DNS 和可分配地址范围。', path:'/subnets'},
-  {name:'维保与资产折旧', description:'在服务器维保和折旧页面设置采购、供应商、维保到期及折旧参数。', path:'/asset-depreciation'}
-]
 </script>
 
 <template>
@@ -351,7 +332,7 @@ const features = [
       <div>
         <div class="eyebrow dark">ADMINISTRATION / SYSTEM SETTINGS</div>
         <h1>系统设置</h1>
-        <p>平台参数与集成配置（仅管理员可修改）</p>
+        <p>直接修改平台外观、应用显示和邮件通知，保存后生效</p>
       </div>
     </div>
     <div class="panel">
@@ -370,8 +351,7 @@ const features = [
       </div>
 
       <!-- 主题设置：平台品牌 + 侧边栏配色 -->
-      <SettingsCatalog v-if="activeTab === 'all'" :options="catalog" :items="items" :disabled="loading || !isAdmin" :saving="saving" @save="saveSelectedSettings" />
-      <div v-else-if="activeTab === 'theme'" class="theme-settings">
+      <div v-if="activeTab === 'theme'" class="theme-settings">
         <section class="settings-section">
           <div class="settings-section-head">
             <h3>平台品牌</h3>
@@ -452,8 +432,8 @@ const features = [
 
         <section class="settings-section">
           <div class="settings-section-head">
-            <h3>侧边栏配色</h3>
-            <p>导航栏背景色与文字颜色，保存后立即生效</p>
+            <h3>导航栏配色</h3>
+            <p>同时应用于顶部和侧边导航，保存后立即生效</p>
           </div>
           <div class="theme-form">
             <n-form label-placement="top">
@@ -494,20 +474,55 @@ const features = [
 
       <!-- 邮件通知配置 -->
       <div v-else-if="activeTab === 'operation'" class="theme-settings operation-settings">
-        <section class="operation-card identity-card"><div class="operation-card-head"><div><h3>邮件通知</h3><p>配置系统通知使用的 SMTP 发信通道。</p></div></div>
-          <div class="smtp-block"><div class="subsection-label">SMTP 发信配置</div><n-form label-placement="top" class="smtp-form">
-            <n-form-item label="SMTP 主机"><n-input v-model:value="smtpHost" :disabled="!isAdmin" placeholder="smtp.example.com" /></n-form-item><n-form-item label="SMTP 端口"><n-input-number v-model:value="smtpPort" :disabled="!isAdmin" :min="1" :max="65535" /></n-form-item>
-            <n-form-item label="SMTP 用户名"><n-input v-model:value="smtpUsername" :disabled="!isAdmin" placeholder="mailer@example.com" /></n-form-item><n-form-item label="SMTP 密码"><n-input v-model:value="smtpPassword" type="password" show-password-on="click" :disabled="!isAdmin" placeholder="留空表示保持原密码" /></n-form-item>
-            <n-form-item label="发件人地址"><n-input v-model:value="smtpFrom" :disabled="!isAdmin" placeholder="noreply@example.com" /></n-form-item><n-form-item label="传输加密 TLS"><n-switch v-model:value="smtpTls" :disabled="!isAdmin" /></n-form-item>
-          </n-form>
-          <div class="smtp-test-panel">
-            <n-form-item label="测试收件邮箱" label-placement="top"><n-input v-model:value="smtpTestTo" :disabled="!isAdmin || smtpTesting" placeholder="输入用于接收测试邮件的邮箱" /></n-form-item>
-            <n-button :disabled="!isAdmin" :loading="smtpTesting" @click="testSMTP">发送测试邮件</n-button>
-            <p>使用当前表单配置发送，不会自动保存；密码留空时使用已保存的密码。认证发信需启用 TLS。</p>
-            <n-alert v-if="smtpTestResult" :type="smtpTestSucceeded ? 'success' : 'error'" role="status">{{ smtpTestResult }}</n-alert>
-          </div></div>
+        <section class="operation-card identity-card">
+          <div class="operation-card-head">
+            <div><h3>邮件通知</h3><p>填写系统通知使用的 SMTP 发信配置，在本页直接保存。</p></div>
+          </div>
+          <div class="smtp-block">
+            <n-form label-placement="top" class="smtp-form" :disabled="!isAdmin || loading || operationSaving || smtpTesting">
+              <n-form-item label="SMTP 主机">
+                <n-input v-model:value="smtpHost" placeholder="smtp.example.com" />
+              </n-form-item>
+              <n-form-item label="SMTP 端口">
+                <n-input-number v-model:value="smtpPort" :min="1" :max="65535" :precision="0" />
+              </n-form-item>
+              <n-form-item label="SMTP 用户名">
+                <n-input v-model:value="smtpUsername" placeholder="无账号认证的邮件中继可留空" />
+              </n-form-item>
+              <n-form-item label="SMTP 密码">
+                <div class="smtp-password-field">
+                  <n-input v-model:value="smtpPassword" type="password" show-password-on="click" :disabled="!isAdmin || loading || operationSaving || smtpTesting || smtpClearPassword" placeholder="留空保留已保存的密码" :input-props="{ autocomplete: 'new-password' }" />
+                  <div class="smtp-password-actions">
+                    <span>{{ smtpPasswordSaved ? '已保存密码' : '尚未设置密码' }}</span>
+                    <n-checkbox v-model:checked="smtpClearPassword" :disabled="!isAdmin || loading || operationSaving || smtpTesting">清除已保存密码</n-checkbox>
+                  </div>
+                </div>
+              </n-form-item>
+              <n-form-item label="发件人地址">
+                <n-input v-model:value="smtpFrom" placeholder="noreply@example.com" />
+              </n-form-item>
+              <n-form-item label="传输加密 TLS">
+                <n-switch v-model:value="smtpTls" />
+              </n-form-item>
+            </n-form>
+            <p class="smtp-hint">587 等端口启用 STARTTLS；465 端口始终使用直接 TLS。认证发信必须加密。</p>
+            <div class="smtp-test-panel">
+              <n-form-item label="测试收件邮箱" label-placement="top">
+                <n-input v-model:value="smtpTestTo" :disabled="!isAdmin || loading || operationSaving || smtpTesting" placeholder="输入用于接收测试邮件的邮箱" />
+              </n-form-item>
+              <n-button :disabled="!isAdmin || loading || operationSaving || smtpClearPassword" :loading="smtpTesting" @click="testSMTP">发送测试邮件</n-button>
+              <p>{{ smtpClearPassword ? '清除密码后，请先保存配置再测试。' : '使用当前表单配置发送，不会自动保存；密码留空时使用已保存的密码。' }}</p>
+              <n-alert v-if="smtpTestResult" :type="smtpTestSucceeded ? 'success' : 'error'" role="status">{{ smtpTestResult }}</n-alert>
+            </div>
+          </div>
         </section>
-        <div class="operation-savebar"><div><span class="savebar-mark" />保存 SMTP 发信配置</div><div class="operation-actions"><n-button quaternary @click="syncOperation">重置</n-button><n-button v-if="isAdmin" type="primary" :loading="operationSaving" @click="saveOperationSettings">保存设置</n-button></div></div>
+        <div class="operation-savebar">
+          <div>保存 SMTP 发信配置</div>
+          <div class="operation-actions">
+            <n-button quaternary :disabled="loading || operationSaving || smtpTesting" @click="syncOperation">重置</n-button>
+            <n-button v-if="isAdmin" type="primary" :disabled="loading || smtpTesting" :loading="operationSaving" @click="saveOperationSettings">保存邮件设置</n-button>
+          </div>
+        </div>
       </div>
 
       <!-- 应用设置：侧边栏底部文案、登录页公告等 -->
@@ -547,18 +562,16 @@ const features = [
         </div>
       </div>
 
-      <section v-else class="feature-settings">
-        <n-alert type="info" :bordered="false">以下功能都有独立的设置界面，点击即可选择配置，无需输入配置项名称。</n-alert>
-        <div class="feature-grid"><article v-for="feature in features" :key="feature.path"><h3>{{ feature.name }}</h3><p>{{ feature.description }}</p><n-button @click="router.push(feature.path)">前往配置</n-button></article></div>
-      </section>
+
     </div>
   </div>
 </template>
 
 <style scoped>
-.feature-settings { padding:24px; }.feature-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:20px; }.feature-grid article { border:1px solid var(--color-border); border-radius:var(--radius-sm); padding:20px; }.feature-grid h3 { margin:0; font-size:16px; }.feature-grid p { color:var(--color-text-secondary); font-size:13px; line-height:1.7; min-height:44px; }@media(max-width:700px) { .feature-grid { grid-template-columns:minmax(0,1fr); }.feature-settings { padding:16px; } }
-
-.operation-settings { background: #f6f8f9; padding: 28px; color: #1f3038; }.subsection-label { color:#74838a; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.operation-card-head p { margin:0; color:#74838a; font-size:13px; }.savebar-mark { width:7px; height:7px; display:inline-block; border-radius:50%; background:#d49644; }.operation-card { background:#fff; border:1px solid #dfe6e8; border-radius:4px; padding:24px; margin-bottom:16px; box-shadow:0 4px 14px rgba(31,48,56,.035); }.operation-card-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:22px; }.operation-card-head > div { display:flex; gap:14px; align-items:flex-start; }.operation-card h3 { margin:0 0 5px; font-size:17px; }.smtp-block { border-top:1px solid #edf0f1; padding-top:18px; margin-top:10px; }.subsection-label { margin-bottom:14px; }.subsection-label span { color:#a2adb1; letter-spacing:0; text-transform:none; font-weight:400; }.smtp-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:18px; }.smtp-form :deep(.n-form-item) { margin-bottom:16px; }.smtp-form :deep(.n-input-number) { width:100%; }.operation-savebar { display:flex; justify-content:space-between; align-items:center; padding:15px 4px 2px; color:#75848a; font-size:12px; }.operation-savebar > div:first-child { display:flex; align-items:center; gap:8px; }.operation-actions { display:flex; gap:10px; }
+.smtp-password-field { width:100%; }
+.smtp-password-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin-top:8px; font-size:12px; color:var(--color-text-secondary); }
+.smtp-hint { color:var(--color-text-secondary); font-size:12px; line-height:1.7; margin:0 0 20px; }
+.operation-settings { background: #f6f8f9; padding: 28px; color: #1f3038; }.subsection-label { color:#74838a; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.operation-card-head p { margin:0; color:#74838a; font-size:13px; }.savebar-mark { width:7px; height:7px; display:inline-block; border-radius:50%; background:#d49644; }.operation-card { background:#fff; border:1px solid #dfe6e8; border-radius:4px; padding:24px; margin-bottom:16px; box-shadow:0 4px 14px rgba(31,48,56,.035); }.operation-card-head { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:22px; }.operation-card-head > div { min-width:0; }.operation-card h3 { margin:0 0 5px; font-size:17px; }.smtp-block { border-top:1px solid #edf0f1; padding-top:18px; margin-top:10px; }.subsection-label { margin-bottom:14px; }.subsection-label span { color:#a2adb1; letter-spacing:0; text-transform:none; font-weight:400; }.smtp-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:18px; }.smtp-form :deep(.n-form-item) { margin-bottom:16px; }.smtp-form :deep(.n-input-number) { width:100%; }.operation-savebar { display:flex; justify-content:space-between; align-items:center; padding:15px 4px 2px; color:#75848a; font-size:12px; }.operation-savebar > div:first-child { display:flex; align-items:center; gap:8px; }.operation-actions { display:flex; gap:10px; }
 @media (min-width: 1050px) {.operation-settings { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }.operation-savebar,.identity-card { grid-column:1/-1; } }.smtp-test-panel { border-top: 1px solid #e4e9ed; padding-top: 18px; }.smtp-test-panel > p { color: #64748b; font-size: 12px; line-height: 1.7; margin: 12px 0; }
 @media (max-width: 680px) {.operation-settings { padding:18px 14px; }.operation-card { padding:18px 16px; }.smtp-form { grid-template-columns:1fr; }.operation-savebar { align-items:flex-start; gap:14px; flex-direction:column; } }
 </style>
